@@ -1,0 +1,12 @@
+{
+  "project": "ghost-trio",
+  "status": "offline",
+  "phase": "observing",
+  "repo": "/home/admin/lab/src/ghost",
+  "runLog": "/home/admin/lab/src/ghost/RUN_LOG.md",
+  "runScript": "/home/admin/lab/src/ghost/snapshot.sh",
+  "runCount": 1,
+  "lastRun": "2026-04-11",
+  "lastRunType": "RESEARCH",
+  "notes": "No convergences in past 24h (0 total). Offline: ghost, whisper, oracle, convergence."
+}

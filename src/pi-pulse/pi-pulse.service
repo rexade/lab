@@ -1,0 +1,18 @@
+[Unit]
+Description=Pi Pulse — device console dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/lab/src/pi-pulse
+ExecStart=/bin/bash /home/admin/lab/src/pi-pulse/start.sh
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pi-pulse
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

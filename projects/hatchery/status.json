@@ -1,0 +1,13 @@
+{
+  "project": "hatchery",
+  "phase": "hatching",
+  "repo": "/home/admin/hatchery",
+  "runLog": "/home/admin/hatchery/RUN_LOG.md",
+  "runScript": "/home/admin/run-hatchery.sh",
+  "runCount": 0,
+  "lastRun": null,
+  "lastRunType": null,
+  "model": "gemma4:e4b",
+  "notes": "Visual artifact generator. Creates small interactive HTML experiences.",
+  "gallery": "http://localhost:8088"
+}

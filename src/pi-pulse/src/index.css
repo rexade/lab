@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Register accent variables as typed CSS properties so transitions interpolate smoothly */
+@property --accent {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #22d3ee;
+}
+
+@property --accent-dim {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgba(34, 211, 238, 0.12);
+}
+
+@property --accent-glow {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: rgba(34, 211, 238, 0.35);
+}
+
+:root {
+  --accent: #22d3ee;
+  --accent-dim: rgba(34, 211, 238, 0.12);
+  --accent-glow: rgba(34, 211, 238, 0.35);
+  --bg: #080808;
+  --surface: #0f0f0f;
+  --surface2: #161616;
+  --border: rgba(255, 255, 255, 0.07);
+  --text: #f1f5f9;
+  --muted: #475569;
+  /* Smooth ambient mode transitions — registered @property enables color interpolation */
+  transition: --accent 0.8s ease, --accent-dim 0.8s ease, --accent-glow 0.8s ease;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+/* Glow text utility */
+.glow-text {
+  text-shadow: 0 0 20px var(--accent-glow);
+}
+
+/* Panel surface */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+
+/* Accent border glow — uses var(--accent) so it shifts with ambient color mode */
+.border-accent-glow {
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent) inset,
+              0 4px 24px rgba(0, 0, 0, 0.5);
+  transition: border-color 0.6s ease, box-shadow 0.6s ease;
+}
+
+/* Number display */
+.mono {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Smooth all transitions */
+* { transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }

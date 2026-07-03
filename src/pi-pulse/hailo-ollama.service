@@ -1,0 +1,17 @@
+[Unit]
+Description=hailo-ollama — local LLM inference on Hailo AI HAT+
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+ExecStart=/usr/bin/hailo-ollama serve
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hailo-ollama
+Environment=HOME=/home/admin
+
+[Install]
+WantedBy=multi-user.target
