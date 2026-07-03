@@ -6,6 +6,9 @@ The quartet (src/ghost/) is dormant — 5 standalone JS files, ports 3032–3036
 ## server.js: replace hardcoded 'race-whisperer-predict' fallback strings
 `loadMountedProject()` in `server.js` has hardcoded fallback values (`name: 'race-whisperer-predict'`, `dir: '/home/admin/race-whisperer-predict'`, etc.) that fire when `mounted.json` is missing or malformed. The silent-catch was fixed on 2026-07-03 (now logs `console.error`), but the fallback still steers a broken config at race-whisperer. Better fallback: throw and let systemd surface it, OR fall back to a minimal safe stub that clearly identifies as a config-error state. Not urgent — the console.error already makes the failure visible.
 
+## Surface auto-run staleness in ProjectPanel
+`GET /api/child/schedule` now returns `autoRunsSinceHuman` — increments on every scheduled auto-fire, resets when a human triggers a run or edits the schedule. Surface it in ProjectPanel once it crosses a threshold (e.g. a subtle amber "12 unattended runs" chip near the schedule control) so a week of auto-firing can't accumulate slop invisibly. Server work is done (2026-07-03); this is UI-only, taste-profile rules apply.
+
 Ideas worth revisiting. Add to this over time.
 
 ---

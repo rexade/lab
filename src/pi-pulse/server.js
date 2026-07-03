@@ -457,7 +457,7 @@ const childRunClients = new Set()
 // ─── Incubator auto-schedule ───────────────────────────────────────────────────
 
 const SCHEDULE_PATH = '/home/admin/lab/projects/schedule.json'
-let scheduleState = { enabled: false, intervalHours: 2, nextRunAt: null, lastScheduledRun: null }
+let scheduleState = { enabled: false, intervalHours: 2, nextRunAt: null, lastScheduledRun: null, autoRunsSinceHuman: 0 }
 
 try {
   const raw = fs.readFileSync(SCHEDULE_PATH, 'utf8')
@@ -487,6 +487,7 @@ setInterval(() => {
   activeChildRun = { pid: child.pid, startTime: Date.now() }
   scheduleState.lastScheduledRun = new Date().toISOString()
   scheduleState.nextRunAt = Date.now() + scheduleState.intervalHours * 60 * 60 * 1000
+  scheduleState.autoRunsSinceHuman = (scheduleState.autoRunsSinceHuman || 0) + 1
   saveSchedule()
 }, 60 * 1000)
 
@@ -537,6 +538,8 @@ app.post('/api/child/run', (req, res) => {
   const child = spawn('bash', [CHILD_RUN_SCRIPT], { detached: true, stdio: 'ignore' })
   child.unref()
   activeChildRun = { pid: child.pid, startTime: Date.now() }
+  scheduleState.autoRunsSinceHuman = 0
+  saveSchedule()
   res.json({ ok: true, pid: child.pid })
 })
 
@@ -565,6 +568,7 @@ app.post('/api/child/schedule', (req, res) => {
   } else {
     scheduleState.nextRunAt = null
   }
+  scheduleState.autoRunsSinceHuman = 0
   saveSchedule()
   res.json({ ok: true, ...scheduleState })
 })
@@ -581,15 +585,18 @@ app.get('/api/child/runs/stream', (req, res) => {
   req.on('close', () => { childRunClients.delete(res); clearInterval(heartbeat) })
 })
 
+// Watch the parent directory, not the file: a file watch silently dies when a
+// tool replaces the file via rename (new inode), and never fires if the log
+// doesn't exist yet. Directory watch survives both.
 try {
-  fs.watch(CHILD_LOG_PATH, { persistent: false }, (eventType) => {
-    if (eventType === 'change') {
-      for (const client of childRunClients) {
-        try { client.write('data: update\n\n') } catch { childRunClients.delete(client) }
-      }
+  const childLogName = CHILD_LOG_PATH.split('/').pop()
+  fs.watch(dirname(CHILD_LOG_PATH), { persistent: false }, (eventType, filename) => {
+    if (filename && filename !== childLogName) return
+    for (const client of childRunClients) {
+      try { client.write('data: update\n\n') } catch { childRunClients.delete(client) }
     }
   })
-} catch { /* log may not exist yet */ }
+} catch { /* parent dir may not exist yet */ }
 
 // AI analysis for mounted child project
 const CHILD_FEEDBACK_JSON = join(CHILD_DIR, 'memory', 'DRIFT_FEEDBACK.json')
@@ -875,16 +882,18 @@ app.post('/api/reboot', (req, res) => {
 
 // SSE — push 'update' to all connected clients whenever RUN_LOG.md changes
 const runClients = new Set()
+// Directory watch instead of file watch — survives rename-replace (new inode)
+// and a log that doesn't exist yet. Filter to RUN_LOG.md so the rest of the
+// lab dir's churn (MEMORY_BRIEF.md, ACTIVE_THREADS.md, …) doesn't spam clients.
 try {
-  fs.watch(RUN_LOG_PATH, { persistent: false }, (eventType) => {
-    if (eventType === 'change') {
-      syncProjectStatus()
-      for (const client of runClients) {
-        try { client.write('data: update\n\n') } catch { runClients.delete(client) }
-      }
+  fs.watch(dirname(RUN_LOG_PATH), { persistent: false }, (eventType, filename) => {
+    if (filename && filename !== 'RUN_LOG.md') return
+    syncProjectStatus()
+    for (const client of runClients) {
+      try { client.write('data: update\n\n') } catch { runClients.delete(client) }
     }
   })
-} catch { /* file may not exist on first boot */ }
+} catch { /* lab dir missing would be fatal elsewhere anyway */ }
 
 app.get('/api/runs/stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream')
