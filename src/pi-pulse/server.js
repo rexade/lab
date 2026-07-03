@@ -430,8 +430,8 @@ function loadMountedProject() {
       logPath:       cfg.runLog,
       runScript:     cfg.runScript,
     }
-  } catch {
-    // Fallback: race-whisperer-predict hardcoded paths
+  } catch (err) {
+    console.error('[incubator] mounted.json load failed, using race-whisperer fallback:', err.message)
     const dir = '/home/admin/race-whisperer-predict'
     return {
       name:          'race-whisperer-predict',
