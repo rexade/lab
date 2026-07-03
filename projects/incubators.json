@@ -1,0 +1,27 @@
+{
+  "slots": [
+    {
+      "id": "taste-trainer",
+      "type": "project",
+      "statusPath": "/home/admin/lab/projects/taste-trainer/status.json",
+      "enabled": false,
+      "intervalHours": 0.5,
+      "nextRunAt": null,
+      "lastScheduledRun": null,
+      "autoRunsSinceHuman": 0,
+      "charges": null,
+      "runner": "codex"
+    },
+    {
+      "id": "race-whisperer-predict",
+      "type": "project",
+      "statusPath": "/home/admin/lab/projects/race-whisperer-predict/status.json",
+      "enabled": false,
+      "intervalHours": 1,
+      "nextRunAt": null,
+      "lastScheduledRun": null,
+      "autoRunsSinceHuman": 0,
+      "charges": null
+    }
+  ]
+}

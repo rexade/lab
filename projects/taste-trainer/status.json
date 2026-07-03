@@ -1,0 +1,24 @@
+{
+  "project": "taste-trainer",
+  "status": "active",
+  "phase": "personal-lab-tool",
+  "runner": "codex",
+  "repo": "/home/admin/taste-trainer",
+  "runLog": "/home/admin/taste-trainer/reports/RUN_LOG.md",
+  "recentRuns": "/home/admin/taste-trainer/reports/RECENT_RUNS.md",
+  "runScript": "/home/admin/lab/scripts/run-codex-incubator.sh",
+  "promptDir": "/home/admin/taste-trainer/prompts",
+  "runTypes": [
+    "mutate",
+    "research",
+    "mutate"
+  ],
+  "runCount": 7,
+  "lastRun": "2026-07-03",
+  "lastRunType": "MUTATE",
+  "current_focus": "Train incubator taste with best-of-3 choices, lightweight taste labels, and an evidence-weighted profile for future prompts.",
+  "next_run_goal": "Add import/export for the local comparison archive so taste evidence can move between browsers and machines.",
+  "notes": "Replaces the Rat Deposit incubator slot. Keep it local, dark, minimal, and useful as prompt context.",
+  "codexBypass": true,
+  "lastRunStatus": "ok"
+}

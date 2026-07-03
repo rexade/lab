@@ -11,14 +11,19 @@ const TYPE_COLOR = {
   RESEARCH:  '#34d399',
   INTEGRATE: '#fb923c',
   VOICE:     '#fbbf24',
+  FAILED:    '#f87171',
 }
 const TYPE_DOT_COLOR = type => TYPE_COLOR[type] ?? 'rgba(255,255,255,0.3)'
+
+function runAttemptText(run) {
+  return run.attemptTotal > 1 && run.attempt ? ` · attempt ${run.attempt}/${run.attemptTotal}` : ''
+}
 
 // ─── Timeline ────────────────────────────────────────────────────────────────
 
 function TimelineEntry({ run, index, isLast }) {
   const color = TYPE_DOT_COLOR(run.type)
-  const what = run['What I built'] || run['What I changed'] || run['What I investigated'] || run['What happened'] || '—'
+  const what = run['Failure'] || run['Error'] || run['What I built'] || run['What I changed'] || run['What changed'] || run['What I investigated'] || run['Finding'] || run['What happened'] || '—'
 
   return (
     <motion.div
@@ -66,7 +71,7 @@ function TimelineEntry({ run, index, isLast }) {
             {run.type ?? 'run'}
           </span>
           <span className="text-xs" style={{ color: 'rgba(71,85,105,0.6)', fontSize: '0.65rem' }}>
-            {run.num ? `#${run.num}` : ''} {run.date ?? ''}
+            {run.num ? `#${run.num}` : ''} {run.date ?? ''}{runAttemptText(run)}
           </span>
         </div>
         <p
@@ -82,7 +87,7 @@ function TimelineEntry({ run, index, isLast }) {
 
 // ─── Run type chips — compact type:count per run type ────────────────────────
 
-const TYPE_ORDER = ['CREATE', 'MUTATE', 'RESEARCH', 'INTEGRATE']
+const TYPE_ORDER = ['CREATE', 'MUTATE', 'RESEARCH', 'INTEGRATE', 'FAILED']
 
 function RunTypeChips({ runs }) {
   const counts = useMemo(() => {
@@ -270,79 +275,6 @@ function LogModal({ content, onClose }) {
         </div>
       </motion.div>
     </motion.div>
-  )
-}
-
-// ─── Hero Run Lab button ──────────────────────────────────────────────────────
-
-function HeroButton({ onClick, loading, lastResult, runInFlight, runElapsed }) {
-  return (
-    <motion.button
-      whileHover={{ scale: 1.015 }}
-      whileTap={{ scale: 0.975 }}
-      onClick={onClick}
-      disabled={loading}
-      style={{
-        width: '100%',
-        padding: '14px 20px',
-        borderRadius: 12,
-        border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
-        background: 'color-mix(in srgb, var(--accent) 10%, transparent)',
-        boxShadow: loading ? 'none' : runInFlight
-          ? '0 0 32px color-mix(in srgb, var(--accent) 30%, transparent)'
-          : '0 0 20px color-mix(in srgb, var(--accent) 18%, transparent)',
-        cursor: loading ? 'not-allowed' : 'pointer',
-        display: 'flex', alignItems: 'center', gap: 12,
-        transition: 'all 0.25s ease',
-        opacity: loading ? 0.75 : 1,
-      }}
-    >
-      <div
-        style={{
-          width: 32, height: 32, borderRadius: 8, flexShrink: 0,
-          background: 'color-mix(in srgb, var(--accent) 18%, transparent)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          color: 'var(--accent)',
-        }}
-      >
-        {loading || runInFlight ? (
-          <motion.div
-            animate={{ rotate: 360 }}
-            transition={{ duration: runInFlight ? 2.4 : 0.9, repeat: Infinity, ease: 'linear' }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path d="M21 12a9 9 0 11-6.219-8.56" strokeLinecap="round" />
-            </svg>
-          </motion.div>
-        ) : (
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3" />
-          </svg>
-        )}
-      </div>
-      <div style={{ textAlign: 'left' }}>
-        <div style={{ fontSize: '0.875rem', fontWeight: 600, color: 'var(--accent)', letterSpacing: '0.04em' }}>
-          {loading ? 'STARTING…' : 'RUN LAB'}
-        </div>
-        <div style={{ fontSize: '0.7rem', color: 'rgba(71,85,105,0.8)', marginTop: 1, display: 'flex', alignItems: 'center', gap: 5 }}>
-          {runInFlight ? (
-            <>
-              <motion.span
-                animate={{ opacity: [1, 0.35, 1] }}
-                transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }}
-                style={{
-                  display: 'inline-block', width: 5, height: 5, borderRadius: '50%',
-                  background: 'var(--accent)', boxShadow: '0 0 5px var(--accent-glow)', flexShrink: 0,
-                }}
-              />
-              <span>lab session running{runElapsed > 0 ? ` · ${fmtElapsed(runElapsed)}` : ''}</span>
-            </>
-          ) : (
-            lastResult ?? 'Trigger a new build session'
-          )}
-        </div>
-      </div>
-    </motion.button>
   )
 }
 
@@ -717,13 +649,7 @@ function fmtAgo(ts) {
 
 export function BottomPanel({ stats }) {
   const [runs, refreshRuns] = useRuns()
-  const [runLoading, setRunLoading] = useState(false)
-  const [lastRunResult, setLastRunResult] = useState(null)
   const [logContent, setLogContent] = useState(null)
-  const [runInFlight, setRunInFlight] = useState(false)
-  const [runElapsed, setRunElapsed] = useState(0)
-  const runStartTimeRef = useRef(null)
-  const inFlightBaseNumRef = useRef(null)
 
   // Narrator — latest VOICE entry from /api/narration
   const [latestNarration, setLatestNarration] = useState(null)
@@ -765,72 +691,7 @@ export function BottomPanel({ stats }) {
     prevRunCountRef.current = runs.length
   }, [runs.length])
 
-  // Clear in-flight state when a new run appears in the log
-  useEffect(() => {
-    if (!runInFlight) return
-    const latestNum = runs.at(-1)?.num ?? 0
-    if (latestNum > (inFlightBaseNumRef.current ?? 0)) {
-      setRunInFlight(false)
-      runStartTimeRef.current = null
-    }
-  }, [runs, runInFlight])
-
-  // Tick elapsed time every second while a run is in flight
-  useEffect(() => {
-    if (!runInFlight) { setRunElapsed(0); return }
-    const id = setInterval(() => {
-      if (runStartTimeRef.current) {
-        setRunElapsed(Math.floor((Date.now() - runStartTimeRef.current) / 1000))
-      }
-    }, 1000)
-    return () => clearInterval(id)
-  }, [runInFlight])
-
-  // Poll /api/run/status every 5s while in flight — clears runInFlight if process exits
-  useEffect(() => {
-    if (!runInFlight) return
-    const id = setInterval(async () => {
-      try {
-        const r = await fetch('/api/run/status')
-        const data = await r.json()
-        if (!data.running) {
-          setRunInFlight(false)
-          runStartTimeRef.current = null
-          // If the log didn't update yet, show a completed message
-          const latestNum = runs.at(-1)?.num ?? 0
-          if (latestNum <= (inFlightBaseNumRef.current ?? 0)) {
-            setLastRunResult(`Run complete · waiting for log`)
-          }
-        }
-      } catch { /* network error — don't clear, wait for next poll */ }
-    }, 5000)
-    return () => clearInterval(id)
-  }, [runInFlight]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleRunLab = async () => {
-    setRunLoading(true)
-    try {
-      const res = await fetch('/api/run', { method: 'POST' })
-      const data = await res.json()
-      if (data.ok) {
-        inFlightBaseNumRef.current = runs.at(-1)?.num ?? 0
-        runStartTimeRef.current = Date.now()
-        setRunElapsed(0)
-        setRunInFlight(true)
-        setLastRunResult(`Started · pid ${data.pid}`)
-      } else {
-        setLastRunResult(`Error: ${data.error}`)
-      }
-      refreshRuns()
-    } catch {
-      setLastRunResult('Connection error')
-    } finally {
-      setTimeout(() => setRunLoading(false), 900)
-    }
-  }
-
   const displayRuns = runs.slice(-4).reverse()
-  const latestRun = runs.at(-1)
 
   return (
     <motion.div
@@ -854,10 +715,10 @@ export function BottomPanel({ stats }) {
             <span
               className="text-xs uppercase tracking-widest font-medium"
               style={{
-                color: runInFlight ? 'var(--accent)' : 'var(--muted)',
+                color: 'var(--muted)',
                 letterSpacing: '0.14em', fontSize: '0.65rem',
                 transition: 'color 0.5s ease',
-                textShadow: runInFlight ? '0 0 14px var(--accent-glow)' : 'none',
+                textShadow: 'none',
               }}
             >
               Event Log
@@ -866,19 +727,16 @@ export function BottomPanel({ stats }) {
               <RunTypeChips runs={runs} />
               {/* Live stream dot — pulses faintly at rest, glows accent when a run is in flight */}
               <motion.div
-                animate={runInFlight
-                  ? { opacity: [1, 0.45, 1] }
-                  : { opacity: [0.35, 0.12, 0.35] }
-                }
+                animate={{ opacity: [0.35, 0.12, 0.35] }}
                 transition={{
-                  duration: runInFlight ? 1.2 : 2.8,
+                  duration: 2.8,
                   repeat: Infinity,
                   ease: 'easeInOut',
                 }}
                 style={{
                   width: 5, height: 5, borderRadius: '50%', flexShrink: 0,
-                  background: runInFlight ? 'var(--accent)' : 'rgba(71,85,105,0.7)',
-                  boxShadow: runInFlight ? '0 0 6px var(--accent-glow)' : 'none',
+                  background: 'rgba(71,85,105,0.7)',
+                  boxShadow: 'none',
                   transition: 'background 0.5s ease, box-shadow 0.5s ease',
                 }}
               />
@@ -914,7 +772,7 @@ export function BottomPanel({ stats }) {
                 >
                   {displayRuns.map((run, i) => (
                     <TimelineEntry
-                      key={run.num ?? i}
+                      key={run.signature || `${run.num ?? 'run'}-${run.date ?? ''}-${run.type ?? ''}-${run.attempt || i}`}
                       run={run}
                       index={i}
                       isLast={i === displayRuns.length - 1}
@@ -947,17 +805,16 @@ export function BottomPanel({ stats }) {
           style={{ padding: '22px 22px 20px' }}
           className="max-md:border-t max-md:pt-5"
         >
-          {/* Hero Run Lab button */}
-          <HeroButton
-            onClick={handleRunLab}
-            loading={runLoading}
-            runInFlight={runInFlight}
-            runElapsed={runElapsed}
-            lastResult={lastRunResult ?? (latestRun ? `Run #${latestRun.num} · ${latestRun.type}` : null)}
-          />
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.14em', color: 'var(--muted)' }}>
+              System Tools
+            </div>
+            <div style={{ marginTop: 4, fontSize: '0.72rem', color: 'rgba(148,163,184,0.58)', lineHeight: 1.35 }}>
+              Host runs now live in the Core Incubator.
+            </div>
+          </div>
 
-          {/* Secondary actions */}
-          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <SecondaryButton
               label="View Logs"
               description="Open RUN_LOG.md"

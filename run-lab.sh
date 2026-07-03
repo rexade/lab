@@ -10,12 +10,22 @@ unset CLAUDECODE 2>/dev/null || true
 unset ANTHROPIC_API_KEY 2>/dev/null || true
 unset ANTHROPIC_AUTH_TOKEN 2>/dev/null || true
 
+export HOME=/home/admin
+export USER=admin
+export LOGNAME=admin
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/1000}
+export XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-/home/admin/.config}
+export XDG_CACHE_HOME=${XDG_CACHE_HOME:-/home/admin/.cache}
+export XDG_DATA_HOME=${XDG_DATA_HOME:-/home/admin/.local/share}
+export PATH="/home/admin/.npm-global/bin:/home/admin/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+
 LAB_DIR=/home/admin/lab
 LOG_FILE=$LAB_DIR/RUN_LOG.md
 RECENT_FILE=$LAB_DIR/RECENT_RUNS.md
 SEED_FILE=$LAB_DIR/DAILY_SEED.md
 MEMPALACE=/home/admin/.local/bin/mempalace
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M')
+CLAUDE_MODEL=${CLAUDE_MODEL:-fable}
 
 # Rotation: create -> mutate -> research -> mutate -> repeat
 # Harvest is manual only: ./run-lab.sh harvest
@@ -93,7 +103,8 @@ OUTPUT=$(claude \
     --print \
     --allowedTools "Read Write Edit Bash(npm*) Bash(npx*) Bash(cd*) Bash(cat*) Bash(ls*)" \
     --add-dir "$LAB_DIR" \
-    --model sonnet \
+    --model "$CLAUDE_MODEL" \
+    --fallback-model sonnet \
     "$FULL_PROMPT" 2>&1) || CLAUDE_EXIT=$?
 
 if [ "$CLAUDE_EXIT" -ne 0 ]; then

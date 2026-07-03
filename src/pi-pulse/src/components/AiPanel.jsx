@@ -132,7 +132,7 @@ function AnalysisBody({ loading, analysis, aiError, unavailable, aiLastRun, comp
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0 4px' }}>
                 <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#ef4444', flexShrink: 0 }} />
                 <span style={{ fontSize: '0.72rem', fontFamily: 'monospace', color: 'rgba(248,113,113,0.8)' }}>
-                  {aiError || 'hailo-ollama not reachable on :8000'}
+                  {aiError || 'local Ollama not reachable on :11434'}
                 </span>
               </div>
             )}
@@ -170,7 +170,7 @@ function AnalysisBody({ loading, analysis, aiError, unavailable, aiLastRun, comp
         <p className="text-xs font-mono mb-2" style={{ color: '#ef4444' }}>{aiError}</p>
       )}
       {unavailable && (
-        <p className="text-xs font-mono" style={{ color: '#ef4444' }}>hailo-ollama not reachable on :8000</p>
+        <p className="text-xs font-mono" style={{ color: '#ef4444' }}>local Ollama not reachable on :11434</p>
       )}
       {loading && (
         <div className="flex flex-col gap-2">
@@ -333,7 +333,7 @@ export function AiPanel({ compact = false, autoTriggerCount = 0 }) {
               position: 'relative',
             }}
           >
-            AI HAT+ 2
+            Local Ollama/Qwen
           </span>
           <motion.div
             animate={(!unavailable && status?.available) ? { opacity: [1, 0.3, 1] } : {}}
@@ -446,7 +446,7 @@ export function AiPanel({ compact = false, autoTriggerCount = 0 }) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-xs font-mono font-semibold tracking-widest uppercase" style={{ color: 'var(--muted)' }}>
-            AI HAT+ 2
+            Local Ollama/Qwen
           </span>
           <span className="w-2 h-2 rounded-full" style={{ background: aiDot }} />
         </div>

@@ -22,6 +22,113 @@ let lastStatsPayload = null
 // Active run tracking — cleared after process exits and status is read
 let activeRun = null // { pid, startTime }
 
+const LAB_RUNNERS = {
+  claude: {
+    script: '/home/admin/run-lab.sh',
+    args: [],
+  },
+  codex: {
+    script: '/home/admin/lab/scripts/run-codex-incubator.sh',
+    args: ['/home/admin/lab/projects/pi-pulse/status.json'],
+  },
+}
+const LAB_SCHEDULE_PATH = '/home/admin/lab/projects/pi-pulse/schedule.json'
+let labScheduleState = { enabled: false, intervalHours: 2, runner: 'claude', nextRunAt: null, lastScheduledRun: null, autoRunsSinceHuman: 0 }
+
+try {
+  const raw = fs.readFileSync(LAB_SCHEDULE_PATH, 'utf8')
+  const loaded = JSON.parse(raw)
+  labScheduleState = { ...labScheduleState, ...loaded }
+  if (labScheduleState.enabled && labScheduleState.nextRunAt && labScheduleState.nextRunAt < Date.now()) {
+    labScheduleState.nextRunAt = Date.now() + labScheduleState.intervalHours * 60 * 60 * 1000
+  }
+} catch { /* no host lab schedule yet */ }
+
+function saveLabSchedule() {
+  try { fs.writeFileSync(LAB_SCHEDULE_PATH, JSON.stringify(labScheduleState, null, 2) + '\n') } catch {}
+}
+
+function activeRunAlive() {
+  if (!activeRun) return false
+  try {
+    process.kill(activeRun.pid, 0)
+    return true
+  } catch {
+    activeRun = null
+    return false
+  }
+}
+
+function normalizeLabRunner(runner) {
+  return Object.hasOwn(LAB_RUNNERS, runner) ? runner : 'claude'
+}
+
+// Runner spawns used stdio:'ignore', so a preflight failure (exit 127, bad
+// script) died before its first RUN_LOG write and left no trace in history.
+// spawnTrackedRun keeps the child detached but routes its output to a capture
+// file; on non-zero exit it appends a FAILED stdout block — with the actual
+// command error — to the target run log so the parser surfaces it.
+const RUN_CAPTURE_DIR = '/home/admin/lab/projects/.run-capture'
+
+function appendFailedRunEntry({ runLogPath, capturePath, code, signal, num }) {
+  if (!runLogPath || !num) return
+  let detail = ''
+  try {
+    const lines = fs.readFileSync(capturePath, 'utf8').split('\n').map(l => l.trim()).filter(Boolean)
+    detail = lines.slice(-3).join(' · ').slice(0, 280)
+  } catch { /* capture file missing — still record the exit */ }
+  const date = new Date().toISOString().slice(0, 10)
+  const reason = signal ? `signal ${signal}` : `exit ${code}`
+  // The **Run N — FAILED —** line pins the run number for the parser, so the
+  // marker slot number is never shifted by legacyOffset on the host log.
+  const block = [
+    '',
+    `<!-- stdout from run ${num} ${date} server-captured -->`,
+    `[run failed — ${reason}] ${detail || 'no output before exit'}`,
+    `**Run ${num} — FAILED — server capture**`,
+    '',
+  ].join('\n')
+  try { fs.appendFileSync(runLogPath, block) } catch { /* log dir may not exist */ }
+}
+
+function spawnTrackedRun({ script, args = [], cwd, captureName, runLogPath, nextRunNum, onExit }) {
+  let stdio = 'ignore'
+  const capturePath = join(RUN_CAPTURE_DIR, `${captureName}.log`)
+  try {
+    fs.mkdirSync(RUN_CAPTURE_DIR, { recursive: true })
+    const fd = fs.openSync(capturePath, 'w')
+    stdio = ['ignore', fd, fd]
+  } catch { /* capture unavailable — run blind as before */ }
+  const child = spawn('bash', [script, ...args], { cwd, detached: true, stdio })
+  if (Array.isArray(stdio)) { try { fs.closeSync(stdio[1]) } catch {} }
+  child.unref()
+  child.on('exit', (code, signal) => {
+    if (code || signal) {
+      appendFailedRunEntry({ runLogPath, capturePath, code, signal, num: nextRunNum?.() ?? 0 })
+    }
+    onExit?.(code, signal)
+  })
+  return child
+}
+
+function startLabRun(runner = labScheduleState.runner) {
+  const selected = normalizeLabRunner(runner)
+  const cfg = LAB_RUNNERS[selected]
+  if (!fs.existsSync(cfg.script)) return null
+  const child = spawnTrackedRun({
+    script: cfg.script,
+    args: cfg.args,
+    cwd: '/home/admin/lab',
+    captureName: `core-${selected}`,
+    runLogPath: RUN_LOG_PATH,
+    nextRunNum: () => {
+      try { return (JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8')).runCount ?? 0) + 1 } catch { return 1 }
+    },
+  })
+  activeRun = { pid: child.pid, startTime: Date.now(), runner: selected }
+  return child
+}
+
 function readCpuTimes() {
   try {
     const stat = fs.readFileSync('/proc/stat', 'utf8')
@@ -173,20 +280,17 @@ const PROJECT_STATUS_PATH = '/home/admin/lab/projects/pi-pulse/status.json'
 function syncProjectStatus() {
   try {
     const content = fs.readFileSync(RUN_LOG_PATH, 'utf8')
-    const sections = content.split(/(?=^## Run \d)/m).filter(s => s.trimStart().startsWith('## Run'))
-    const runCount = sections.length
-
-    const lastSection = sections[sections.length - 1] ?? ''
-    const headerMatch = lastSection.match(/^## Run (\d+) — (\d{4}-\d{2}-\d{2}) — (\w+)/m)
+    const runs = parseRunsFromLog(content)
+    const latest = runs[runs.length - 1] ?? null
 
     let current = {}
     try { current = JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8')) } catch {}
 
     const updated = {
       ...current,
-      runCount,
-      lastRun: headerMatch?.[2] ?? current.lastRun,
-      lastRunType: headerMatch?.[3] ?? current.lastRunType,
+      runCount: latest?.num ?? current.runCount ?? 0,
+      lastRun: latest?.date ?? current.lastRun,
+      lastRunType: latest?.type ?? current.lastRunType,
       syncedAt: new Date().toISOString(),
     }
 
@@ -309,48 +413,154 @@ app.get('/api/stats', (req, res) => {
   res.json(buildStatsPayload())
 })
 
+function summarizeRun(run) {
+  return run['Failure'] || run['Error'] || run['Goal'] || run['Done'] ||
+    run['What I investigated'] || run['Investigated'] || run['What I built'] ||
+    run['What I changed'] || run['What changed'] || run['What improved'] || run['What I found'] ||
+    run['Finding'] || run['Key finding'] || run['Suggested next move'] || ''
+}
+
+function publicRun(run) {
+  const { _order, _source, _attemptKey, ...rest } = run
+  return rest
+}
+
+function runSignature(run) {
+  return [
+    run._source ?? 'run',
+    run._order ?? 0,
+    run.num ?? '',
+    run.date ?? '',
+    run.type ?? '',
+    summarizeRun(run),
+  ].join('|')
+}
+
+function meaningfulStdoutLines(body) {
+  return body.split('\n').map(l => l.trim()).filter(Boolean)
+}
+
+function parseStdoutRunBlocks(content, runs, { legacyOffset = false } = {}) {
+  const stdoutRe = /^\s*<!--\s*stdout from (codex\s+)?run (\d+)\s+(\d{4}-\d{2}-\d{2})[^>]*-->([\s\S]*?)(?=^\s*<!--\s*stdout from (?:codex\s+)?run \d|^\s*## Run \d|$(?![\s\S]))/gm
+  let m
+  while ((m = stdoutRe.exec(content)) !== null) {
+    const [, codexMarker, slotStr, date, body] = m
+    const lines = meaningfulStdoutLines(body)
+    const failureLine = lines[0]?.startsWith('[run failed') ? lines[0] : null
+    const failed = Boolean(failureLine)
+    const boldRun = body.match(/\*\*Run (\d+)\s*(?:[—-]\s*([\w ]+?)\s*[—-]|\s*[—-]\s*done)/)
+    const num = boldRun ? parseInt(boldRun[1]) : parseInt(slotStr) + (!codexMarker && legacyOffset ? 1 : 0)
+    if (!num) continue
+
+    const rawType = boldRun?.[2]?.trim().toUpperCase() || ''
+    const type = failed ? 'FAILED' : ['MUTATE','RESEARCH','CREATE','RUN'].find(t => rawType.includes(t)) || rawType || 'RUN'
+    const detailLine = lines.find(l =>
+      !l.startsWith('[run failed') &&
+      !l.startsWith('**Run') &&
+      !l.startsWith('---') &&
+      !l.startsWith('```')
+    )
+    const summary = failed
+      ? [failureLine, detailLine].filter(Boolean).join(' ')
+      : detailLine || ''
+
+    const formal = runs.find(r => r.num === num && r._source === 'formal')
+    if (formal && !failed) continue
+
+    const run = {
+      num,
+      date,
+      type,
+      'What I changed': summary || 'stdout captured with no summary',
+      _order: m.index,
+      _source: 'stdout',
+    }
+    run.signature = runSignature(run)
+    runs.push(run)
+  }
+}
+
+function parseFormalRunBlocks(content) {
+  const runs = []
+  const formalContent = content.replace(
+    /^\s*<!--\s*stdout from [^>]*-->[\s\S]*?(?=^\s*<!--\s*stdout from |^\s*## Run \d|$(?![\s\S]))/gm,
+    block => block.replace(/[^\n]/g, ' ')
+  )
+  const sections = formalContent.split(/(?=^## Run \d)/m).filter(s => s.trimStart().startsWith('## Run'))
+  let searchFrom = 0
+  for (const block of sections) {
+    const order = formalContent.indexOf(block, searchFrom)
+    if (order >= 0) searchFrom = order + block.length
+    const lines = block.split('\n')
+    const header = lines[0].replace('## Run ', '').trim()
+    const parts = header.split(/\s+[—-]\s+/).map(s => s.trim())
+    const [num, date, type] = parts
+    const fields = {}
+    for (const line of lines.slice(1)) {
+      if (line.startsWith('<!--')) break
+      const m = line.match(/^\*\*(.+?):\*\*\s*(.+)/)
+      if (m) fields[m[1]] = m[2]
+    }
+    const n = parseInt(num) || 0
+    if (n) {
+      const run = { num: n, date, type, ...fields, _order: order >= 0 ? order : runs.length, _source: 'formal' }
+      run.signature = runSignature(run)
+      runs.push(run)
+    }
+  }
+  return runs
+}
+
+function annotateRunAttempts(runs) {
+  const totals = new Map()
+  for (const run of runs) {
+    const key = `${run.num ?? ''}|${run.date ?? ''}`
+    totals.set(key, (totals.get(key) ?? 0) + 1)
+  }
+
+  const seen = new Map()
+  return runs.map(run => {
+    const key = `${run.num ?? ''}|${run.date ?? ''}`
+    const attemptTotal = totals.get(key) ?? 1
+    if (attemptTotal <= 1) return run
+
+    const attempt = (seen.get(key) ?? 0) + 1
+    seen.set(key, attempt)
+    run._attemptKey = key
+    run.attempt = attempt
+    run.attemptTotal = attemptTotal
+    run.signature = `${run.signature}|attempt:${attempt}/${attemptTotal}`
+    return run
+  })
+}
+
+function dedupeCopiedRuns(runs) {
+  const seen = new Set()
+  return runs.filter(run => {
+    const key = [
+      run._source ?? '',
+      run.num ?? '',
+      run.date ?? '',
+      run.type ?? '',
+      summarizeRun(run),
+    ].join('|')
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function parseRunsFromLog(content, options = {}) {
+  const runs = parseFormalRunBlocks(content)
+  parseStdoutRunBlocks(content, runs, options)
+  const sortedRuns = runs.sort((a, b) => (a._order ?? 0) - (b._order ?? 0))
+  return annotateRunAttempts(dedupeCopiedRuns(sortedRuns)).map(publicRun)
+}
+
 app.get('/api/runs', (req, res) => {
   try {
     const content = fs.readFileSync('/home/admin/lab/RUN_LOG.md', 'utf8')
-    const byNum = new Map()
-
-    // Parser 1 — formal ## Run N — DATE — TYPE sections
-    const sections = content.split(/(?=^## Run \d)/m).filter(s => s.trimStart().startsWith('## Run'))
-    for (const block of sections) {
-      const lines = block.split('\n')
-      const header = lines[0].replace('## Run ', '')
-      const [num, date, type] = header.split(' — ').map(s => s.trim())
-      const fields = {}
-      for (const line of lines.slice(1)) {
-        if (line.startsWith('<!--')) break
-        const m = line.match(/^\*\*(.+?):\*\* (.+)/)
-        if (m) fields[m[1]] = m[2]
-      }
-      const n = parseInt(num) || 0
-      if (n) byNum.set(n, { num: n, date, type, ...fields })
-    }
-
-    // Parser 2 — stdout comment blocks: <!-- stdout from run N DATE -->
-    const stdoutRe = /<!--\s*stdout from run (\d+)\s+(\d{4}-\d{2}-\d{2})[^>]*-->([\s\S]*?)(?=<!--\s*stdout from run \d|$)/g
-    let m
-    while ((m = stdoutRe.exec(content)) !== null) {
-      const [, slotStr, date, body] = m
-      // The bold **Run N — TYPE —** heading inside the body names the actual run
-      const boldRun = body.match(/\*\*Run (\d+)\s*(?:—\s*([\w ]+?)\s*—|\s*—\s*done)/)
-      const num = boldRun ? parseInt(boldRun[1]) : parseInt(slotStr) + 1
-      if (!num || byNum.has(num)) continue
-      const rawType = boldRun?.[2]?.trim().toUpperCase() || ''
-      const type = ['MUTATE','RESEARCH','CREATE','RUN'].find(t => rawType.includes(t)) || rawType || 'RUN'
-      // First meaningful non-bold line as summary
-      const summary = body.split('\n')
-        .map(l => l.trim())
-        .find(l => l && !l.startsWith('**Run') && !l.startsWith('---') && !l.startsWith('```') && !l.startsWith('['))
-        || ''
-      byNum.set(num, { num, date, type, 'What I changed': summary })
-    }
-
-    const runs = [...byNum.values()].sort((a, b) => a.num - b.num)
-    res.json(runs.slice(-10))
+    res.json(parseRunsFromLog(content).slice(-10))
   } catch {
     res.json([])
   }
@@ -366,18 +576,18 @@ app.get('/api/logs', (req, res) => {
 })
 
 app.post('/api/run', (req, res) => {
-  const script = '/home/admin/run-lab.sh'
-  if (!fs.existsSync(script)) {
-    return res.status(404).json({ ok: false, error: 'run-lab.sh not found' })
+  if (activeRunAlive()) {
+    return res.status(409).json({ ok: false, error: 'lab run already active', pid: activeRun.pid, runner: activeRun.runner })
   }
-  const child = spawn('bash', [script], {
-    cwd: '/home/admin/lab',
-    detached: true,
-    stdio: 'ignore',
-  })
-  child.unref()
-  activeRun = { pid: child.pid, startTime: Date.now() }
-  res.json({ ok: true, pid: child.pid })
+  const runner = normalizeLabRunner(req.body?.runner || labScheduleState.runner)
+  const child = startLabRun(runner)
+  if (!child) {
+    return res.status(404).json({ ok: false, error: `${runner} lab runner not found` })
+  }
+  labScheduleState.runner = runner
+  labScheduleState.autoRunsSinceHuman = 0
+  saveLabSchedule()
+  res.json({ ok: true, pid: child.pid, runner })
 })
 
 app.get('/api/run/status', (req, res) => {
@@ -397,7 +607,44 @@ app.get('/api/run/status', (req, res) => {
     return res.json({ running: false, pid: null, elapsed, startTime })
   }
 
-  res.json({ running: true, pid: activeRun.pid, elapsed, startTime })
+  res.json({ running: true, pid: activeRun.pid, elapsed, startTime, runner: activeRun.runner ?? null })
+})
+
+// Check every 60s - fire the host Pi Pulse lab loop if its schedule is due.
+setInterval(() => {
+  if (!labScheduleState.enabled || !labScheduleState.nextRunAt) return
+  if (Date.now() < labScheduleState.nextRunAt) return
+  if (activeRunAlive()) return
+  const runner = normalizeLabRunner(labScheduleState.runner)
+  const child = startLabRun(runner)
+  if (!child) return
+  console.log(`[pi-pulse] schedule: firing host lab run via ${runner}`)
+  labScheduleState.runner = runner
+  labScheduleState.lastScheduledRun = new Date().toISOString()
+  labScheduleState.nextRunAt = Date.now() + labScheduleState.intervalHours * 60 * 60 * 1000
+  labScheduleState.autoRunsSinceHuman = (labScheduleState.autoRunsSinceHuman || 0) + 1
+  saveLabSchedule()
+}, 60 * 1000)
+
+app.get('/api/lab/schedule', (req, res) => {
+  res.json({ ok: true, availableRunners: Object.keys(LAB_RUNNERS), ...labScheduleState })
+})
+
+app.post('/api/lab/schedule', (req, res) => {
+  const { enabled, intervalHours, runner } = req.body ?? {}
+  if (typeof enabled === 'boolean') labScheduleState.enabled = enabled
+  if (typeof intervalHours === 'number' && intervalHours > 0) labScheduleState.intervalHours = intervalHours
+  if (typeof runner === 'string') labScheduleState.runner = normalizeLabRunner(runner)
+  if (labScheduleState.enabled) {
+    if (!labScheduleState.nextRunAt || labScheduleState.nextRunAt < Date.now()) {
+      labScheduleState.nextRunAt = Date.now() + labScheduleState.intervalHours * 60 * 60 * 1000
+    }
+  } else {
+    labScheduleState.nextRunAt = null
+  }
+  labScheduleState.autoRunsSinceHuman = 0
+  saveLabSchedule()
+  res.json({ ok: true, availableRunners: Object.keys(LAB_RUNNERS), ...labScheduleState })
 })
 
 app.get('/api/health', (req, res) => {
@@ -450,9 +697,206 @@ const CHILD_STATUS_PATH     = mountedProject.statusPath
 const CHILD_LAB_STATUS_PATH = mountedProject.labStatusPath
 const CHILD_LOG_PATH        = mountedProject.logPath
 const CHILD_RUN_SCRIPT      = mountedProject.runScript
+const CHILD_PLAY_ROUTE      = `/${mountedProject.name.replace(/[^a-z0-9_-]/gi, '-').toLowerCase()}`
+
+if (fs.existsSync(join(CHILD_DIR, 'index.html'))) {
+  app.use(CHILD_PLAY_ROUTE, express.static(CHILD_DIR))
+}
 
 let activeChildRun = null
 const childRunClients = new Set()
+const incubatorRunClients = new Set()
+
+function startChildRun() {
+  if (!fs.existsSync(CHILD_RUN_SCRIPT)) return null
+  const child = spawnTrackedRun({
+    script: CHILD_RUN_SCRIPT,
+    captureName: `child-${mountedProject.name}`,
+    runLogPath: CHILD_LOG_PATH,
+    nextRunNum: () => {
+      try { return (JSON.parse(fs.readFileSync(CHILD_LAB_STATUS_PATH, 'utf8')).runCount ?? 0) + 1 } catch { return 1 }
+    },
+  })
+  activeChildRun = { pid: child.pid, startTime: Date.now() }
+  return child
+}
+
+// ─── Multi incubator slots ────────────────────────────────────────────────────
+
+const INCUBATORS_PATH = '/home/admin/lab/projects/incubators.json'
+const activeIncubatorRuns = new Map()
+
+function defaultIncubators() {
+  return {
+    slots: [
+      {
+        id: 'rat-deposit',
+        type: 'project',
+        statusPath: '/home/admin/lab/projects/rat-deposit/status.json',
+        enabled: true,
+        intervalHours: 0.5,
+        nextRunAt: Date.now() + 30 * 60 * 1000,
+        lastScheduledRun: null,
+        autoRunsSinceHuman: 0,
+        charges: null,
+      },
+    ],
+  }
+}
+
+function readIncubators() {
+  try {
+    const data = JSON.parse(fs.readFileSync(INCUBATORS_PATH, 'utf8'))
+    if (Array.isArray(data.slots)) return data
+  } catch {}
+  const data = defaultIncubators()
+  writeIncubators(data)
+  return data
+}
+
+function writeIncubators(data) {
+  try { fs.writeFileSync(INCUBATORS_PATH, JSON.stringify(data, null, 2) + '\n') } catch {}
+}
+
+function readStatusAt(statusPath) {
+  return JSON.parse(fs.readFileSync(statusPath, 'utf8'))
+}
+
+function hydrateIncubator(slot) {
+  const cfg = readStatusAt(slot.statusPath)
+  const repoStatusPath = join(cfg.repo, 'status.json')
+  let repoStatus = {}
+  try { repoStatus = JSON.parse(fs.readFileSync(repoStatusPath, 'utf8')) } catch {}
+  const running = getIncubatorRun(slot.id)
+  return {
+    ...slot,
+    project: cfg.project,
+    phase: cfg.phase ?? repoStatus.phase ?? null,
+    runner: cfg.runner ?? 'script',
+    repo: cfg.repo,
+    runLog: cfg.runLog,
+    playUrl: fs.existsSync(join(cfg.repo, 'index.html'))
+      ? `/${cfg.project.replace(/[^a-z0-9_-]/gi, '-').toLowerCase()}/`
+      : null,
+    runCount: cfg.runCount ?? repoStatus.runCount ?? 0,
+    lastRun: cfg.lastRun ?? repoStatus.lastRun ?? null,
+    lastRunType: cfg.lastRunType ?? repoStatus.lastRunType ?? null,
+    availableRunners: [
+      'codex',
+      ...(claudeRunScriptForProject(cfg.project) ? ['claude'] : []),
+    ],
+    claudeModel: cfg.claudeModel ?? null,
+    codexModel: cfg.codexModel ?? null,
+    current_focus: cfg.current_focus ?? repoStatus.current_focus ?? null,
+    next_run_goal: cfg.next_run_goal ?? repoStatus.next_run_goal ?? null,
+    notes: cfg.notes ?? repoStatus.notes ?? null,
+    running,
+  }
+}
+
+function getIncubatorRun(id) {
+  const run = activeIncubatorRuns.get(id)
+  if (!run) return { running: false, pid: null, elapsed: 0, startTime: null }
+  try {
+    process.kill(run.pid, 0)
+    return {
+      running: true,
+      pid: run.pid,
+      elapsed: Math.floor((Date.now() - run.startTime) / 1000),
+      startTime: run.startTime,
+      runner: run.runner,
+    }
+  } catch {
+    activeIncubatorRuns.delete(id)
+    return { running: false, pid: null, elapsed: 0, startTime: null }
+  }
+}
+
+function startIncubatorRun(slot, runType = null) {
+  const alive = getIncubatorRun(slot.id)
+  if (alive.running) return { alreadyRunning: true, ...alive }
+  const cfg = readStatusAt(slot.statusPath)
+  if (!cfg.runScript || !fs.existsSync(cfg.runScript)) return null
+  const args = []
+  if (cfg.runner === 'codex' || cfg.runScript.includes('run-codex-incubator.sh')) {
+    args.push(slot.statusPath)
+    if (runType) args.push(runType)
+  }
+  const child = spawnTrackedRun({
+    script: cfg.runScript,
+    args,
+    cwd: cfg.repo || '/home/admin/lab',
+    captureName: `incubator-${slot.id}`,
+    runLogPath: cfg.runLog,
+    nextRunNum: () => {
+      try { return (readStatusAt(slot.statusPath).runCount ?? 0) + 1 } catch { return 1 }
+    },
+    onExit: (code, signal) => {
+      if (!code && !signal) return
+      activeIncubatorRuns.delete(slot.id)
+      notifyIncubatorClients()
+    },
+  })
+  const run = { pid: child.pid, startTime: Date.now(), runner: cfg.runner ?? 'script' }
+  activeIncubatorRuns.set(slot.id, run)
+  return { ok: true, pid: child.pid, runner: run.runner, startTime: run.startTime }
+}
+
+function claudeRunScriptForProject(project) {
+  const known = {
+    'race-whisperer-predict': '/home/admin/run-race-whisperer.sh',
+    'pi-pulse': '/home/admin/run-lab.sh',
+  }
+  if (known[project]) return known[project]
+  const candidate = `/home/admin/run-${project}.sh`
+  return fs.existsSync(candidate) ? candidate : null
+}
+
+function updateProjectRunner(statusPath, runner) {
+  const status = readStatusAt(statusPath)
+  if (runner === 'codex') {
+    status.runner = 'codex'
+    status.runScript = '/home/admin/lab/scripts/run-codex-incubator.sh'
+    status.promptDir = status.promptDir || join(status.repo, 'prompts')
+    status.runTypes = status.runTypes || ['mutate', 'research', 'mutate']
+    status.codexBypass = status.codexBypass ?? true
+  } else if (runner === 'claude') {
+    const script = claudeRunScriptForProject(status.project)
+    if (!script) {
+      return { ok: false, error: `no Claude runner script found for ${status.project}` }
+    }
+    status.runner = 'claude'
+    status.runScript = script
+    status.claudeModel = status.claudeModel || 'fable'
+  } else {
+    return { ok: false, error: 'unsupported runner' }
+  }
+  fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
+  return { ok: true, status }
+}
+
+function notifyIncubatorClients() {
+  for (const client of incubatorRunClients) {
+    try { client.write('data: update\n\n') } catch { incubatorRunClients.delete(client) }
+  }
+}
+
+const mountedPlayRoutes = new Set()
+
+function mountPlayRoute(cfg) {
+  const route = `/${cfg.project.replace(/[^a-z0-9_-]/gi, '-').toLowerCase()}`
+  if (mountedPlayRoutes.has(route)) return route
+  if (!fs.existsSync(join(cfg.repo, 'index.html'))) return null
+  app.use(route, express.static(cfg.repo))
+  mountedPlayRoutes.add(route)
+  return route
+}
+
+for (const slot of readIncubators().slots) {
+  try {
+    mountPlayRoute(readStatusAt(slot.statusPath))
+  } catch { /* skip malformed incubator slots */ }
+}
 
 // ─── Incubator auto-schedule ───────────────────────────────────────────────────
 
@@ -480,11 +924,8 @@ setInterval(() => {
   if (activeChildRun) {
     try { process.kill(activeChildRun.pid, 0); return } catch { activeChildRun = null }
   }
-  if (!fs.existsSync(CHILD_RUN_SCRIPT)) return
+  if (!startChildRun()) return
   console.log('[pi-pulse] schedule: firing child run')
-  const child = spawn('bash', [CHILD_RUN_SCRIPT], { detached: true, stdio: 'ignore' })
-  child.unref()
-  activeChildRun = { pid: child.pid, startTime: Date.now() }
   scheduleState.lastScheduledRun = new Date().toISOString()
   scheduleState.nextRunAt = Date.now() + scheduleState.intervalHours * 60 * 60 * 1000
   scheduleState.autoRunsSinceHuman = (scheduleState.autoRunsSinceHuman || 0) + 1
@@ -492,25 +933,163 @@ setInterval(() => {
 }, 60 * 1000)
 
 app.get('/api/child/config', (req, res) => {
-  res.json({ project: mountedProject.name, dir: mountedProject.dir })
+  res.json({
+    project: mountedProject.name,
+    dir: mountedProject.dir,
+    playUrl: fs.existsSync(join(CHILD_DIR, 'index.html')) ? `${CHILD_PLAY_ROUTE}/` : null,
+  })
 })
 
 function parseChildRuns(content) {
-  const sections = content.split(/(?=^## Run \d)/m).filter(s => s.trimStart().startsWith('## Run'))
-  return sections.map(block => {
-    const lines = block.split('\n')
-    const header = lines[0].replace('## Run ', '').trim()
-    const parts = header.split(' — ').map(s => s.trim())
-    const num = parts[0], date = parts[1], type = parts[2]
-    const fields = {}
-    for (const line of lines.slice(1)) {
-      if (line.startsWith('<!--')) break
-      const m = line.match(/^\*\*(.+?):\*\*\s*(.+)/)
-      if (m) fields[m[1]] = m[2]
-    }
-    return { num: parseInt(num) || 0, date, type, ...fields }
-  })
+  return parseRunsFromLog(content)
 }
+
+// Multi-project incubators. The legacy /api/child/* endpoints below continue
+// to represent the mounted project, while these endpoints drive the slot deck.
+app.get('/api/incubators', (req, res) => {
+  const data = readIncubators()
+  const slots = data.slots.map(slot => {
+    try { return hydrateIncubator(slot) } catch { return { ...slot, error: 'invalid slot' } }
+  })
+  res.json({ ok: true, slots })
+})
+
+app.get('/api/incubators/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.flushHeaders()
+  incubatorRunClients.add(res)
+  const heartbeat = setInterval(() => {
+    try { res.write(':heartbeat\n\n') } catch { clearInterval(heartbeat) }
+  }, 25000)
+  req.on('close', () => { incubatorRunClients.delete(res); clearInterval(heartbeat) })
+})
+
+app.get('/api/incubators/:id/runs', (req, res) => {
+  const slot = readIncubators().slots.find(s => s.id === req.params.id)
+  if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  try {
+    const cfg = readStatusAt(slot.statusPath)
+    const content = fs.readFileSync(cfg.runLog, 'utf8')
+    res.json({ ok: true, runs: parseChildRuns(content).slice(-10) })
+  } catch (err) {
+    res.json({ ok: true, runs: [], error: err.message })
+  }
+})
+
+app.get('/api/incubators/:id/run/status', (req, res) => {
+  res.json({ ok: true, ...getIncubatorRun(req.params.id) })
+})
+
+app.post('/api/incubators/:id/run', (req, res) => {
+  const data = readIncubators()
+  const slot = data.slots.find(s => s.id === req.params.id)
+  if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  const result = startIncubatorRun(slot, req.body?.runType ?? null)
+  if (!result) return res.status(404).json({ ok: false, error: 'run script not found' })
+  slot.autoRunsSinceHuman = 0
+  writeIncubators(data)
+  notifyIncubatorClients()
+  res.json({ ok: true, ...result })
+})
+
+app.post('/api/incubators/:id/schedule', (req, res) => {
+  const data = readIncubators()
+  const slot = data.slots.find(s => s.id === req.params.id)
+  if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  const { enabled, intervalHours, runner } = req.body ?? {}
+  if (typeof enabled === 'boolean') slot.enabled = enabled
+  if (typeof intervalHours === 'number' && intervalHours > 0) slot.intervalHours = intervalHours
+  if (typeof runner === 'string') slot.runner = runner
+  if (slot.enabled) {
+    if (!slot.nextRunAt || slot.nextRunAt < Date.now()) {
+      slot.nextRunAt = Date.now() + (slot.intervalHours || 0.5) * 60 * 60 * 1000
+    }
+  } else {
+    slot.nextRunAt = null
+  }
+  slot.autoRunsSinceHuman = 0
+  writeIncubators(data)
+  notifyIncubatorClients()
+  res.json({ ok: true, slot: hydrateIncubator(slot) })
+})
+
+app.post('/api/incubators/:id/runner', (req, res) => {
+  const data = readIncubators()
+  const slot = data.slots.find(s => s.id === req.params.id)
+  if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  const { runner } = req.body ?? {}
+  const result = updateProjectRunner(slot.statusPath, runner)
+  if (!result.ok) return res.status(400).json(result)
+  writeIncubators(data)
+  notifyIncubatorClients()
+  res.json({ ok: true, slot: hydrateIncubator(slot) })
+})
+
+app.post('/api/incubators', (req, res) => {
+  const { project, intervalHours = 0.5, enabled = false } = req.body ?? {}
+  if (!project || typeof project !== 'string' || project.includes('..') || project === 'pi-pulse') {
+    return res.status(400).json({ ok: false, error: 'invalid project' })
+  }
+  const statusPath = join('/home/admin/lab/projects', project, 'status.json')
+  if (!fs.existsSync(statusPath)) return res.status(404).json({ ok: false, error: 'project status not found' })
+  const data = readIncubators()
+  if (data.slots.some(s => s.id === project)) return res.status(409).json({ ok: false, error: 'incubator already exists' })
+  const slot = {
+    id: project,
+    type: 'project',
+    statusPath,
+    enabled: !!enabled,
+    intervalHours,
+    nextRunAt: enabled ? Date.now() + intervalHours * 60 * 60 * 1000 : null,
+    lastScheduledRun: null,
+    autoRunsSinceHuman: 0,
+    charges: null,
+  }
+  data.slots.push(slot)
+  writeIncubators(data)
+  // Mount the play route now — previously the response claimed `restarting: true`
+  // but never restarted, so a fresh slot's playUrl served the pi-pulse SPA.
+  try { mountPlayRoute(readStatusAt(statusPath)) } catch {}
+  notifyIncubatorClients()
+  res.json({ ok: true, slot: hydrateIncubator(slot) })
+})
+
+app.delete('/api/incubators/:id', (req, res) => {
+  const data = readIncubators()
+  const next = data.slots.filter(s => s.id !== req.params.id)
+  if (next.length === data.slots.length) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  data.slots = next
+  writeIncubators(data)
+  activeIncubatorRuns.delete(req.params.id)
+  notifyIncubatorClients()
+  res.json({ ok: true })
+})
+
+setInterval(() => {
+  const data = readIncubators()
+  let changed = false
+  for (const slot of data.slots) {
+    if (!slot.enabled || !slot.nextRunAt || Date.now() < slot.nextRunAt) continue
+    if (getIncubatorRun(slot.id).running) continue
+    const result = startIncubatorRun(slot)
+    if (!result) continue
+    console.log(`[pi-pulse] incubator: firing ${slot.id}`)
+    slot.lastScheduledRun = new Date().toISOString()
+    slot.nextRunAt = Date.now() + (slot.intervalHours || 0.5) * 60 * 60 * 1000
+    slot.autoRunsSinceHuman = (slot.autoRunsSinceHuman || 0) + 1
+    if (typeof slot.charges === 'number') {
+      slot.charges = Math.max(0, slot.charges - 1)
+      if (slot.charges === 0) slot.enabled = false
+    }
+    changed = true
+  }
+  if (changed) {
+    writeIncubators(data)
+    notifyIncubatorClients()
+  }
+}, 60 * 1000)
 
 app.get('/api/child/status', (req, res) => {
   let projectStatus = {}
@@ -532,12 +1111,10 @@ app.get('/api/child/runs', (req, res) => {
 })
 
 app.post('/api/child/run', (req, res) => {
-  if (!fs.existsSync(CHILD_RUN_SCRIPT)) {
+  const child = startChildRun()
+  if (!child) {
     return res.status(404).json({ ok: false, error: 'run script not found' })
   }
-  const child = spawn('bash', [CHILD_RUN_SCRIPT], { detached: true, stdio: 'ignore' })
-  child.unref()
-  activeChildRun = { pid: child.pid, startTime: Date.now() }
   scheduleState.autoRunsSinceHuman = 0
   saveSchedule()
   res.json({ ok: true, pid: child.pid })
@@ -653,7 +1230,132 @@ app.get('/api/child/ai/latest', (req, res) => {
   }
 })
 
-// AI analysis via local hailo-ollama
+
+app.get('/api/child/ai/status', async (req, res) => {
+  try {
+    const r = await fetch(`${HAILO_URL}/api/tags`)
+    const data = await r.json()
+    const loaded = data.models?.some(m => m.name?.includes('qwen2.5-instruct'))
+    res.json({ available: true, modelLoaded: loaded, models: data.models })
+  } catch {
+    res.json({ available: false, modelLoaded: false })
+  }
+})
+
+function feedbackPathsForIncubator(cfg) {
+  if (cfg.project === 'pi-pulse') {
+    return {
+      json: '/home/admin/lab/DRIFT_FEEDBACK.json',
+      md: '/home/admin/lab/DRIFT_FEEDBACK.md',
+    }
+  }
+  const memoryDir = join(cfg.repo, 'memory')
+  if (fs.existsSync(memoryDir)) {
+    return {
+      json: join(memoryDir, 'DRIFT_FEEDBACK.json'),
+      md: join(memoryDir, 'DRIFT_FEEDBACK.md'),
+    }
+  }
+  return {
+    json: join(cfg.repo, 'reports', 'DRIFT_FEEDBACK.json'),
+    md: join(cfg.repo, 'reports', 'DRIFT_FEEDBACK.md'),
+  }
+}
+
+function aiTargetForIncubator(id) {
+  if (id === 'core') {
+    return {
+      id: 'core',
+      project: 'pi-pulse',
+      runLog: RUN_LOG_PATH,
+      paths: feedbackPathsForIncubator({ project: 'pi-pulse' }),
+      query: 'pi-pulse incubator host seed direction active threads',
+    }
+  }
+
+  const slot = readIncubators().slots.find(s => s.id === id)
+  if (!slot) return null
+  let cfg
+  try { cfg = readStatusAt(slot.statusPath) } catch { return null }
+  return {
+    id: slot.id,
+    project: cfg.project,
+    runLog: cfg.runLog,
+    paths: feedbackPathsForIncubator(cfg),
+    query: `${cfg.project} seed direction active threads`,
+  }
+}
+
+app.get('/api/incubators/:id/ai/latest', (req, res) => {
+  const target = aiTargetForIncubator(req.params.id)
+  if (!target) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  try {
+    const data = JSON.parse(fs.readFileSync(target.paths.json, 'utf8'))
+    res.json({
+      ...data,
+      incubatorId: data.incubatorId ?? target.id,
+      project: data.project ?? target.project,
+      source: data.source ?? 'local-ollama-qwen',
+    })
+  } catch {
+    res.json({ ok: false })
+  }
+})
+
+app.post('/api/incubators/:id/ai/analyze', async (req, res) => {
+  const target = aiTargetForIncubator(req.params.id)
+  if (!target) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  try {
+    const palaceCtx = queryMemPalace(target.query, { wing: 'lab', results: 3, maxChars: 600 })
+    let recentLog = ''
+    try { recentLog = fs.readFileSync(target.runLog, 'utf8').slice(-400) } catch {}
+
+    const prompt = `You are a local Ollama/Qwen critic analyzing an evolving software incubator.
+
+CONTEXT (from memory palace):
+${palaceCtx || '(unavailable)'}
+
+RECENT RUN LOG (tail):
+${recentLog}
+
+Respond in this exact format (5 lines, no extra text):
+DIRECTION: <one sentence on where the project is heading>
+STRONGEST: <what is working best right now>
+WEAKEST: <what is hurting the project most>
+DRIFT: <yes/no - is it drifting from the seed? why>
+NEXT: <the single most useful next action>`
+
+    const r = await fetch(`${HAILO_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: AI_MODEL, prompt, stream: false }),
+      signal: AbortSignal.timeout(60000),
+    })
+    if (!r.ok) return res.status(502).json({ ok: false, error: await r.text() })
+
+    const data = await r.json()
+    try {
+      fs.mkdirSync(dirname(target.paths.json), { recursive: true })
+      const ts = new Date().toISOString().slice(0, 16).replace('T', ' ')
+      fs.writeFileSync(target.paths.md, `# Local Ollama/Qwen Feedback - ${ts}\n\n${data.response.trim()}\n`)
+      fs.writeFileSync(target.paths.json, JSON.stringify({
+        ok: true,
+        incubatorId: target.id,
+        project: target.project,
+        response: data.response,
+        model: AI_MODEL,
+        source: 'local-ollama-qwen',
+        ts: Date.now(),
+      }))
+    } catch { /* non-fatal */ }
+
+    res.json({ ok: true, incubatorId: target.id, project: target.project, response: data.response, model: AI_MODEL, source: 'local-ollama-qwen' })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message })
+  }
+})
+
+// AI analysis via local Ollama/Qwen
 const HAILO_URL = 'http://localhost:11434'
 const AI_MODEL = 'qwen2.5-instruct:1.5b'
 
@@ -910,6 +1612,10 @@ app.get('/api/runs/stream', (req, res) => {
   })
 })
 
+
+app.use('/api', (req, res) => {
+  res.status(404).json({ ok: false, error: 'api route not found', path: req.originalUrl })
+})
 
 // SPA fallback
 app.get('*', (req, res) => {

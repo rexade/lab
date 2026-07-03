@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import { useSystemStats } from './hooks/useSystemStats.js'
 import { NavShell } from './components/NavShell.jsx'
 import { PulsePanel } from './components/PulsePanel.jsx'
-import { BottomPanel } from './components/BottomPanel.jsx'
 import { ProjectPanel } from './components/ProjectPanel.jsx'
 import { LabPanel } from './components/LabPanel.jsx'
 
@@ -38,6 +37,121 @@ function useCircadian() {
     return () => clearInterval(id)
   }, [])
   return state
+}
+
+function fmtBytes(b) {
+  if (b == null) return '—'
+  if (b < 1024) return `${b} B/s`
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB/s`
+  return `${(b / 1024 / 1024).toFixed(1)} MB/s`
+}
+
+function SystemStrip({ stats, latestTemp, connected }) {
+  const disk = stats?.disk?.percent ?? null
+  const memory = stats?.memory?.percent ?? null
+  const cpu = stats?.cpu ?? null
+  const hot = latestTemp > 70 || cpu > 85
+  const diskHigh = disk != null && disk > 88
+  const status = hot ? 'hot' : diskHigh ? 'disk pressure' : connected ? 'safe' : 'offline'
+  const statusColor = hot ? '#f87171' : diskHigh ? '#fb923c' : connected ? '#22c55e' : '#64748b'
+
+  const metric = (label, value, color = 'rgba(226,232,240,0.72)') => (
+    <div style={{ display: 'grid', gap: 2, minWidth: 64 }}>
+      <span style={{ fontSize: '0.52rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'rgba(71,85,105,0.62)' }}>
+        {label}
+      </span>
+      <strong style={{ fontSize: '0.78rem', fontFamily: 'monospace', color, fontWeight: 650, lineHeight: 1 }}>
+        {value}
+      </strong>
+    </div>
+  )
+
+  return (
+    <div
+      className="panel"
+      style={{
+        padding: '10px 16px',
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: 12,
+        alignItems: 'center',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 140, flex: '1 1 160px' }}>
+        <span style={{
+          width: 8,
+          height: 8,
+          borderRadius: '50%',
+          background: statusColor,
+          boxShadow: `0 0 10px ${statusColor}66`,
+          flexShrink: 0,
+        }} />
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.14em', color: statusColor }}>
+            {status}
+          </div>
+          <div style={{ marginTop: 2, fontSize: '0.62rem', color: 'rgba(148,163,184,0.56)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {stats?.hostname ?? 'pi'} · {stats?.uptimeFormatted ?? '—'}
+          </div>
+        </div>
+      </div>
+      {metric('cpu', cpu == null ? '—' : `${cpu}%`, cpu > 65 ? '#fb923c' : undefined)}
+      {metric('temp', latestTemp == null ? '—' : `${latestTemp.toFixed(1)}°`, latestTemp > 60 ? '#fb923c' : undefined)}
+      {metric('mem', memory == null ? '—' : `${memory}%`)}
+      {metric('disk', disk == null ? '—' : `${disk}%`, diskHigh ? '#fb923c' : undefined)}
+      {metric('net ↓', fmtBytes(stats?.net?.rx), '#22d3ee')}
+      {metric('net ↑', fmtBytes(stats?.net?.tx), '#a78bfa')}
+    </div>
+  )
+}
+
+function CollapsiblePulse({ stats, history, tempHistory, netRxHistory, netTxHistory }) {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <section className="panel" style={{ padding: 0, overflow: 'hidden' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%',
+          border: 'none',
+          background: 'transparent',
+          padding: '12px 18px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          cursor: 'pointer',
+          color: 'inherit',
+          textAlign: 'left',
+        }}
+      >
+        <span style={{
+          width: 7,
+          height: 7,
+          borderRadius: '50%',
+          background: 'var(--accent)',
+          boxShadow: '0 0 10px var(--accent-glow)',
+          flexShrink: 0,
+        }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.14em', color: 'var(--muted)' }}>
+            System Pulse
+          </div>
+          <div style={{ marginTop: 3, fontSize: '0.72rem', color: 'rgba(148,163,184,0.58)' }}>
+            Full telemetry chamber, expanded only when you need the diagnostics.
+          </div>
+        </div>
+        <span style={{ fontSize: '0.64rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.55)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+          {open ? 'hide' : 'open'}
+        </span>
+      </button>
+      {open && (
+        <div style={{ borderTop: '1px solid var(--border)', padding: 16 }}>
+          <PulsePanel stats={stats} history={history} tempHistory={tempHistory} netRxHistory={netRxHistory} netTxHistory={netTxHistory} />
+        </div>
+      )}
+    </section>
+  )
 }
 
 export default function App() {
@@ -110,14 +224,18 @@ export default function App() {
         <main className="flex-1 flex flex-col gap-4 p-4 sm:p-6">
           {activeTab === 'pulse' ? (
             <>
-              {/* Central pulse — the soul of the dashboard */}
-              <PulsePanel stats={stats} history={history} tempHistory={tempHistory} netRxHistory={netRxHistory} netTxHistory={netTxHistory} />
+              <SystemStrip stats={stats} latestTemp={latestTemp} connected={connected} />
 
-              {/* Unified lower panel — event log + controls + AI as one instrument surface */}
-              <BottomPanel stats={stats} />
-
-              {/* Child project — race-whisperer-predict, isolated from Pi Pulse itself */}
+              {/* Incubator deck — host and mounted project loops */}
               <ProjectPanel />
+
+              <CollapsiblePulse
+                stats={stats}
+                history={history}
+                tempHistory={tempHistory}
+                netRxHistory={netRxHistory}
+                netTxHistory={netTxHistory}
+              />
             </>
           ) : (
             <LabPanel />

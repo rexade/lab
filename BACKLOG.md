@@ -1,5 +1,20 @@
 # Backlog
 
+## Server-side parseAnalysis — one parser, shared diagnostics
+`parseAnalysis` exists twice: the full version (field aliases, `missing`, `malformed`, raw fallback) in `ProjectPanel.jsx:23`, and a degraded copy without malformed detection in `AiPanel.jsx:12`. It's pure string ops — portable to `server.js` unchanged. Parse at analyze time in both `/api/incubators/:id/ai/analyze` and legacy `/api/ai/analyze`, store `fields`/`missing`/`malformed` in DRIFT_FEEDBACK.json, and compute-on-read in the `latest` endpoints for legacy files that lack them. Then both UI parsers collapse to rendering, and any future consumer (lab agent reading DRIFT_FEEDBACK.json included) gets the same diagnostics for free.
+
+## Preflight visibility — silent runner failures leave zero trace
+`run-codex-incubator.sh` exits 127 (codex binary missing) or 1 (prompt file missing) *before* its first RUN_LOG write, and server.js spawns runs with `stdio: 'ignore'` — a preflight failure produces no FAILED entry, no stderr, nothing. Verified 2026-07-03: all artifacts currently exist so it's latent, but unguarded. Two-part fix: (1) `GET /api/incubators/:id/preflight` checking runScript exists, codex/claude binary executable, prompt file present, status.json parses — surface as a subtle indicator next to the RUN button; (2) trap preflight exits in the script and append a `[run failed — preflight: <reason>]` block to RUN_LOG so even unforeseen early exits become visible FAILED history entries.
+
+## POST /api/incubators claims restart but never restarts — play route fallthrough
+`server.js:950` responds `{ restarting: true }` but has no `process.exit(0)` (unlike `/api/projects/mount`, server.js:1467). Static play routes for slots are only registered at startup (server.js:785–793), yet `hydrateIncubator` computes `playUrl` from `fs.existsSync` immediately — so a slot added at runtime shows an "open" link that falls through to the SPA fallback and serves pi-pulse's own index.html instead of the project. Same bug family as the seed's `Unexpected token '<'` issue, on the static side. Fix: either actually exit (systemd restarts in ~1s, matching the mount flow) or register the express.static route dynamically at slot-add time. Related bookkeeping wart: `POST /:id/schedule` writes `slot.runner` into incubators.json but `hydrateIncubator` reads runner from status.json — the slot-level field is dead.
+
+## Failed-run detail field for expandable history
+`parseStdoutRunBlocks` (server.js:391) holds the full failed stdout body in scope but ships only `failureLine + first detail line`; ProjectPanel truncates at 92 chars. For FAILED runs, add a capped `detail` field (e.g. first 800 chars of meaningful lines) to the run object so the history row can expand to show the actual command error without a second API call. Live motivator: run 95's first attempt failed with a model-access error that only barely fits the current one-liner.
+
+## Run parser should anchor stdout failure detection
+`parseStdoutRunBlocks()` currently uses `body.includes('[run failed')`, which means a successful Codex transcript can become `FAILED` if it quotes earlier log text or a diff containing that marker. Live evidence on 2026-07-03: `/api/runs` reported `FAILED #89` with the summary `[run completed successfully; verbose Codex transcript omitted...]`. Change detection to inspect the first meaningful stdout line, e.g. `lines[0]?.startsWith('[run failed')`, and keep quoted historical failures out of the status classifier.
+
 ## ghost/whisper/oracle as incubated project
 The quartet (src/ghost/) is dormant — 5 standalone JS files, ports 3032–3036. Per the seed, it must NOT be integrated into Pi Pulse's Pulse tab UI. The correct pattern: create `projects/ghost-trio/status.json` with repo/runLog/runScript fields, point `mounted.json` at it, restart pi-pulse. Then the quartet gets its own ProjectPanel slot and run history without touching the waveform layer. One status.json + one run script = fully mounted. This is the right way to continue the ghost/oracle work without violating the "no new instruments" rule.
 

@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "intervalHours": 0.5,
+  "runner": "codex",
+  "nextRunAt": null,
+  "lastScheduledRun": "2026-07-03T16:13:14.394Z",
+  "autoRunsSinceHuman": 0
+}

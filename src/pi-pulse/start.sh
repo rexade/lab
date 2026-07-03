@@ -14,9 +14,8 @@ wait_port_free() {
 
 echo "[pi-pulse] starting supervisor"
 while true; do
+  wait_port_free
   node server.js
   echo "[pi-pulse] restarting in 1s..."
-  pkill -TERM -f "node server.js" 2>/dev/null
   sleep 1
-  wait_port_free
 done

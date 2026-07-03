@@ -16,6 +16,7 @@ Create a file at `/home/admin/lab/projects/<your-project-name>/status.json`:
   "repo": "/home/admin/your-project-name",
   "runLog": "/home/admin/your-project-name/reports/RUN_LOG.md",
   "runScript": "/home/admin/run-your-project.sh",
+  "runner": "script",
   "runCount": 0,
   "lastRun": null,
   "lastRunType": null
@@ -31,6 +32,11 @@ Create a file at `/home/admin/lab/projects/<your-project-name>/status.json`:
 | `runScript` | Absolute path to a bash script that starts a mutation run |
 
 **Optional fields** (shown in the panel if present):
+- `runner` — `claude`, `codex`, or `script`; documentation/status only, the backend still launches `runScript`
+- `promptDir` — prompt directory for generic runners; defaults to `<repo>/prompts`
+- `runTypes` — rotation for generic runners, e.g. `["mutate", "research", "mutate"]`
+- `codexModel` — optional model override for Codex runs
+- `codexBypass` — set `true` for unattended automation; passes Codex `--dangerously-bypass-approvals-and-sandbox`
 - `runCount` — displayed as "run #N"
 - `lastRun` — date string shown in header
 - `lastRunType` — MUTATE / RESEARCH / CREATE
@@ -98,12 +104,37 @@ Type must be one of: `MUTATE`, `RESEARCH`, `CREATE`
 ### Run script
 A bash script at `runScript` path. Pi Pulse runs it detached — it should handle its own logging.
 
+Claude-style project:
+
 ```bash
 #!/bin/bash
 cd /home/admin/your-project-name
-# run claude or whatever drives mutations
 claude --print "..." >> reports/run.log 2>&1
 ```
+
+Codex-style project:
+
+```json
+{
+  "project": "your-project-name",
+  "repo": "/home/admin/your-project-name",
+  "runLog": "/home/admin/your-project-name/reports/RUN_LOG.md",
+  "runScript": "/home/admin/lab/scripts/run-codex-incubator.sh",
+  "runner": "codex",
+  "promptDir": "/home/admin/your-project-name/prompts",
+  "runTypes": ["mutate", "research", "mutate"],
+  "codexModel": "gpt-5",
+  "codexBypass": true
+}
+```
+
+`run-codex-incubator.sh` reads the currently mounted project from `mounted.json`, loads `<promptDir>/<runType>.md`, and runs:
+
+```bash
+codex exec -C "$repo" --add-dir /home/admin/lab --dangerously-bypass-approvals-and-sandbox "$prompt"
+```
+
+It appends Codex stdout to `runLog` and updates `runCount`, `lastRun`, and `lastRunType` in the project's lab status file.
 
 ---
 

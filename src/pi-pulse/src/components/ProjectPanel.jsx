@@ -10,42 +10,80 @@ const AI_FIELD_META = [
   { key: 'DRIFT',     label: 'Drift',     color: '#a78bfa' },
   { key: 'NEXT',      label: 'Next',      color: '#38bdf8' },
 ]
+const AI_FIELD_KEYS = AI_FIELD_META.map(f => f.key)
+const AI_FIELD_ALIASES = {
+  'NEXT MOVE': 'NEXT',
+  'NEXT ACTION': 'NEXT',
+  'SUGGESTED NEXT MOVE': 'NEXT',
+  'STRONGEST SIGNAL': 'STRONGEST',
+  'WEAKEST SIGNAL': 'WEAKEST',
+  'WEAKNESS': 'WEAKEST',
+}
 
-function parseAnalysis(text) {
+function parseAnalysis(text = '', meta = {}) {
+  const raw = String(text || '').trim()
   const fields = {}
   const re = /([A-Z]{2,}[A-Z\s]*):\s*\n?([\s\S]*?)(?=\n[A-Z]{2,}[A-Z\s]*:|$)/g
   let m
-  while ((m = re.exec(text.replace(/\*\*/g, '').replace(/\r/g, ''))) !== null) {
-    const key = m[1].trim().toUpperCase()
+  while ((m = re.exec(raw.replace(/\*\*/g, '').replace(/\r/g, ''))) !== null) {
+    const label = m[1].trim().toUpperCase()
+    const key = AI_FIELD_ALIASES[label] || label
     const val = m[2].trim().replace(/\n+/g, ' ')
-    if (val && AI_FIELD_META.some(f => f.key === key)) fields[key] = val
+    if (val && AI_FIELD_KEYS.includes(key)) fields[key] = val
   }
-  return fields
+  const missing = AI_FIELD_KEYS.filter(key => !fields[key])
+  return {
+    fields,
+    missing,
+    raw,
+    malformed: !!raw && missing.length > 0,
+    model: meta.model || 'qwen2.5-instruct:1.5b',
+    source: meta.source || 'local-ollama-qwen',
+  }
 }
 
-function AiStrip({ autoTrigger }) {
+function AiStrip({ slotId, autoTrigger }) {
   const [open, setOpen]         = useState(false)
   const [analysis, setAnalysis] = useState(null)
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState(null)
   const [lastRun, setLastRun]   = useState(null)
-  const prevTriggerRef          = useRef(0)
+  const prevTriggerBySlotRef    = useRef({})
 
   useEffect(() => {
-    fetch('/api/child/ai/latest').then(r => r.json()).then(d => {
-      if (d.ok && d.response) {
-        setAnalysis(parseAnalysis(d.response))
-        setLastRun(new Date(d.ts).toLocaleTimeString())
-      }
-    }).catch(() => {})
-  }, [])
+    setAnalysis(null)
+    setError(null)
+    setLastRun(null)
+    if (!slotId) return
+    fetch(`/api/incubators/${slotId}/ai/latest`)
+      .then(async r => {
+        const text = await r.text()
+        try { return JSON.parse(text) }
+        catch { throw new Error('AI feedback API returned HTML, not JSON') }
+      })
+      .then(d => {
+        if (d.ok && d.response) {
+          setAnalysis(parseAnalysis(d.response, d))
+          setLastRun(d.ts ? new Date(d.ts).toLocaleTimeString() : null)
+        }
+      })
+      .catch(err => setError(err.message))
+  }, [slotId])
 
   useEffect(() => {
-    if (autoTrigger > prevTriggerRef.current && !loading) {
-      prevTriggerRef.current = autoTrigger
-      runAnalysis()
+    if (!slotId) return
+    const prev = prevTriggerBySlotRef.current[slotId]
+    if (prev == null) {
+      prevTriggerBySlotRef.current[slotId] = autoTrigger
+      return
     }
-  }, [autoTrigger])
+    if (autoTrigger > prev && !loading) {
+      prevTriggerBySlotRef.current[slotId] = autoTrigger
+      runAnalysis()
+    } else if (autoTrigger > prev) {
+      prevTriggerBySlotRef.current[slotId] = autoTrigger
+    }
+  }, [slotId, autoTrigger])
 
   async function runAnalysis(e) {
     e?.stopPropagation()
@@ -53,10 +91,13 @@ function AiStrip({ autoTrigger }) {
     setError(null)
     setOpen(true)
     try {
-      const r = await fetch('/api/child/ai/analyze', { method: 'POST' })
-      const d = await r.json()
+      const r = await fetch(`/api/incubators/${slotId}/ai/analyze`, { method: 'POST' })
+      const text = await r.text()
+      let d
+      try { d = JSON.parse(text) }
+      catch { throw new Error('AI feedback API returned HTML, not JSON') }
       if (!d.ok) throw new Error(d.error || 'failed')
-      setAnalysis(parseAnalysis(d.response))
+      setAnalysis(parseAnalysis(d.response, d))
       setLastRun(new Date().toLocaleTimeString())
     } catch (err) {
       setError(err.message)
@@ -65,7 +106,9 @@ function AiStrip({ autoTrigger }) {
     }
   }
 
-  const active = loading || !!analysis
+  const fields = analysis?.fields || {}
+  const preview = fields.DIRECTION || analysis?.raw?.split('\n').find(Boolean) || ''
+  const active = loading || !!analysis?.raw
 
   return (
     <>
@@ -99,22 +142,22 @@ function AiStrip({ autoTrigger }) {
         <span style={{ fontSize: '0.6rem', fontFamily: 'monospace', fontWeight: 600,
           textTransform: 'uppercase', letterSpacing: '0.12em',
           color: active ? '#a78bfa' : 'var(--muted)', position: 'relative' }}>
-          AI HAT+ 2
+          Local Ollama/Qwen
         </span>
         <motion.div
           animate={analysis ? { opacity: [1, 0.3, 1] } : {}}
           transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
-          style={{ width: 5, height: 5, borderRadius: '50%', background: error ? '#ef4444' : '#22c55e', flexShrink: 0 }}
+          style={{ width: 5, height: 5, borderRadius: '50%', background: error ? '#ef4444' : analysis?.malformed ? '#f59e0b' : '#22c55e', flexShrink: 0 }}
         />
         <span style={{ flex: 1, fontSize: '0.67rem', fontFamily: 'monospace',
-          color: !open && analysis?.DIRECTION ? 'rgba(241,245,249,0.55)' : 'rgba(71,85,105,0.4)',
+          color: !open && preview ? 'rgba(241,245,249,0.55)' : 'rgba(71,85,105,0.4)',
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {!open && analysis?.DIRECTION
-            ? (analysis.DIRECTION.length > 60 ? analysis.DIRECTION.slice(0, 60) + '…' : analysis.DIRECTION)
+          {!open && preview
+            ? (preview.length > 60 ? preview.slice(0, 60) + '…' : preview)
             : !open && loading ? 'analyzing…' : !open ? 'ready' : ''}
         </span>
         <button onClick={e => { e.stopPropagation(); runAnalysis() }} disabled={loading}
-          title="Re-analyze"
+          title="Refresh local Ollama/Qwen analysis"
           style={{ background: 'none', border: 'none', padding: '2px 4px', cursor: loading ? 'default' : 'pointer',
             opacity: loading ? 0.18 : 0.32, color: 'rgba(148,163,184,1)', display: 'flex', alignItems: 'center',
             transition: 'opacity 0.2s ease', flexShrink: 0 }}
@@ -157,16 +200,24 @@ function AiStrip({ autoTrigger }) {
                 <div className="animate-pulse" style={{ height: 7, flex: 1, background: 'rgba(255,255,255,0.07)', borderRadius: 3 }} />
               ) : (
                 <span style={{ fontSize: '0.78rem', fontFamily: 'monospace', lineHeight: 1.5,
-                  color: analysis?.[f.key] ? 'rgba(241,245,249,0.85)' : 'rgba(71,85,105,0.32)' }}>
-                  {analysis?.[f.key] ?? '—'}
+                  color: fields[f.key] ? 'rgba(241,245,249,0.85)' : analysis?.malformed ? 'rgba(245,158,11,0.72)' : 'rgba(71,85,105,0.32)' }}>
+                  {fields[f.key] ?? (analysis?.malformed ? 'missing from saved response' : '—')}
                 </span>
               )}
             </div>
           ))}
+          {analysis?.malformed && (
+            <div style={{ marginTop: 8, border: '1px solid rgba(245,158,11,0.18)', background: 'rgba(245,158,11,0.05)', borderRadius: 6, padding: '8px 10px' }}>
+              <div style={{ fontSize: '0.56rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(245,158,11,0.8)', marginBottom: 6 }}>
+                raw local qwen response
+              </div>
+              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '0.68rem', lineHeight: 1.45, fontFamily: 'monospace', color: 'rgba(241,245,249,0.72)', maxHeight: 160, overflow: 'auto' }}>{analysis.raw}</pre>
+            </div>
+          )}
           {lastRun && !loading && (
             <div style={{ paddingTop: 7, borderTop: '1px solid rgba(255,255,255,0.04)', marginTop: 2 }}>
               <span style={{ fontSize: '0.59rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.45)' }}>
-                last run {lastRun} · qwen2.5-instruct:1.5b
+                saved {lastRun} · local Ollama/Qwen · {analysis?.model}
               </span>
             </div>
           )}
@@ -180,6 +231,7 @@ const TYPE_COLOR = {
   MUTATE:   '#a78bfa',
   RESEARCH: '#34d399',
   CREATE:   '#22d3ee',
+  FAILED:   '#f87171',
 }
 
 function fmtElapsed(secs) {
@@ -197,441 +249,531 @@ function fmtCountdown(nextRunAt) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
+function fmtInterval(hours) {
+  if (!hours) return 'manual'
+  const mins = Math.round(hours * 60)
+  return mins < 60 ? `${mins}m` : `${hours}h`
+}
+
+function runAttemptText(run) {
+  return run.attemptTotal > 1 && run.attempt ? ` · attempt ${run.attempt}/${run.attemptTotal}` : ''
+}
+
+function IncubatorSlot({ slot, onToggle, onRun }) {
+  const enabled = !!slot.schedule?.enabled
+  const active = !!slot.running
+  const due = fmtCountdown(slot.schedule?.nextRunAt)
+  const runner = slot.runner || slot.schedule?.runner || 'script'
+  const ringColor = slot.tone === 'core' ? '#22d3ee' : '#a78bfa'
+  const statusColor = active ? ringColor : enabled ? '#22c55e' : 'rgba(71,85,105,0.45)'
+  const level = Math.max(1, Math.floor((slot.runCount || 0) / 5) + 1)
+  const xp = Math.min(100, ((slot.runCount || 0) % 5) * 20)
+
+  return (
+    <div style={{
+      border: `1px solid ${active ? `${ringColor}55` : 'rgba(255,255,255,0.08)'}`,
+      background: active ? `color-mix(in srgb, ${ringColor} 7%, rgba(8,10,14,0.96))` : 'rgba(8,10,14,0.72)',
+      borderRadius: 8,
+      padding: 12,
+      display: 'grid',
+      gridTemplateColumns: '42px 1fr auto',
+      gap: 12,
+      alignItems: 'center',
+      minWidth: 0,
+    }}>
+      <motion.div
+        animate={active ? { rotate: 360 } : { rotate: 0 }}
+        transition={active ? { duration: 8, repeat: Infinity, ease: 'linear' } : { duration: 0.4 }}
+        style={{
+        width: 42,
+        height: 42,
+        borderRadius: '50%',
+        background: `conic-gradient(${ringColor} ${active ? '220deg' : enabled ? '96deg' : '18deg'}, rgba(255,255,255,0.08) 0)`,
+        display: 'grid',
+        placeItems: 'center',
+        boxShadow: active ? `0 0 16px ${ringColor}33` : 'none',
+      }}>
+        <div style={{
+          width: 30,
+          height: 30,
+          borderRadius: '50%',
+          background: '#0d1015',
+          border: '1px solid rgba(255,255,255,0.08)',
+          display: 'grid',
+          placeItems: 'center',
+          color: ringColor,
+          fontSize: '0.58rem',
+          fontFamily: 'monospace',
+          fontWeight: 700,
+        }}>
+          {slot.label}
+        </div>
+      </motion.div>
+
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+          <span style={{
+            fontSize: '0.58rem',
+            fontFamily: 'monospace',
+            textTransform: 'uppercase',
+            letterSpacing: '0.12em',
+            color: ringColor,
+            whiteSpace: 'nowrap',
+          }}>
+            {slot.type}
+          </span>
+          <span style={{
+            width: 5,
+            height: 5,
+            borderRadius: '50%',
+            background: statusColor,
+            boxShadow: active ? `0 0 8px ${ringColor}` : 'none',
+            flexShrink: 0,
+          }} />
+          <span style={{
+            fontSize: '0.56rem',
+            fontFamily: 'monospace',
+            color: 'rgba(71,85,105,0.58)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>
+            {active ? 'incubating' : enabled ? `every ${fmtInterval(slot.schedule?.intervalHours)}` : 'paused'}
+          </span>
+        </div>
+        <div style={{
+          marginTop: 5,
+          fontSize: '0.84rem',
+          fontWeight: 650,
+          color: 'rgba(241,245,249,0.88)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {slot.name}
+        </div>
+        <div style={{
+          marginTop: 4,
+          display: 'flex',
+          gap: 8,
+          flexWrap: 'wrap',
+          fontSize: '0.62rem',
+          fontFamily: 'monospace',
+          color: 'rgba(148,163,184,0.66)',
+        }}>
+          <span>{runner}</span>
+          <span>{slot.charges ?? '∞'} charges</span>
+          <span>{active ? fmtElapsed(slot.elapsed || 0) : enabled ? `next ${due}` : 'no timer'}</span>
+        </div>
+        <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 8, alignItems: 'center' }}>
+          <span style={{
+            fontSize: '0.56rem',
+            fontFamily: 'monospace',
+            color: ringColor,
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            whiteSpace: 'nowrap',
+          }}>
+            lvl {level}
+          </span>
+          <div style={{ height: 4, borderRadius: 999, background: 'rgba(255,255,255,0.07)', overflow: 'hidden' }}>
+            <motion.div
+              initial={false}
+              animate={{ width: `${xp || (active ? 8 : 0)}%` }}
+              transition={{ duration: 0.55, ease: [0.4, 0, 0.2, 1] }}
+              style={{ height: '100%', background: ringColor, boxShadow: active ? `0 0 10px ${ringColor}` : 'none' }}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <button
+          onClick={onRun}
+          disabled={active}
+          title={`Run ${slot.name}`}
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: 6,
+            border: `1px solid ${ringColor}33`,
+            background: `${ringColor}14`,
+            color: ringColor,
+            cursor: active ? 'not-allowed' : 'pointer',
+            display: 'grid',
+            placeItems: 'center',
+            opacity: active ? 0.45 : 1,
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+        </button>
+        <button
+          onClick={onToggle}
+          title={enabled ? 'Pause incubator' : 'Start incubator'}
+          style={{
+            minWidth: 46,
+            height: 28,
+            borderRadius: 6,
+            border: `1px solid ${enabled ? 'rgba(34,197,94,0.28)' : 'rgba(255,255,255,0.08)'}`,
+            background: enabled ? 'rgba(34,197,94,0.07)' : 'rgba(255,255,255,0.03)',
+            color: enabled ? '#22c55e' : 'rgba(148,163,184,0.62)',
+            cursor: 'pointer',
+            fontSize: '0.58rem',
+            fontFamily: 'monospace',
+            textTransform: 'uppercase',
+            letterSpacing: '0.06em',
+          }}
+        >
+          {enabled ? 'pause' : 'start'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function RunnerSwitch({ value, available = ['codex', 'claude'], onChange, disabled }) {
+  const options = ['codex', 'claude']
+  return (
+    <div style={{ display: 'flex', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, overflow: 'hidden' }}>
+      {options.map(option => {
+        const active = value === option
+        const supported = available.includes(option)
+        return (
+          <button
+            key={option}
+            onClick={() => supported && onChange?.(option)}
+            disabled={disabled || !supported}
+            title={supported ? `Use ${option}` : `${option} runner is not configured for this project`}
+            style={{
+              border: 'none',
+              borderRight: option === 'codex' ? '1px solid rgba(255,255,255,0.08)' : 'none',
+              background: active ? 'rgba(167,139,250,0.14)' : 'rgba(255,255,255,0.025)',
+              color: active ? '#a78bfa' : supported ? 'rgba(148,163,184,0.68)' : 'rgba(71,85,105,0.35)',
+              padding: '4px 8px',
+              cursor: disabled || !supported ? 'not-allowed' : 'pointer',
+              fontSize: '0.58rem',
+              fontFamily: 'monospace',
+              textTransform: 'uppercase',
+              letterSpacing: '0.06em',
+            }}
+          >
+            {option}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 export function ProjectPanel() {
-  const [status, setStatus]   = useState(null)
-  const [runs, setRuns]       = useState([])
-  const [running, setRunning] = useState(false)
-  const [launching, setLaunching] = useState(false)
-  const [elapsed, setElapsed] = useState(0)
-  const [aiTrigger, setAiTrigger] = useState(0)
-  const [projects, setProjects]   = useState([])
-  const [switchOpen, setSwitchOpen] = useState(false)
-  const [switching, setSwitching]   = useState(false)
-  const [schedule, setSchedule]     = useState(null)
-  const switchRef = useRef(null)
-  const startTimeRef = useRef(null)
-  const prevRunCountRef = useRef(0)
+  const [selected, setSelected] = useState('core')
+  const [hostStatus, setHostStatus] = useState(null)
+  const [hostRuns, setHostRuns] = useState([])
+  const [labSchedule, setLabSchedule] = useState(null)
+  const [labRunning, setLabRunning] = useState(false)
+  const [labElapsed, setLabElapsed] = useState(0)
+  const [labLaunching, setLabLaunching] = useState(false)
+  const [incubators, setIncubators] = useState([])
+  const [runsBySlot, setRunsBySlot] = useState({})
+  const [projects, setProjects] = useState([])
+  const [addOpen, setAddOpen] = useState(false)
+  const [switching, setSwitching] = useState(false)
+  const [aiTriggersBySlot, setAiTriggersBySlot] = useState({})
+  const labStartTimeRef = useRef(null)
+  const runSignatureBySlotRef = useRef({})
 
-  const fetchStatus = () =>
-    fetch('/api/child/status').then(r => r.json()).then(setStatus).catch(() => {})
+  const fetchHostStatus = () => fetch('/api/project/status').then(r => r.json()).then(setHostStatus).catch(() => {})
 
-  const fetchRuns = () =>
-    fetch('/api/child/runs').then(r => r.json()).then(setRuns).catch(() => {})
+  const latestRunSignature = (runs) => {
+    const latest = runs.at(-1)
+    if (!latest) return 'empty'
+    const what = latest['Failure'] || latest['Error'] || latest['Goal'] || latest['Done'] || latest['What I investigated'] || latest['Investigated'] || latest['What I built'] || latest['What I changed'] || latest['What changed'] || latest['What improved'] || latest['What I found'] || latest['Finding'] || latest['Key finding'] || latest['Suggested next move'] || ''
+    return latest.signature || `${latest.num ?? ''}|${latest.date ?? ''}|${latest.type ?? ''}|${what}|${runs.length}`
+  }
 
-  const fetchProjects = () =>
-    fetch('/api/projects/list').then(r => r.json()).then(d => { if (d.ok) setProjects(d.projects) }).catch(() => {})
+  const noteLatestRun = (id, runs) => {
+    const signature = latestRunSignature(runs)
+    const prev = runSignatureBySlotRef.current[id]
+    if (prev != null && signature !== prev) {
+      setAiTriggersBySlot(current => ({ ...current, [id]: (current[id] || 0) + 1 }))
+    }
+    runSignatureBySlotRef.current[id] = signature
+  }
 
-  const fetchSchedule = () =>
-    fetch('/api/child/schedule').then(r => r.json()).then(d => { if (d.ok) setSchedule(d) }).catch(() => {})
+  const fetchHostRuns = () => fetch('/api/runs').then(r => r.json()).then(runs => {
+    setHostRuns(runs)
+    noteLatestRun('core', runs)
+  }).catch(() => {})
+  const fetchLabSchedule = () => fetch('/api/lab/schedule').then(r => r.json()).then(d => { if (d.ok) setLabSchedule(d) }).catch(() => {})
+  const fetchProjects = () => fetch('/api/projects/list').then(r => r.json()).then(d => { if (d.ok) setProjects(d.projects) }).catch(() => {})
+
+  const fetchIncubators = async () => {
+    try {
+      const d = await fetch('/api/incubators').then(r => r.json())
+      if (d.ok) {
+        setIncubators(d.slots)
+        for (const slot of d.slots) fetchSlotRuns(slot.id)
+      }
+    } catch {}
+  }
+
+  const fetchSlotRuns = async (id) => {
+    try {
+      const d = await fetch(`/api/incubators/${id}/runs`).then(r => r.json())
+      if (d.ok) {
+        setRunsBySlot(prev => ({ ...prev, [id]: d.runs }))
+        noteLatestRun(id, d.runs)
+      }
+    } catch {}
+  }
+
+  const fetchRunStates = async () => {
+    try {
+      const d = await fetch('/api/run/status').then(r => r.json())
+      setLabRunning(!!d.running)
+      if (d.running && d.startTime) labStartTimeRef.current = d.startTime
+    } catch {}
+  }
 
   useEffect(() => {
-    fetchStatus()
-    fetchRuns()
-    fetchProjects()
-    fetchSchedule()
-    const es = new EventSource('/api/child/runs/stream')
-    es.onmessage = () => { fetchRuns(); fetchStatus() }
-    const poll = setInterval(() => { fetchStatus(); fetchRuns(); fetchSchedule() }, 30000)
-    return () => { es.close(); clearInterval(poll) }
+    fetchHostStatus(); fetchHostRuns(); fetchLabSchedule(); fetchProjects(); fetchIncubators(); fetchRunStates()
+    const hostStream = new EventSource('/api/runs/stream')
+    hostStream.onmessage = () => { fetchHostRuns(); fetchHostStatus(); fetchRunStates() }
+    const incStream = new EventSource('/api/incubators/stream')
+    incStream.onmessage = () => { fetchIncubators() }
+    const poll = setInterval(() => {
+      fetchHostStatus(); fetchHostRuns(); fetchLabSchedule(); fetchProjects(); fetchIncubators(); fetchRunStates()
+    }, 30000)
+    return () => { hostStream.close(); incStream.close(); clearInterval(poll) }
   }, [])
 
-  // Close switcher on outside click
   useEffect(() => {
-    if (!switchOpen) return
-    const handler = (e) => { if (switchRef.current && !switchRef.current.contains(e.target)) setSwitchOpen(false) }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [switchOpen])
+    const id = setInterval(() => {
+      if (labRunning && labStartTimeRef.current) setLabElapsed(Math.floor((Date.now() - labStartTimeRef.current) / 1000))
+    }, 1000)
+    return () => clearInterval(id)
+  }, [labRunning])
 
-  const handleMount = async (dir) => {
-    if (switching) return
-    setSwitchOpen(false)
-    setSwitching(true)
+  const handleLabRun = async () => {
+    if (labLaunching || labRunning) return
+    setLabLaunching(true)
     try {
-      await fetch('/api/projects/mount', {
+      const data = await fetch('/api/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dir }),
-      })
-      // Server restarts — poll until it's back, then reload
-      const waitForRestart = async () => {
-        await new Promise(r => setTimeout(r, 1200))
-        for (let i = 0; i < 20; i++) {
-          try {
-            const r = await fetch('/api/health')
-            if (r.ok) { window.location.reload(); return }
-          } catch {}
-          await new Promise(r => setTimeout(r, 600))
-        }
-        setSwitching(false) // gave up
+        body: JSON.stringify({ runner: labSchedule?.runner || hostStatus?.runner || 'codex' }),
+      }).then(r => r.json())
+      if (data.ok) { labStartTimeRef.current = Date.now(); setLabElapsed(0); setLabRunning(true) }
+    } catch {}
+    setTimeout(() => setLabLaunching(false), 800)
+  }
+
+  const updateLabSchedule = async (enabled) => {
+    try {
+      const d = await fetch('/api/lab/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled, intervalHours: labSchedule?.intervalHours || 0.5, runner: labSchedule?.runner || hostStatus?.runner || 'codex' }),
+      }).then(r => r.json())
+      if (d.ok) setLabSchedule(d)
+    } catch {}
+  }
+
+  const updateLabRunner = async (runner) => {
+    try {
+      const d = await fetch('/api/lab/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: labSchedule?.enabled ?? false, intervalHours: labSchedule?.intervalHours || 0.5, runner }),
+      }).then(r => r.json())
+      if (d.ok) setLabSchedule(d)
+    } catch {}
+  }
+
+  const runProjectSlot = async (id) => {
+    try {
+      await fetch(`/api/incubators/${id}/run`, { method: 'POST' })
+      await fetchIncubators()
+    } catch {}
+  }
+
+  const updateProjectSchedule = async (slot, enabled) => {
+    try {
+      const d = await fetch(`/api/incubators/${slot.id}/schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled, intervalHours: slot.intervalHours || 0.5 }),
+      }).then(r => r.json())
+      if (d.ok) await fetchIncubators()
+    } catch {}
+  }
+
+  const updateProjectRunner = async (slot, runner) => {
+    try {
+      const d = await fetch(`/api/incubators/${slot.id}/runner`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runner }),
+      }).then(r => r.json())
+      if (d.ok) await fetchIncubators()
+    } catch {}
+  }
+
+  const addIncubator = async (project) => {
+    setSwitching(true)
+    try {
+      const d = await fetch('/api/incubators', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project, enabled: false, intervalHours: 0.5 }),
+      }).then(r => r.json())
+      if (d.ok) {
+        setSelected(project)
+        setAddOpen(false)
+        await fetchIncubators()
       }
-      waitForRestart()
-    } catch {
+    } catch {} finally {
       setSwitching(false)
     }
   }
 
-  // Auto-trigger AI after a new run appears
-  useEffect(() => {
-    if (runs.length > prevRunCountRef.current && prevRunCountRef.current > 0) {
-      setAiTrigger(c => c + 1)
-    }
-    prevRunCountRef.current = runs.length
-  }, [runs.length])
-
-  // Tick elapsed + poll run status while in flight
-  useEffect(() => {
-    if (!running) { setElapsed(0); return }
-    const tick = setInterval(() => {
-      if (startTimeRef.current) {
-        setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000))
-      }
-    }, 1000)
-    const poll = setInterval(async () => {
-      try {
-        const r = await fetch('/api/child/run/status')
-        const data = await r.json()
-        if (!data.running) { setRunning(false); fetchRuns(); fetchStatus() }
-      } catch {}
-    }, 4000)
-    return () => { clearInterval(tick); clearInterval(poll) }
-  }, [running])
-
-  const handleRun = async () => {
-    if (launching || running) return
-    setLaunching(true)
+  const removeIncubator = async (id) => {
+    if (id === 'rat-deposit') return
     try {
-      const r = await fetch('/api/child/run', { method: 'POST' })
-      const data = await r.json()
-      if (data.ok) { startTimeRef.current = Date.now(); setElapsed(0); setRunning(true) }
-    } catch {}
-    setTimeout(() => setLaunching(false), 800)
-  }
-
-  const handleScheduleToggle = async () => {
-    const enabled = !schedule?.enabled
-    try {
-      const r = await fetch('/api/child/schedule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled, intervalHours: 2 }),
-      })
-      const d = await r.json()
-      if (d.ok) setSchedule(d)
+      await fetch(`/api/incubators/${id}`, { method: 'DELETE' })
+      setSelected('core')
+      await fetchIncubators()
     } catch {}
   }
 
-  const displayRuns = runs.slice(-4).reverse()
-  const nextRunNum = (status?.runCount ?? runs.length) + 1
+  const coreSlot = {
+    id: 'core', type: 'Core Incubator', label: '∞', tone: 'core', name: hostStatus?.project || 'pi-pulse',
+    runner: labSchedule?.runner || hostStatus?.runner, schedule: labSchedule, running: labRunning,
+    elapsed: labElapsed, runCount: hostStatus?.runCount, charges: '∞', status: hostStatus, runs: hostRuns,
+    onRun: handleLabRun, onToggle: () => updateLabSchedule(!labSchedule?.enabled), launching: labLaunching,
+    availableRunners: ['codex', 'claude'],
+    onRunnerChange: updateLabRunner,
+  }
+
+  const projectSlots = incubators.map(slot => ({
+    ...slot,
+    tone: 'project',
+    type: slot.project === 'race-whisperer-predict' ? 'Analysis Incubator' : 'Project Incubator',
+    label: slot.project?.slice(0, 1)?.toUpperCase() || 'P',
+    name: slot.project || slot.id,
+    schedule: slot,
+    status: slot,
+    runs: runsBySlot[slot.id] || [],
+    running: slot.running?.running,
+    elapsed: slot.running?.elapsed || 0,
+    onRun: () => runProjectSlot(slot.id),
+    onToggle: () => updateProjectSchedule(slot, !slot.enabled),
+    onRunnerChange: (runner) => updateProjectRunner(slot, runner),
+    launching: false,
+  }))
+
+  const slots = [coreSlot, ...projectSlots]
+  const activeSlot = slots.find(s => s.id === selected) || slots[0]
+  const displayRuns = (activeSlot.runs || []).slice(-5).reverse()
+  const nextRunNum = (activeSlot.runCount ?? activeSlot.runs?.length ?? 0) + 1
+  const color = activeSlot.tone === 'core' ? '#22d3ee' : '#a78bfa'
+  const existingIds = new Set(incubators.map(s => s.id))
+  const addableProjects = projects.filter(p => !existingIds.has(p.dir))
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.45, delay: 0.3 }}
-      className="panel"
-      style={{ padding: 0, overflow: 'visible', position: 'relative' }}
-    >
-      {/* Switching overlay */}
+    <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, delay: 0.3 }} className="panel" style={{ padding: 0, overflow: 'visible', position: 'relative' }}>
       {switching && (
-        <div style={{
-          position: 'absolute', inset: 0, zIndex: 10,
-          background: 'rgba(8,8,8,0.85)', backdropFilter: 'blur(2px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-          borderRadius: 'inherit',
-        }}>
-          <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-            style={{ width: 8, height: 8, borderRadius: '50%', border: '1.5px solid #a78bfa', borderTopColor: 'transparent' }} />
-          <span style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'rgba(167,139,250,0.8)', letterSpacing: '0.1em' }}>
-            reloading…
-          </span>
+        <div style={{ position: 'absolute', inset: 0, zIndex: 10, background: 'rgba(8,8,8,0.85)', backdropFilter: 'blur(2px)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, borderRadius: 'inherit' }}>
+          <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }} style={{ width: 8, height: 8, borderRadius: '50%', border: '1.5px solid #a78bfa', borderTopColor: 'transparent' }} />
+          <span style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'rgba(167,139,250,0.8)', letterSpacing: '0.1em' }}>updating slots…</span>
         </div>
       )}
 
-      {/* Header */}
-      <div style={{
-        padding: '11px 24px',
-        borderBottom: '1px solid var(--border)',
-        display: 'flex', alignItems: 'center', gap: 8,
-        background: running ? 'color-mix(in srgb, #a78bfa 4%, transparent)' : 'transparent',
-        transition: 'background 0.5s ease',
-        position: 'relative',
-      }}>
-        <motion.div
-          animate={running ? { opacity: [1, 0.3, 1] } : { opacity: 0.7 }}
-          transition={{ duration: 1.4, repeat: running ? Infinity : 0, ease: 'easeInOut' }}
-          style={{
-            width: 5, height: 5, borderRadius: '50%', flexShrink: 0,
-            background: running ? '#a78bfa' : '#22c55e',
-            boxShadow: running ? '0 0 7px #a78bfa' : 'none',
-          }}
-        />
-
-        {/* Project name — clickable to open switcher */}
-        <div ref={switchRef} style={{ position: 'relative' }}>
-          <button
-            onClick={() => { if (!running && projects.length > 1) setSwitchOpen(o => !o) }}
-            style={{
-              background: 'none', border: 'none', padding: 0, margin: 0,
-              display: 'flex', alignItems: 'center', gap: 5,
-              cursor: (!running && projects.length > 1) ? 'pointer' : 'default',
-            }}
-            title={projects.length > 1 ? 'Switch project' : undefined}
-          >
-            <span style={{
-              fontSize: '0.6rem', fontFamily: 'monospace', fontWeight: 600,
-              textTransform: 'uppercase', letterSpacing: '0.14em',
-              color: running ? '#a78bfa' : 'var(--muted)',
-              transition: 'color 0.4s ease',
-            }}>
-              {status?.project ?? '…'}
-            </span>
-            {projects.length > 1 && !running && (
-              <motion.svg animate={{ rotate: switchOpen ? 180 : 0 }} transition={{ duration: 0.15 }}
-                width="8" height="8" viewBox="0 0 24 24" fill="none"
-                stroke="rgba(71,85,105,0.5)" strokeWidth="2.5" strokeLinecap="round">
-                <polyline points="6 9 12 15 18 9" />
-              </motion.svg>
-            )}
-          </button>
-
-          {/* Dropdown */}
-          {switchOpen && (
-            <motion.div
-              initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.12 }}
-              style={{
-                position: 'absolute', top: '100%', left: 0, marginTop: 6, zIndex: 20,
-                background: '#111118', border: '1px solid rgba(255,255,255,0.1)',
-                borderRadius: 8, padding: '4px 0', minWidth: 200,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-              }}
-            >
-              {projects.map(p => (
-                <button key={p.dir} onClick={() => handleMount(p.dir)}
-                  style={{
-                    width: '100%', border: 'none',
-                    padding: '7px 14px', cursor: 'pointer', textAlign: 'left',
-                    display: 'flex', alignItems: 'center', gap: 8,
-                    background: p.mounted ? 'rgba(167,139,250,0.06)' : 'transparent',
-                  }}
-                  onMouseEnter={e => { if (!p.mounted) e.currentTarget.style.background = 'rgba(255,255,255,0.04)' }}
-                  onMouseLeave={e => { e.currentTarget.style.background = p.mounted ? 'rgba(167,139,250,0.06)' : 'transparent' }}
-                >
-                  <div style={{
-                    width: 5, height: 5, borderRadius: '50%', flexShrink: 0,
-                    background: p.mounted ? '#a78bfa' : 'rgba(71,85,105,0.4)',
-                  }} />
-                  <div>
-                    <div style={{ fontSize: '0.7rem', fontFamily: 'monospace', fontWeight: p.mounted ? 600 : 400,
-                      color: p.mounted ? '#a78bfa' : 'rgba(241,245,249,0.72)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                      {p.name}
-                    </div>
-                    {p.phase && (
-                      <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.5)', marginTop: 1 }}>
-                        {p.phase} · run #{p.runCount}
-                      </div>
-                    )}
-                  </div>
-                  {p.mounted && (
-                    <span style={{ marginLeft: 'auto', fontSize: '0.55rem', fontFamily: 'monospace',
-                      color: 'rgba(167,139,250,0.5)', letterSpacing: '0.08em' }}>
-                      MOUNTED
-                    </span>
-                  )}
-                </button>
-              ))}
-            </motion.div>
-          )}
+      <div style={{ padding: '16px 18px', borderBottom: '1px solid var(--border)', background: 'linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0.08))' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.14em', color: 'var(--muted)' }}>Incubator Deck</div>
+            <div style={{ marginTop: 4, fontSize: '0.75rem', color: 'rgba(148,163,184,0.66)', lineHeight: 1.35 }}>Each chamber has its own project, runner, timer, and run history.</div>
+          </div>
+          <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.48)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+            {slots.filter(s => s.schedule?.enabled).length} active · {projectSlots.length} project slots
+          </div>
         </div>
-
-        <span style={{
-          fontSize: '0.58rem', fontFamily: 'monospace',
-          color: 'rgba(71,85,105,0.45)', marginLeft: 2,
-        }}>
-          · mounted project
-        </span>
-        {status?.phase && (
-          <span style={{
-            fontSize: '0.54rem', fontFamily: 'monospace',
-            color: 'rgba(71,85,105,0.32)', letterSpacing: '0.08em',
-            textTransform: 'uppercase',
-            background: 'rgba(255,255,255,0.04)',
-            border: '1px solid rgba(255,255,255,0.06)',
-            borderRadius: 4, padding: '1px 5px',
-          }}>
-            {status.phase}
-          </span>
-        )}
-        <span style={{ marginLeft: 'auto', fontSize: '0.6rem', fontFamily: 'monospace', color: running ? '#a78bfa' : 'rgba(71,85,105,0.4)' }}>
-          {running ? `running · ${fmtElapsed(elapsed)}` : status ? `run #${status.runCount} · ${status.lastRun ?? '—'}` : '—'}
-        </span>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
+          {slots.map(slot => (
+            <div key={slot.id} onClick={() => setSelected(slot.id)} style={{ cursor: 'pointer', borderRadius: 9, outline: selected === slot.id ? `1px solid ${slot.tone === 'core' ? '#22d3ee66' : '#a78bfa66'}` : '1px solid transparent', outlineOffset: 2 }}>
+              <IncubatorSlot slot={slot} onToggle={(e) => { e?.stopPropagation?.(); slot.onToggle() }} onRun={(e) => { e?.stopPropagation?.(); slot.onRun() }} />
+            </div>
+          ))}
+          <div style={{ position: 'relative' }}>
+            <button onClick={() => setAddOpen(o => !o)} style={{ width: '100%', minHeight: 98, border: '1px dashed rgba(148,163,184,0.24)', borderRadius: 8, background: 'rgba(8,10,14,0.42)', color: 'rgba(148,163,184,0.62)', cursor: 'pointer', display: 'grid', placeItems: 'center', gap: 4 }}>
+              <span style={{ fontSize: '1.1rem', lineHeight: 1 }}>+</span>
+              <span style={{ fontSize: '0.58rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.12em' }}>Add Incubator</span>
+            </button>
+            {addOpen && (
+              <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 6, zIndex: 20, minWidth: 240, background: '#111118', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: 6, boxShadow: '0 8px 32px rgba(0,0,0,0.6)' }}>
+                {addableProjects.length === 0 ? <div style={{ padding: 10, fontSize: '0.7rem', color: 'rgba(148,163,184,0.5)' }}>no available projects</div> : addableProjects.map(p => (
+                  <button key={p.dir} onClick={() => addIncubator(p.dir)} style={{ width: '100%', border: 'none', background: 'transparent', padding: '8px 10px', textAlign: 'left', cursor: 'pointer', borderRadius: 6 }}>
+                    <div style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'rgba(241,245,249,0.78)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{p.name}</div>
+                    <div style={{ marginTop: 2, fontSize: '0.58rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.55)' }}>{p.phase || 'project'} · run #{p.runCount ?? 0}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* Body */}
-      <div
-        style={{ display: 'grid', gridTemplateColumns: '1fr 1px minmax(240px, 280px)' }}
-        className="max-md:!block"
-      >
-        {/* Left: timeline */}
-        <div style={{ padding: '16px 24px' }}>
-          <div style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.14em', color: 'var(--muted)', marginBottom: 12 }}>
-            Runs
-          </div>
+      <div style={{ padding: '13px 24px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 9, background: activeSlot.running ? `color-mix(in srgb, ${color} 4%, transparent)` : 'transparent' }}>
+        <motion.div animate={activeSlot.running ? { opacity: [1, 0.3, 1] } : { opacity: 0.7 }} transition={{ duration: 1.4, repeat: activeSlot.running ? Infinity : 0, ease: 'easeInOut' }} style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: activeSlot.running ? color : '#22c55e', boxShadow: activeSlot.running ? `0 0 8px ${color}` : 'none' }} />
+        <span style={{ fontSize: '0.6rem', fontFamily: 'monospace', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.14em', color }}>{activeSlot.type}</span>
+        <span style={{ fontSize: '0.58rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.45)' }}>·</span>
+        <span style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'rgba(241,245,249,0.82)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{activeSlot.name}</span>
+        {activeSlot.phase && <span style={{ fontSize: '0.54rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.42)', letterSpacing: '0.08em', textTransform: 'uppercase', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 4, padding: '1px 5px' }}>{activeSlot.phase}</span>}
+        {activeSlot.playUrl && <a href={activeSlot.playUrl} target="_blank" rel="noreferrer" style={{ fontSize: '0.56rem', fontFamily: 'monospace', color, textTransform: 'uppercase', letterSpacing: '0.08em', textDecoration: 'none' }}>open</a>}
+        {activeSlot.id !== 'core' && activeSlot.id !== 'rat-deposit' && <button onClick={() => removeIncubator(activeSlot.id)} style={{ border: '1px solid rgba(248,113,113,0.18)', background: 'rgba(248,113,113,0.05)', color: 'rgba(248,113,113,0.72)', borderRadius: 4, padding: '1px 6px', fontSize: '0.54rem', fontFamily: 'monospace', cursor: 'pointer' }}>remove</button>}
+        <span style={{ marginLeft: 'auto', fontSize: '0.6rem', fontFamily: 'monospace', color: activeSlot.running ? color : 'rgba(71,85,105,0.48)' }}>{activeSlot.running ? `running · ${fmtElapsed(activeSlot.elapsed)}` : `run #${activeSlot.runCount ?? activeSlot.runs?.length ?? 0} · ${activeSlot.lastRun ?? activeSlot.status?.lastRun ?? '—'}`}</span>
+      </div>
 
-          {displayRuns.length === 0 ? (
-            <div style={{ fontSize: '0.75rem', color: 'rgba(71,85,105,0.35)', fontFamily: 'monospace' }}>
-              no runs yet
-            </div>
-          ) : displayRuns.map((run, i) => {
-            const color = TYPE_COLOR[run.type] ?? 'rgba(71,85,105,0.5)'
-            const what = run['Goal'] || run['Done'] || run['Investigated'] || run['What I changed'] || run['What I found'] || '—'
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1px minmax(260px, 310px)' }} className="max-md:!block">
+        <div style={{ padding: '16px 24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <div style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.14em', color: 'var(--muted)' }}>Run History</div>
+            <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.45)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{activeSlot.id === 'core' ? 'host log' : 'project log'}</div>
+          </div>
+          {displayRuns.length === 0 ? <div style={{ fontSize: '0.75rem', color: 'rgba(71,85,105,0.35)', fontFamily: 'monospace' }}>no runs yet</div> : displayRuns.map((run, i) => {
+            const runColor = TYPE_COLOR[run.type] ?? 'rgba(71,85,105,0.5)'
+            const what = run['Failure'] || run['Error'] || run['Goal'] || run['Done'] || run['What I investigated'] || run['Investigated'] || run['What I built'] || run['What I changed'] || run['What changed'] || run['What improved'] || run['What I found'] || run['Finding'] || run['Key finding'] || run['Suggested next move'] || 'stdout captured with no summary'
             const isLast = i === displayRuns.length - 1
-            return (
-              <div key={i} style={{ display: 'flex', gap: 10, paddingBottom: isLast ? 0 : 14, position: 'relative' }}>
-                {!isLast && (
-                  <div style={{
-                    position: 'absolute', left: 3, top: 9, bottom: 0, width: 1,
-                    background: 'linear-gradient(to bottom, var(--border), transparent)',
-                  }} />
-                )}
-                <div style={{
-                  width: 7, height: 7, borderRadius: '50%', background: color,
-                  flexShrink: 0, marginTop: 3, boxShadow: `0 0 5px ${color}66`,
-                }} />
-                <div>
-                  <div style={{ display: 'flex', gap: 6, marginBottom: 2 }}>
-                    <span style={{ fontSize: '0.57rem', fontFamily: 'monospace', color, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-                      {run.type ?? 'run'}
-                    </span>
-                    <span style={{ fontSize: '0.57rem', color: 'rgba(71,85,105,0.5)' }}>
-                      #{run.num} {run.date}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: '0.77rem', color: 'rgba(241,245,249,0.72)', lineHeight: 1.4 }}>
-                    {what.length > 70 ? what.slice(0, 70) + '…' : what}
-                  </div>
-                </div>
-              </div>
-            )
+            return <div key={`${activeSlot.id}-${run.signature || `${run.num}-${run.date}-${run.type}-${run.attempt || i}`}`} style={{ display: 'flex', gap: 10, paddingBottom: isLast ? 0 : 14, position: 'relative' }}>
+              {!isLast && <div style={{ position: 'absolute', left: 3, top: 9, bottom: 0, width: 1, background: 'linear-gradient(to bottom, var(--border), transparent)' }} />}
+              <div style={{ width: 7, height: 7, borderRadius: '50%', background: runColor, flexShrink: 0, marginTop: 3, boxShadow: `0 0 5px ${runColor}66` }} />
+              <div><div style={{ display: 'flex', gap: 6, marginBottom: 2, flexWrap: 'wrap' }}><span style={{ fontSize: '0.57rem', fontFamily: 'monospace', color: runColor, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{run.type ?? 'run'}</span><span style={{ fontSize: '0.57rem', color: 'rgba(71,85,105,0.5)' }}>#{run.num} {run.date}{runAttemptText(run)}</span></div><div style={{ fontSize: '0.77rem', color: 'rgba(241,245,249,0.72)', lineHeight: 1.4 }}>{what.length > 92 ? what.slice(0, 92) + '…' : what}</div></div>
+            </div>
           })}
         </div>
-
-        {/* Divider */}
         <div className="max-md:hidden" style={{ background: 'var(--border)', margin: '12px 0' }} />
-
-        {/* Right: focus + run button */}
         <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {status?.current_focus && (
-            <div>
-              <div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', marginBottom: 5 }}>
-                Focus
-              </div>
-              <div style={{ fontSize: '0.77rem', color: 'rgba(241,245,249,0.78)', lineHeight: 1.45 }}>
-                {status.current_focus}
-              </div>
-            </div>
-          )}
-
-          {!status?.current_focus && status?.notes && (
-            <div>
-              <div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', marginBottom: 5 }}>
-                State
-              </div>
-              <div style={{ fontSize: '0.72rem', color: 'rgba(241,245,249,0.68)', lineHeight: 1.45, fontFamily: 'monospace' }}>
-                {status.notes.length > 130 ? status.notes.slice(0, 130) + '…' : status.notes}
-              </div>
-            </div>
-          )}
-
-          {status?.next_run_goal && (
-            <div>
-              <div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', marginBottom: 5 }}>
-                Next
-              </div>
-              <div style={{ fontSize: '0.72rem', color: 'rgba(71,85,105,0.75)', lineHeight: 1.4 }}>
-                {status.next_run_goal.length > 90 ? status.next_run_goal.slice(0, 90) + '…' : status.next_run_goal}
-              </div>
-            </div>
-          )}
-
-          {/* Auto-schedule row */}
+          {(activeSlot.current_focus || activeSlot.status?.current_focus) && <div><div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', marginBottom: 5 }}>Focus</div><div style={{ fontSize: '0.77rem', color: 'rgba(241,245,249,0.78)', lineHeight: 1.45 }}>{activeSlot.current_focus || activeSlot.status?.current_focus}</div></div>}
+          {(activeSlot.next_run_goal || activeSlot.status?.next_run_goal) && <div><div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', marginBottom: 5 }}>Next</div><div style={{ fontSize: '0.72rem', color: 'rgba(71,85,105,0.75)', lineHeight: 1.4 }}>{((activeSlot.next_run_goal || activeSlot.status?.next_run_goal) || '').slice(0, 130)}</div></div>}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', minWidth: 40 }}>
-              Sched
-            </div>
-            <div style={{ flex: 1, fontSize: '0.72rem', fontFamily: 'monospace',
-              color: schedule?.enabled ? '#22c55e' : 'rgba(71,85,105,0.35)' }}>
-              {schedule?.enabled
-                ? `every ${schedule.intervalHours}h · next ${fmtCountdown(schedule.nextRunAt)}`
-                : 'off'}
-            </div>
-            <button
-              onClick={handleScheduleToggle}
-              style={{
-                background: 'none',
-                border: `1px solid ${schedule?.enabled ? 'rgba(34,197,94,0.3)' : 'rgba(255,255,255,0.08)'}`,
-                borderRadius: 4, padding: '2px 8px', cursor: 'pointer',
-                fontSize: '0.6rem', fontFamily: 'monospace', letterSpacing: '0.06em',
-                color: schedule?.enabled ? '#22c55e' : 'rgba(71,85,105,0.5)',
-                transition: 'all 0.2s ease',
-              }}
-            >
-              {schedule?.enabled ? 'stop' : 'start'}
-            </button>
+            <div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', minWidth: 44 }}>Runner</div>
+            <RunnerSwitch
+              value={activeSlot.runner || activeSlot.schedule?.runner || 'script'}
+              available={activeSlot.availableRunners || ['codex', 'claude']}
+              disabled={activeSlot.running}
+              onChange={activeSlot.onRunnerChange}
+            />
           </div>
-
-          <motion.button
-            whileHover={{ scale: 1.01 }}
-            whileTap={{ scale: 0.98 }}
-            onClick={handleRun}
-            disabled={launching || running}
-            style={{
-              marginTop: 'auto',
-              width: '100%', padding: '10px 14px', borderRadius: 9,
-              border: '1px solid color-mix(in srgb, #a78bfa 28%, transparent)',
-              background: 'color-mix(in srgb, #a78bfa 8%, transparent)',
-              cursor: (launching || running) ? 'not-allowed' : 'pointer',
-              display: 'flex', alignItems: 'center', gap: 10,
-              opacity: (launching || running) ? 0.72 : 1,
-              transition: 'all 0.2s ease',
-            }}
-          >
-            <div style={{
-              width: 28, height: 28, borderRadius: 6, flexShrink: 0,
-              background: 'color-mix(in srgb, #a78bfa 14%, transparent)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: '#a78bfa',
-            }}>
-              {launching || running ? (
-                <motion.div animate={{ rotate: 360 }} transition={{ duration: 1.2, repeat: Infinity, ease: 'linear' }}>
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <path d="M21 12a9 9 0 11-6.219-8.56" strokeLinecap="round" />
-                  </svg>
-                </motion.div>
-              ) : (
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
-                  <polygon points="5 3 19 12 5 21 5 3" />
-                </svg>
-              )}
-            </div>
-            <div style={{ textAlign: 'left' }}>
-              <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#a78bfa', letterSpacing: '0.04em' }}>
-                {launching ? 'STARTING…' : running ? 'RUNNING' : 'RUN PROJECT'}
-              </div>
-              <div style={{ fontSize: '0.65rem', color: 'rgba(71,85,105,0.65)', marginTop: 1 }}>
-                {running
-                  ? `${fmtElapsed(elapsed)} elapsed`
-                  : `run #${nextRunNum} · ${status?.lastRunType?.toLowerCase() ?? 'mutate'} next`}
-              </div>
-            </div>
-          </motion.button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', minWidth: 44 }}>Sched</div><div style={{ flex: 1, fontSize: '0.72rem', fontFamily: 'monospace', color: activeSlot.schedule?.enabled ? '#22c55e' : 'rgba(71,85,105,0.35)' }}>{activeSlot.schedule?.enabled ? `every ${fmtInterval(activeSlot.schedule.intervalHours)} · next ${fmtCountdown(activeSlot.schedule.nextRunAt)}` : 'off'}</div><button onClick={activeSlot.onToggle} style={{ background: 'none', border: `1px solid ${activeSlot.schedule?.enabled ? 'rgba(34,197,94,0.3)' : 'rgba(255,255,255,0.08)'}`, borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: '0.6rem', fontFamily: 'monospace', letterSpacing: '0.06em', color: activeSlot.schedule?.enabled ? '#22c55e' : 'rgba(71,85,105,0.5)' }}>{activeSlot.schedule?.enabled ? 'pause' : 'start'}</button></div>
+          <motion.button whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }} onClick={activeSlot.onRun} disabled={activeSlot.launching || activeSlot.running} style={{ marginTop: 'auto', width: '100%', padding: '10px 14px', borderRadius: 9, border: `1px solid ${color}45`, background: `${color}14`, cursor: (activeSlot.launching || activeSlot.running) ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 10, opacity: (activeSlot.launching || activeSlot.running) ? 0.72 : 1 }}><div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, background: `${color}20`, display: 'flex', alignItems: 'center', justifyContent: 'center', color }}>{activeSlot.launching || activeSlot.running ? <motion.div animate={{ rotate: 360 }} transition={{ duration: 1.2, repeat: Infinity, ease: 'linear' }}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 11-6.219-8.56" strokeLinecap="round" /></svg></motion.div> : <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>}</div><div style={{ textAlign: 'left' }}><div style={{ fontSize: '0.8rem', fontWeight: 600, color, letterSpacing: '0.04em' }}>{activeSlot.launching ? 'STARTING…' : activeSlot.running ? 'INCUBATING' : 'RUN INCUBATOR'}</div><div style={{ fontSize: '0.65rem', color: 'rgba(71,85,105,0.65)', marginTop: 1 }}>{activeSlot.running ? `${fmtElapsed(activeSlot.elapsed)} elapsed` : `run #${nextRunNum} · ${(activeSlot.lastRunType || activeSlot.status?.lastRunType || 'mutate').toLowerCase()} next`}</div></div></motion.button>
         </div>
       </div>
-      {/* AI analysis strip — same HAT+ 2, pointed at race-whisperer data */}
-      <div style={{ background: 'rgba(0,0,0,0.15)' }}>
-        <AiStrip autoTrigger={aiTrigger} />
-      </div>
+      <div style={{ background: 'rgba(0,0,0,0.15)' }}><AiStrip slotId={activeSlot.id} autoTrigger={aiTriggersBySlot[activeSlot.id] || 0} /></div>
     </motion.div>
   )
 }

@@ -1,6 +1,25 @@
 {
-  "runCount": 87,
-  "lastRun": "2026-04-11",
+  "runCount": 95,
+  "lastRun": "2026-07-03",
   "lastRunType": "RESEARCH",
-  "syncedAt": "2026-06-22T17:49:24.130Z"
+  "syncedAt": "2026-07-03T17:11:13.743Z",
+  "project": "pi-pulse",
+  "status": "active",
+  "phase": "incubator-improvement",
+  "repo": "/home/admin/lab",
+  "runLog": "/home/admin/lab/RUN_LOG.md",
+  "recentRuns": "/home/admin/lab/RECENT_RUNS.md",
+  "runScript": "/home/admin/lab/scripts/run-codex-incubator.sh",
+  "runner": "codex",
+  "promptDir": "/home/admin/lab/prompts",
+  "runTypes": [
+    "mutate",
+    "research",
+    "mutate"
+  ],
+  "codexBypass": true,
+  "current_focus": "Core incubator should improve the incubator system itself: clearer run outputs, better failed-run parsing, per-incubator AI feedback, runner reliability, and UI that makes process state obvious.",
+  "next_run_goal": "Mutate Pi Pulse as an incubator host. First priority: make AI feedback cached per incubator and only regenerated on explicit refresh or a completed new run; fix any HTML-as-JSON API fallthroughs; make failed stdout runs visible as FAILED with the real error instead of dashes.",
+  "notes": "User directive 2026-07-03: Core incubator focus is the incubator, not child project feature work. Improve output quality, process reliability, run history, runner switching, and the UI around those loops.",
+  "lastRunStatus": "ok"
 }
