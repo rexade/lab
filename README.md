@@ -6,11 +6,14 @@
 
 ## What this actually is
 
-A Raspberry Pi 5 (`testpi`) running a self-directed creative lab. There is one long-running React+Node dashboard (`src/pi-pulse/`) hosted at `localhost:8089` (public at `home.rexthedog.space` and `pipulse.rexthedog.space` via Cloudflare Tunnel) whose job is to make an autonomous Claude Code loop **visible** and **steerable** — not to be a product.
+A Raspberry Pi 5 (`testpi`) running a self-directed creative lab. **Its purpose is to let AI be creative — to produce real things.** Not to run experiments for their own sake. The lab exists so that autonomous Claude Code turns can incrementally push shippable creative work forward: models, tools, apps, artifacts, whatever the mounted project is chasing.
 
-The loop itself is a shell script. Everything else is scaffolding.
+Two layers, don't conflate them:
 
-This is not a product. It is a workshop. Optimize for signal, not features.
+- **The workshop** — this repo. `src/pi-pulse/` (a Node+React dashboard at `localhost:8089`, public via Cloudflare Tunnel at `home.rexthedog.space` and `pipulse.rexthedog.space`) makes the loop visible and steerable. `run-lab.sh` is the loop. MemPalace + the markdown files (`DAILY_SEED.md`, `TASTE_PROFILE.md`, `RUN_LOG.md`, `ACTIVE_THREADS.md`, etc.) give the loop continuity across turns. Optimize this layer for **signal, not features** — every widget you add is scaffolding you'll have to maintain instead of ship.
+- **The products** — whatever gets mounted as a child project. Today: `race-whisperer-predict` (V85 horse-race analysis). Historically the ghost/whisper/oracle quartet, the narrator, and pi-pulse's own visual identity have all been shaped by this loop. Products live in their own repos with their own `run-<name>.sh` scripts; the workshop hosts them and drives the AI turns against them. Optimize this layer for **shippable creative output**.
+
+The workshop is not itself a product. But its whole reason to exist is to produce them.
 
 ---
 
@@ -49,12 +52,14 @@ pi-pulse UI (SSE watch on RUN_LOG.md)   ← live-updates without reload
 If your training tells you to impose milestones, a `PATH.md`, machine-checked pass/fail verdicts, or any "closed-loop with a codified standard" discipline on this system — **don't**. That design was fully explored on 2026-07-03 and deliberately rejected in favor of freeform seed+rotation.
 
 The short version of why:
+- **The workshop's purpose is creativity.** Milestone/verdict discipline is a convergence engine — it collapses the search space to prove a specific claim. Creativity needs the opposite: latitude to find claims worth making. Locking taste-work behind checkboxes would Goodhart exactly what makes AI turns generative here.
 - The current loop produces results the human is content with. Empirical signal beats theoretical rigor.
 - The `mutate.md` prompt ("the seed is law", "one meaningful change beats ten small tweaks", "do not fix things the seed does not ask you to fix") is already a strong prior.
-- The projects here are **exploratory** — figuring out what "done" means IS the work. Locking that behind checkbox verdicts would Goodhart the taste-making that makes the lab valuable.
 - MemPalace + `DRIFT_FEEDBACK.md` (a tiny local `qwen2.5:1.5b` critic via hailo-ollama) provides soft accountability without collapsing possibility.
 
-The one signal that would justify introducing milestone discipline for a specific project: a **binary shipping gate** — e.g. "V32 beats DEFAULT_WEIGHTS on the named May 2026 holdout → promote." No project is at that threshold today. If the human ever says "help me promote X" or "prove Y beats baseline," ask before adding structure.
+Freeform is the pro-creativity engine. Milestones are the pro-shipping engine. Both matter, but you use them in that order: create, then converge.
+
+The one signal that would justify introducing milestone discipline for a specific product: a **binary shipping gate** — e.g. "V32 beats DEFAULT_WEIGHTS on the named May 2026 holdout → promote." That's when a product has converged enough that "does it beat X" is answerable. No product is at that threshold today. If the human ever says "help me ship X" or "prove Y beats baseline," ask before adding structure — that's the conversation where milestones might come back on the table for that specific product, without changing how the workshop drives everything else.
 
 ---
 
@@ -214,13 +219,14 @@ The `runScript` lives outside this repo (typically `/home/admin/run-<project>.sh
 ## What "good work" looks like here
 
 - You read `DAILY_SEED.md`, `MEMORY_BRIEF.md`, and `ACTIVE_THREADS.md` before touching code.
-- You pick ONE thing that aligns with the seed and the current active thread.
-- You make a small, confident, tasteful change. It compiles. `npm run build` succeeds.
+- You pick ONE thing that aligns with the seed and the current active thread — biased toward changes that make the mounted **product** better, not the workshop.
+- You make a small, confident, tasteful change. It compiles. `npm run build` succeeds. If the change is to a mounted product, it moves that product closer to something shippable.
 - You update `RUN_LOG.md` with an honest entry: what changed, why, what improved, **what broke** (do not lie about this), next move.
 - You rewrite `ACTIVE_THREADS.md` to reflect the current live ideas — kill dead threads.
 - You do NOT explain what the code does in comments; the prompts don't want that either.
 - You do NOT add abstractions for hypothetical future work.
 - You do NOT propose adopting a spec system, a milestone system, TDD, or a linter unless the seed asks for it.
+- Workshop improvements are allowed and sometimes necessary, but they should be **in service of** better product turns — a UI tweak that helps you see drift is good; a new admin panel because "the UI could use one" is not.
 
 ---
 
