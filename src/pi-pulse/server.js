@@ -10,6 +10,62 @@ const app = express()
 const PORT = 8089
 const RUN_LOG_PATH = '/home/admin/lab/RUN_LOG.md'
 
+const AI_FIELD_KEYS = ['DIRECTION', 'STRONGEST', 'WEAKEST', 'DRIFT', 'NEXT']
+const AI_FIELD_ALIASES = {
+  'NEXT MOVE': 'NEXT',
+  'NEXT ACTION': 'NEXT',
+  'SUGGESTED NEXT MOVE': 'NEXT',
+  'STRONGEST SIGNAL': 'STRONGEST',
+  'WEAKEST SIGNAL': 'WEAKEST',
+  'WEAKNESS': 'WEAKEST',
+}
+
+function parseAiFeedback(text = '') {
+  const raw = String(text || '').trim()
+  const fields = {}
+  const cleaned = raw.replace(/\*\*/g, '').replace(/\r/g, '')
+  const re = /([A-Z]{2,}[A-Z\s]*):\s*\n?([\s\S]*?)(?=\n[A-Z]{2,}[A-Z\s]*:|$)/g
+  let m
+  while ((m = re.exec(cleaned)) !== null) {
+    const label = m[1].trim().toUpperCase()
+    const key = AI_FIELD_ALIASES[label] || label
+    const value = m[2].trim().replace(/\n+/g, ' ')
+    if (value && AI_FIELD_KEYS.includes(key)) fields[key] = value
+  }
+  const missing = AI_FIELD_KEYS.filter(key => !fields[key])
+  return { fields, missing, malformed: !!raw && missing.length > 0 }
+}
+
+function aiFeedbackPayload({ response, model, incubatorId = 'core', project = 'pi-pulse', ts = Date.now(), source = 'local-ollama-qwen' }) {
+  return {
+    ok: true,
+    incubatorId,
+    project,
+    response,
+    model,
+    source,
+    ts,
+    ...parseAiFeedback(response),
+  }
+}
+
+function hydrateAiFeedback(data, target = {}) {
+  const response = data.response ?? data.raw ?? ''
+  const parsed = parseAiFeedback(response)
+  const fields = data.fields && typeof data.fields === 'object' ? data.fields : parsed.fields
+  const missing = Array.isArray(data.missing) ? data.missing : AI_FIELD_KEYS.filter(key => !fields[key])
+  return {
+    ...data,
+    response,
+    incubatorId: data.incubatorId ?? target.id ?? 'core',
+    project: data.project ?? target.project ?? 'pi-pulse',
+    source: data.source ?? 'local-ollama-qwen',
+    fields,
+    missing,
+    malformed: typeof data.malformed === 'boolean' ? data.malformed : (!!response && missing.length > 0),
+  }
+}
+
 // CPU usage calculation (requires two samples)
 let prevCpuTimes = null
 
@@ -63,6 +119,123 @@ function normalizeLabRunner(runner) {
   return Object.hasOwn(LAB_RUNNERS, runner) ? runner : 'claude'
 }
 
+function readinessCheck(id, label, ok, detail, path = null) {
+  return { id, label, ok: !!ok, detail, ...(path ? { path } : {}) }
+}
+
+function checkPath(id, label, targetPath, kind = 'file') {
+  if (!targetPath) return readinessCheck(id, label, false, 'missing path')
+  try {
+    const st = fs.statSync(targetPath)
+    const typeOk = kind === 'dir' ? st.isDirectory() : st.isFile()
+    return readinessCheck(id, label, typeOk, typeOk ? 'ok' : `not a ${kind}`, targetPath)
+  } catch (err) {
+    return readinessCheck(id, label, false, err.code === 'ENOENT' ? 'not found' : err.message, targetPath)
+  }
+}
+
+function checkWritableLog(id, label, logPath) {
+  if (!logPath) return readinessCheck(id, label, false, 'missing run log path')
+  const parent = dirname(logPath)
+  try {
+    fs.accessSync(parent, fs.constants.W_OK)
+    return readinessCheck(id, label, true, fs.existsSync(logPath) ? 'ok' : 'will create on first write', logPath)
+  } catch (err) {
+    return readinessCheck(id, label, false, err.code === 'ENOENT' ? 'log directory not found' : err.message, logPath)
+  }
+}
+
+function checkCommand(id, command, fallbackPath = null) {
+  if (fallbackPath) {
+    try {
+      fs.accessSync(fallbackPath, fs.constants.X_OK)
+      return readinessCheck(id, `${command} binary`, true, fallbackPath, fallbackPath)
+    } catch { /* fall back to PATH check */ }
+  }
+  try {
+    execSync(`command -v ${command}`, { stdio: 'ignore', shell: '/bin/bash', timeout: 3000 })
+    return readinessCheck(id, `${command} binary`, true, 'ok')
+  } catch {
+    const detail = fallbackPath
+      ? `${command} not found in PATH and fallback is not executable: ${fallbackPath}`
+      : `${command} not found in PATH`
+    return readinessCheck(id, `${command} binary`, false, detail, fallbackPath)
+  }
+}
+
+function checkClaudeModel(model) {
+  if (!model || model === 'fable') {
+    return readinessCheck('model', 'Claude model', false, model ? `${model} is not a runnable Claude model` : 'missing Claude model')
+  }
+  return readinessCheck('model', 'Claude model', true, model)
+}
+
+function preflightRunConfig({ id, project, runner, runScript, repo, runLog, statusPath, promptDir, runTypes, runType, claudeModel }) {
+  const selectedRunner = runner || 'script'
+  const checks = [
+    checkPath('status', 'status file', statusPath),
+    checkPath('script', 'run script', runScript),
+    checkPath('repo', 'repo directory', repo || '/home/admin/lab', 'dir'),
+    checkWritableLog('log', 'run log', runLog),
+  ]
+
+  if (selectedRunner === 'codex' || runScript?.includes('run-codex-incubator.sh')) {
+    const selectedRunType = runType || runTypes?.[0] || 'mutate'
+    checks.push(checkCommand('binary', 'codex', process.env.CODEX_BIN || '/home/admin/.npm-global/bin/codex'))
+    checks.push(checkPath('promptDir', 'prompt directory', promptDir, 'dir'))
+    checks.push(checkPath('prompt', `${selectedRunType} prompt`, promptDir ? join(promptDir, `${selectedRunType}.md`) : null))
+  } else if (selectedRunner === 'claude') {
+    checks.push(checkCommand('binary', 'claude'))
+    checks.push(checkClaudeModel(claudeModel))
+  }
+
+  const ok = checks.every(c => c.ok)
+  return {
+    ok,
+    id,
+    project,
+    runner: selectedRunner,
+    checks,
+    error: ok ? null : checks.find(c => !c.ok)?.detail || 'runner preflight failed',
+  }
+}
+
+function preflightLabRun(runner = labScheduleState.runner) {
+  const selected = normalizeLabRunner(runner)
+  const cfg = LAB_RUNNERS[selected]
+  let status = {}
+  try { status = JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8')) } catch {}
+  return preflightRunConfig({
+    id: 'core',
+    project: status.project || 'pi-pulse',
+    runner: selected,
+    runScript: cfg.script,
+    repo: '/home/admin/lab',
+    runLog: RUN_LOG_PATH,
+    statusPath: PROJECT_STATUS_PATH,
+    promptDir: status.promptDir,
+    runTypes: status.runTypes,
+    claudeModel: status.claudeModel,
+  })
+}
+
+function preflightIncubatorRun(slot, runType = null) {
+  const cfg = readStatusAt(slot.statusPath)
+  return preflightRunConfig({
+    id: slot.id,
+    project: cfg.project,
+    runner: cfg.runner ?? 'script',
+    runScript: cfg.runScript,
+    repo: cfg.repo,
+    runLog: cfg.runLog,
+    statusPath: slot.statusPath,
+    promptDir: cfg.promptDir,
+    runTypes: cfg.runTypes,
+    runType,
+    claudeModel: cfg.claudeModel,
+  })
+}
+
 // Runner spawns used stdio:'ignore', so a preflight failure (exit 127, bad
 // script) died before its first RUN_LOG write and left no trace in history.
 // spawnTrackedRun keeps the child detached but routes its output to a capture
@@ -113,8 +286,9 @@ function spawnTrackedRun({ script, args = [], cwd, captureName, runLogPath, next
 
 function startLabRun(runner = labScheduleState.runner) {
   const selected = normalizeLabRunner(runner)
+  const preflight = preflightLabRun(selected)
+  if (!preflight.ok) return null
   const cfg = LAB_RUNNERS[selected]
-  if (!fs.existsSync(cfg.script)) return null
   const child = spawnTrackedRun({
     script: cfg.script,
     args: cfg.args,
@@ -312,7 +486,7 @@ readCpuTimes()
 // Sync project status on startup
 syncProjectStatus()
 
-app.use(express.json())
+app.use(express.json({ limit: '1mb' }))
 
 // Serve built frontend in production
 app.use(express.static(join(__dirname, 'dist')))
@@ -440,6 +614,18 @@ function meaningfulStdoutLines(body) {
   return body.split('\n').map(l => l.trim()).filter(Boolean)
 }
 
+function stdoutFailureDetail(lines) {
+  return lines
+    .filter(l =>
+      !l.startsWith('**Run') &&
+      !l.startsWith('---') &&
+      !l.startsWith('```')
+    )
+    .slice(-8)
+    .join('\n')
+    .slice(0, 1200)
+}
+
 function parseStdoutRunBlocks(content, runs, { legacyOffset = false } = {}) {
   const stdoutRe = /^\s*<!--\s*stdout from (codex\s+)?run (\d+)\s+(\d{4}-\d{2}-\d{2})[^>]*-->([\s\S]*?)(?=^\s*<!--\s*stdout from (?:codex\s+)?run \d|^\s*## Run \d|$(?![\s\S]))/gm
   let m
@@ -460,6 +646,7 @@ function parseStdoutRunBlocks(content, runs, { legacyOffset = false } = {}) {
       !l.startsWith('---') &&
       !l.startsWith('```')
     )
+    const detail = failed ? stdoutFailureDetail(lines) : ''
     const summary = failed
       ? [failureLine, detailLine].filter(Boolean).join(' ')
       : detailLine || ''
@@ -471,6 +658,7 @@ function parseStdoutRunBlocks(content, runs, { legacyOffset = false } = {}) {
       num,
       date,
       type,
+      ...(failed ? { Failure: summary || detail || 'stdout run failed with no captured output', detail } : {}),
       'What I changed': summary || 'stdout captured with no summary',
       _order: m.index,
       _source: 'stdout',
@@ -566,6 +754,10 @@ app.get('/api/runs', (req, res) => {
   }
 })
 
+app.get('/api/run/preflight', (req, res) => {
+  res.json(preflightLabRun(req.query.runner || labScheduleState.runner))
+})
+
 app.get('/api/logs', (req, res) => {
   try {
     const content = fs.readFileSync('/home/admin/lab/RUN_LOG.md', 'utf8')
@@ -580,6 +772,10 @@ app.post('/api/run', (req, res) => {
     return res.status(409).json({ ok: false, error: 'lab run already active', pid: activeRun.pid, runner: activeRun.runner })
   }
   const runner = normalizeLabRunner(req.body?.runner || labScheduleState.runner)
+  const preflight = preflightLabRun(runner)
+  if (!preflight.ok) {
+    return res.status(422).json({ ok: false, error: 'runner preflight failed', preflight })
+  }
   const child = startLabRun(runner)
   if (!child) {
     return res.status(404).json({ ok: false, error: `${runner} lab runner not found` })
@@ -651,6 +847,33 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, ts: Date.now() })
 })
 
+app.post('/api/lab/feedback', (req, res) => {
+  const feedback = String(req.body?.feedback || '').trim()
+  if (feedback.length < 3) return res.status(400).json({ ok: false, error: 'feedback is too short' })
+  try {
+    let status = {}
+    try { status = JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8')) } catch {}
+    const filePath = status.feedbackPath || '/home/admin/lab/USER_FEEDBACK.md'
+    const stamp = new Date().toISOString()
+    fs.mkdirSync(dirname(filePath), { recursive: true })
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, '# User Feedback / Steering Notes\n\nThese notes are written from the Pi Pulse UI and injected into future host incubator runs.\n')
+    }
+    fs.appendFileSync(filePath, `\n## ${stamp}\n\n${feedback}\n`)
+    fs.appendFileSync(RUN_LOG_PATH, `\n## User Feedback - ${stamp}\n\n**Steering:** ${feedback}\n`)
+    status = {
+      ...status,
+      feedbackPath: filePath,
+      latestUserFeedback: feedback.slice(0, 2000),
+      feedbackUpdatedAt: stamp,
+      next_run_goal: `Use latest user feedback: ${feedback.slice(0, 180)}`,
+    }
+    fs.writeFileSync(PROJECT_STATUS_PATH, JSON.stringify(status, null, 2) + '\n')
+    res.json({ ok: true, status })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message })
+  }
+})
 app.get('/api/project/status', (req, res) => {
   try {
     const status = JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8'))
@@ -790,6 +1013,9 @@ function hydrateIncubator(slot) {
     current_focus: cfg.current_focus ?? repoStatus.current_focus ?? null,
     next_run_goal: cfg.next_run_goal ?? repoStatus.next_run_goal ?? null,
     notes: cfg.notes ?? repoStatus.notes ?? null,
+    feedbackPath: projectFeedbackPath(cfg),
+    latestUserFeedback: cfg.latestUserFeedback ?? readLatestProjectFeedback(projectFeedbackPath(cfg)),
+    feedbackUpdatedAt: cfg.feedbackUpdatedAt ?? null,
     running,
   }
 }
@@ -816,7 +1042,8 @@ function startIncubatorRun(slot, runType = null) {
   const alive = getIncubatorRun(slot.id)
   if (alive.running) return { alreadyRunning: true, ...alive }
   const cfg = readStatusAt(slot.statusPath)
-  if (!cfg.runScript || !fs.existsSync(cfg.runScript)) return null
+  const preflight = preflightIncubatorRun(slot, runType)
+  if (!preflight.ok) return { ok: false, error: 'runner preflight failed', preflight }
   const args = []
   if (cfg.runner === 'codex' || cfg.runScript.includes('run-codex-incubator.sh')) {
     args.push(slot.statusPath)
@@ -875,6 +1102,139 @@ function updateProjectRunner(statusPath, runner) {
   return { ok: true, status }
 }
 
+function slugifyProjectName(text) {
+  const slug = String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 42)
+  return slug || 'incubator-' + new Date().toISOString().slice(0, 10)
+}
+
+function uniqueIncubatorSlug(seed) {
+  const base = slugifyProjectName(seed)
+  const data = readIncubators()
+  const used = new Set(data.slots.map(slot => slot.id))
+  for (let i = 0; i < 50; i += 1) {
+    const slug = i === 0 ? base : `${base}-${i + 1}`
+    if (used.has(slug)) continue
+    if (fs.existsSync(join('/home/admin', slug))) continue
+    if (fs.existsSync(join('/home/admin/lab/projects', slug))) continue
+    return slug
+  }
+  return `${base}-${Date.now().toString(36)}`
+}
+
+function projectFeedbackPath(cfg) {
+  return cfg.feedbackPath || join(cfg.repo, 'reports', 'USER_FEEDBACK.md')
+}
+
+function readLatestProjectFeedback(filePath, maxChars = 900) {
+  try {
+    const text = fs.readFileSync(filePath, 'utf8').trim()
+    if (!text) return null
+    return text.slice(-maxChars)
+  } catch {
+    return null
+  }
+}
+
+function writeFileIfMissing(filePath, content) {
+  if (fs.existsSync(filePath)) return
+  fs.mkdirSync(dirname(filePath), { recursive: true })
+  fs.writeFileSync(filePath, content)
+}
+
+function createIncubatorProjectFromIdea(idea) {
+  const cleanIdea = String(idea || '').trim()
+  if (cleanIdea.length < 8) {
+    return { ok: false, status: 400, error: 'project idea is too short' }
+  }
+  const slug = uniqueIncubatorSlug(cleanIdea)
+  const repo = join('/home/admin', slug)
+  const labProjectDir = join('/home/admin/lab/projects', slug)
+  const promptDir = join(repo, 'prompts')
+  const reportsDir = join(repo, 'reports')
+  const feedbackPath = join(reportsDir, 'USER_FEEDBACK.md')
+  const runLog = join(reportsDir, 'RUN_LOG.md')
+  const recentRuns = join(reportsDir, 'RECENT_RUNS.md')
+
+  fs.mkdirSync(promptDir, { recursive: true })
+  fs.mkdirSync(reportsDir, { recursive: true })
+  fs.mkdirSync(labProjectDir, { recursive: true })
+
+  const title = slug.split('-').map(part => part ? part[0].toUpperCase() + part.slice(1) : '').join(' ')
+  writeFileIfMissing(join(repo, 'README.md'), `# ${title}
+
+Seed idea:
+
+${cleanIdea}
+
+This project was created from the Pi Pulse Add Incubator idea box.
+`)
+  writeFileIfMissing(join(promptDir, 'create.md'), `Create the first tiny local prototype for this incubator project.
+
+Seed idea:
+${cleanIdea}
+
+Rules:
+- Build the smallest usable version first.
+- Keep it local and simple.
+- Prefer plain files and clear state over backend complexity unless the idea truly needs it.
+- Append a concise summary to reports/RUN_LOG.md.
+- Preserve and use USER_FEEDBACK.md when present.
+`)
+  writeFileIfMissing(join(promptDir, 'mutate.md'), `Improve this incubator project by one focused step.
+
+Seed idea:
+${cleanIdea}
+
+Before changing anything, read reports/USER_FEEDBACK.md if it exists and treat the latest notes as steering input.
+
+Choose one useful mutation that makes the project more real, testable, or personally aligned. Append a concise summary to reports/RUN_LOG.md.
+`)
+  writeFileIfMissing(join(promptDir, 'research.md'), `Research the next best move for this incubator project.
+
+Seed idea:
+${cleanIdea}
+
+Use the repo, reports/RUN_LOG.md, reports/RECENT_RUNS.md, and reports/USER_FEEDBACK.md if present. Identify what is unclear, what should be tested next, and what would make the project more useful. Append a concise summary to reports/RUN_LOG.md.
+`)
+  writeFileIfMissing(runLog, `# Run Log\n\n`)
+  writeFileIfMissing(recentRuns, `# Recent Runs\n\n*(no runs yet)*\n`)
+  writeFileIfMissing(feedbackPath, `# User Feedback / Steering Notes
+
+These notes are written from the Pi Pulse UI and injected into future incubator runs.
+
+## Seed
+
+${cleanIdea}
+`)
+
+  const status = {
+    project: slug,
+    status: 'seeded',
+    phase: 'idea-seed',
+    runner: 'codex',
+    repo,
+    runLog,
+    recentRuns,
+    runScript: '/home/admin/lab/scripts/run-codex-incubator.sh',
+    promptDir,
+    feedbackPath,
+    runTypes: ['create', 'mutate', 'research', 'mutate'],
+    runCount: 0,
+    lastRun: null,
+    lastRunType: null,
+    current_focus: cleanIdea.slice(0, 260),
+    next_run_goal: 'Run CREATE to turn this idea into the first usable local prototype.',
+    notes: 'Created from Pi Pulse Add Incubator idea box.',
+    codexBypass: true,
+  }
+  const statusPath = join(labProjectDir, 'status.json')
+  fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
+  return { ok: true, slug, statusPath, status }
+}
 function notifyIncubatorClients() {
   for (const client of incubatorRunClients) {
     try { client.write('data: update\n\n') } catch { incubatorRunClients.delete(client) }
@@ -982,12 +1342,23 @@ app.get('/api/incubators/:id/run/status', (req, res) => {
   res.json({ ok: true, ...getIncubatorRun(req.params.id) })
 })
 
+app.get('/api/incubators/:id/preflight', (req, res) => {
+  const slot = readIncubators().slots.find(s => s.id === req.params.id)
+  if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  try {
+    res.json(preflightIncubatorRun(slot, req.query.runType ?? null))
+  } catch (err) {
+    res.status(422).json({ ok: false, error: err.message })
+  }
+})
+
 app.post('/api/incubators/:id/run', (req, res) => {
   const data = readIncubators()
   const slot = data.slots.find(s => s.id === req.params.id)
   if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
   const result = startIncubatorRun(slot, req.body?.runType ?? null)
   if (!result) return res.status(404).json({ ok: false, error: 'run script not found' })
+  if (result.ok === false) return res.status(422).json(result)
   slot.autoRunsSinceHuman = 0
   writeIncubators(data)
   notifyIncubatorClients()
@@ -1027,6 +1398,59 @@ app.post('/api/incubators/:id/runner', (req, res) => {
   res.json({ ok: true, slot: hydrateIncubator(slot) })
 })
 
+app.post('/api/incubators/create', (req, res) => {
+  const result = createIncubatorProjectFromIdea(req.body?.idea)
+  if (!result.ok) return res.status(result.status || 400).json(result)
+  const data = readIncubators()
+  const slot = {
+    id: result.slug,
+    type: 'project',
+    statusPath: result.statusPath,
+    enabled: false,
+    intervalHours: 0.5,
+    nextRunAt: null,
+    lastScheduledRun: null,
+    autoRunsSinceHuman: 0,
+    charges: null,
+  }
+  data.slots.push(slot)
+  writeIncubators(data)
+  try { mountPlayRoute(result.status) } catch {}
+  notifyIncubatorClients()
+  res.json({ ok: true, slot: hydrateIncubator(slot) })
+})
+
+app.post('/api/incubators/:id/feedback', (req, res) => {
+  const data = readIncubators()
+  const slot = data.slots.find(s => s.id === req.params.id)
+  if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  const feedback = String(req.body?.feedback || '').trim()
+  if (feedback.length < 3) return res.status(400).json({ ok: false, error: 'feedback is too short' })
+  try {
+    const cfg = readStatusAt(slot.statusPath)
+    const filePath = projectFeedbackPath(cfg)
+    const stamp = new Date().toISOString()
+    fs.mkdirSync(dirname(filePath), { recursive: true })
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, '# User Feedback / Steering Notes\n\nThese notes are written from the Pi Pulse UI and injected into future incubator runs.\n')
+    }
+    fs.appendFileSync(filePath, `\n## ${stamp}\n\n${feedback}\n`)
+    if (cfg.runLog) {
+      fs.mkdirSync(dirname(cfg.runLog), { recursive: true })
+      fs.appendFileSync(cfg.runLog, `\n## User Feedback - ${stamp}\n\n**Steering:** ${feedback}\n`)
+    }
+    cfg.feedbackPath = filePath
+    cfg.latestUserFeedback = feedback.slice(0, 2000)
+    cfg.feedbackUpdatedAt = stamp
+    cfg.next_run_goal = `Use latest user feedback: ${feedback.slice(0, 180)}`
+    fs.writeFileSync(slot.statusPath, JSON.stringify(cfg, null, 2) + '\n')
+    writeIncubators(data)
+    notifyIncubatorClients()
+    res.json({ ok: true, slot: hydrateIncubator(slot) })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message })
+  }
+})
 app.post('/api/incubators', (req, res) => {
   const { project, intervalHours = 0.5, enabled = false } = req.body ?? {}
   if (!project || typeof project !== 'string' || project.includes('..') || project === 'pi-pulse') {
@@ -1075,6 +1499,10 @@ setInterval(() => {
     if (getIncubatorRun(slot.id).running) continue
     const result = startIncubatorRun(slot)
     if (!result) continue
+    if (result.ok === false) {
+      console.warn(`[pi-pulse] incubator: ${slot.id} preflight blocked run: ${result.preflight?.error || result.error}`)
+      continue
+    }
     console.log(`[pi-pulse] incubator: firing ${slot.id}`)
     slot.lastScheduledRun = new Date().toISOString()
     slot.nextRunAt = Date.now() + (slot.intervalHours || 0.5) * 60 * 60 * 1000
@@ -1291,12 +1719,7 @@ app.get('/api/incubators/:id/ai/latest', (req, res) => {
   if (!target) return res.status(404).json({ ok: false, error: 'incubator not found' })
   try {
     const data = JSON.parse(fs.readFileSync(target.paths.json, 'utf8'))
-    res.json({
-      ...data,
-      incubatorId: data.incubatorId ?? target.id,
-      project: data.project ?? target.project,
-      source: data.source ?? 'local-ollama-qwen',
-    })
+    res.json(hydrateAiFeedback(data, target))
   } catch {
     res.json({ ok: false })
   }
@@ -1334,22 +1757,20 @@ NEXT: <the single most useful next action>`
     if (!r.ok) return res.status(502).json({ ok: false, error: await r.text() })
 
     const data = await r.json()
+    const payload = aiFeedbackPayload({
+      incubatorId: target.id,
+      project: target.project,
+      response: data.response,
+      model: AI_MODEL,
+    })
     try {
       fs.mkdirSync(dirname(target.paths.json), { recursive: true })
-      const ts = new Date().toISOString().slice(0, 16).replace('T', ' ')
+      const ts = new Date(payload.ts).toISOString().slice(0, 16).replace('T', ' ')
       fs.writeFileSync(target.paths.md, `# Local Ollama/Qwen Feedback - ${ts}\n\n${data.response.trim()}\n`)
-      fs.writeFileSync(target.paths.json, JSON.stringify({
-        ok: true,
-        incubatorId: target.id,
-        project: target.project,
-        response: data.response,
-        model: AI_MODEL,
-        source: 'local-ollama-qwen',
-        ts: Date.now(),
-      }))
+      fs.writeFileSync(target.paths.json, JSON.stringify(payload, null, 2) + '\n')
     } catch { /* non-fatal */ }
 
-    res.json({ ok: true, incubatorId: target.id, project: target.project, response: data.response, model: AI_MODEL, source: 'local-ollama-qwen' })
+    res.json(payload)
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message })
   }
@@ -1432,17 +1853,21 @@ NEXT: <the single most useful next mutation>`
     }
 
     const data = await r.json()
+    const payload = aiFeedbackPayload({
+      response: data.response,
+      model: AI_MODEL,
+    })
 
     // Write parsed feedback to DRIFT_FEEDBACK.md so the lab agent reads it next run
     try {
-      const ts = new Date().toISOString().slice(0, 16).replace('T', ' ')
+      const ts = new Date(payload.ts).toISOString().slice(0, 16).replace('T', ' ')
       fs.writeFileSync('/home/admin/lab/DRIFT_FEEDBACK.md',
         `# Drift Feedback — ${ts}\n\n${data.response.trim()}\n`)
       fs.writeFileSync('/home/admin/lab/DRIFT_FEEDBACK.json',
-        JSON.stringify({ ok: true, response: data.response, model: AI_MODEL, ts: Date.now() }))
+        JSON.stringify(payload, null, 2) + '\n')
     } catch { /* non-fatal */ }
 
-    res.json({ ok: true, response: data.response, model: AI_MODEL })
+    res.json(payload)
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message })
   }
@@ -1451,7 +1876,7 @@ NEXT: <the single most useful next mutation>`
 app.get('/api/ai/latest', (req, res) => {
   try {
     const data = JSON.parse(fs.readFileSync('/home/admin/lab/DRIFT_FEEDBACK.json', 'utf8'))
-    res.json(data)
+    res.json(hydrateAiFeedback(data, { id: 'core', project: 'pi-pulse' }))
   } catch {
     res.json({ ok: false })
   }

@@ -22,6 +22,7 @@ export PATH="/home/admin/.npm-global/bin:/home/admin/.local/bin:/usr/local/sbin:
 LAB_DIR=/home/admin/lab
 LOG_FILE=$LAB_DIR/RUN_LOG.md
 RECENT_FILE=$LAB_DIR/RECENT_RUNS.md
+FEEDBACK_FILE=${FEEDBACK_FILE:-$LAB_DIR/USER_FEEDBACK.md}
 SEED_FILE=$LAB_DIR/DAILY_SEED.md
 MEMPALACE=/home/admin/.local/bin/mempalace
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M')
@@ -96,7 +97,14 @@ PYEOF
 
 # Run Claude Code headless in the lab directory
 cd "$LAB_DIR"
-FULL_PROMPT=$(cat "$PROMPT_FILE")
+FEEDBACK_BLOCK=""
+if [ -f "$FEEDBACK_FILE" ]; then
+    FEEDBACK_TEXT=$(tail -n 120 "$FEEDBACK_FILE" || true)
+    if [ -n "$FEEDBACK_TEXT" ]; then
+        FEEDBACK_BLOCK=$(printf '\n\nUSER FEEDBACK / STEERING NOTES:\n%s' "$FEEDBACK_TEXT")
+    fi
+fi
+FULL_PROMPT=$(printf '%s%s' "$(cat "$PROMPT_FILE")" "$FEEDBACK_BLOCK")
 BUILD_MARKER=$(mktemp)
 CLAUDE_EXIT=0
 OUTPUT=$(claude \

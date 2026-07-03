@@ -32,6 +32,7 @@ PROJECT_DIR=$(read_json_field repo)
 LOG_FILE=$(read_json_field runLog)
 PROMPT_DIR=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.promptDir || (o.repo + '/prompts'))" "$STATUS_PATH")
 RECENT_FILE=$(node -e "const fs=require('fs'); const path=require('path'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.recentRuns || path.join(path.dirname(o.runLog), 'RECENT_RUNS.md'))" "$STATUS_PATH")
+FEEDBACK_FILE=$(node -e "const fs=require('fs'); const path=require('path'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.feedbackPath || path.join(o.repo, 'reports', 'USER_FEEDBACK.md'))" "$STATUS_PATH")
 CODEX_MODEL=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.codexModel || process.env.CODEX_MODEL || '')" "$STATUS_PATH")
 CODEX_BYPASS=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.codexBypass || process.env.CODEX_BYPASS === '1' ? '1' : '')" "$STATUS_PATH")
 
@@ -81,7 +82,14 @@ with open(recent_path, 'w') as f:
 PYEOF
 
 cd "$PROJECT_DIR"
-FULL_PROMPT=$(printf 'Run number: %s\nRun date: %s\nRun type: %s\n\n%s' "$RUN_NUMBER" "$TODAY" "$RUN_TYPE" "$(cat "$PROMPT_FILE")")
+FEEDBACK_BLOCK=""
+if [ -f "$FEEDBACK_FILE" ]; then
+  FEEDBACK_TEXT=$(tail -n 80 "$FEEDBACK_FILE" || true)
+  if [ -n "$FEEDBACK_TEXT" ]; then
+    FEEDBACK_BLOCK=$(printf '\n\nUSER FEEDBACK / STEERING NOTES:\n%s' "$FEEDBACK_TEXT")
+  fi
+fi
+FULL_PROMPT=$(printf 'Run number: %s\nRun date: %s\nRun type: %s\n\n%s%s' "$RUN_NUMBER" "$TODAY" "$RUN_TYPE" "$(cat "$PROMPT_FILE")" "$FEEDBACK_BLOCK")
 CODEX_EXIT=0
 CODEX_ARGS=(exec -C "$PROJECT_DIR" --add-dir "$LAB_DIR" --color never)
 if [ -n "$CODEX_BYPASS" ]; then

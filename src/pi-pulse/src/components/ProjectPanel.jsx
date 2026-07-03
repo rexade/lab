@@ -11,34 +11,20 @@ const AI_FIELD_META = [
   { key: 'NEXT',      label: 'Next',      color: '#38bdf8' },
 ]
 const AI_FIELD_KEYS = AI_FIELD_META.map(f => f.key)
-const AI_FIELD_ALIASES = {
-  'NEXT MOVE': 'NEXT',
-  'NEXT ACTION': 'NEXT',
-  'SUGGESTED NEXT MOVE': 'NEXT',
-  'STRONGEST SIGNAL': 'STRONGEST',
-  'WEAKEST SIGNAL': 'WEAKEST',
-  'WEAKNESS': 'WEAKEST',
-}
 
-function parseAnalysis(text = '', meta = {}) {
-  const raw = String(text || '').trim()
-  const fields = {}
-  const re = /([A-Z]{2,}[A-Z\s]*):\s*\n?([\s\S]*?)(?=\n[A-Z]{2,}[A-Z\s]*:|$)/g
-  let m
-  while ((m = re.exec(raw.replace(/\*\*/g, '').replace(/\r/g, ''))) !== null) {
-    const label = m[1].trim().toUpperCase()
-    const key = AI_FIELD_ALIASES[label] || label
-    const val = m[2].trim().replace(/\n+/g, ' ')
-    if (val && AI_FIELD_KEYS.includes(key)) fields[key] = val
-  }
-  const missing = AI_FIELD_KEYS.filter(key => !fields[key])
+function normalizeAnalysis(data = {}) {
+  const raw = String(data.response || data.raw || '').trim()
+  const fields = data.fields && typeof data.fields === 'object' ? data.fields : {}
+  const missing = Array.isArray(data.missing) ? data.missing : AI_FIELD_KEYS.filter(key => !fields[key])
   return {
     fields,
     missing,
     raw,
-    malformed: !!raw && missing.length > 0,
-    model: meta.model || 'qwen2.5-instruct:1.5b',
-    source: meta.source || 'local-ollama-qwen',
+    malformed: typeof data.malformed === 'boolean' ? data.malformed : (!!raw && missing.length > 0),
+    model: data.model || 'qwen2.5-instruct:1.5b',
+    source: data.source || 'local-ollama-qwen',
+    incubatorId: data.incubatorId,
+    project: data.project,
   }
 }
 
@@ -63,7 +49,7 @@ function AiStrip({ slotId, autoTrigger }) {
       })
       .then(d => {
         if (d.ok && d.response) {
-          setAnalysis(parseAnalysis(d.response, d))
+          setAnalysis(normalizeAnalysis(d))
           setLastRun(d.ts ? new Date(d.ts).toLocaleTimeString() : null)
         }
       })
@@ -97,8 +83,8 @@ function AiStrip({ slotId, autoTrigger }) {
       try { d = JSON.parse(text) }
       catch { throw new Error('AI feedback API returned HTML, not JSON') }
       if (!d.ok) throw new Error(d.error || 'failed')
-      setAnalysis(parseAnalysis(d.response, d))
-      setLastRun(new Date().toLocaleTimeString())
+      setAnalysis(normalizeAnalysis(d))
+      setLastRun(d.ts ? new Date(d.ts).toLocaleTimeString() : new Date().toLocaleTimeString())
     } catch (err) {
       setError(err.message)
     } finally {
@@ -257,6 +243,13 @@ function fmtInterval(hours) {
 
 function runAttemptText(run) {
   return run.attemptTotal > 1 && run.attempt ? ` · attempt ${run.attempt}/${run.attemptTotal}` : ''
+}
+
+function firstPreflightIssue(preflight) {
+  if (!preflight || preflight.ok) return null
+  const failed = preflight.checks?.find(c => !c.ok)
+  if (!failed) return preflight.error || 'runner preflight failed'
+  return `${failed.label}: ${failed.detail}`
 }
 
 function IncubatorSlot({ slot, onToggle, onRun }) {
@@ -481,8 +474,15 @@ export function ProjectPanel() {
   const [runsBySlot, setRunsBySlot] = useState({})
   const [projects, setProjects] = useState([])
   const [addOpen, setAddOpen] = useState(false)
+  const [newIdea, setNewIdea] = useState('')
+  const [createError, setCreateError] = useState(null)
+  const [creatingIdea, setCreatingIdea] = useState(false)
+  const [steerTextBySlot, setSteerTextBySlot] = useState({})
+  const [steerStateBySlot, setSteerStateBySlot] = useState({})
   const [switching, setSwitching] = useState(false)
   const [aiTriggersBySlot, setAiTriggersBySlot] = useState({})
+  const [preflightBySlot, setPreflightBySlot] = useState({})
+  const [launchErrors, setLaunchErrors] = useState({})
   const labStartTimeRef = useRef(null)
   const runSignatureBySlotRef = useRef({})
 
@@ -562,14 +562,27 @@ export function ProjectPanel() {
     if (labLaunching || labRunning) return
     setLabLaunching(true)
     try {
-      const data = await fetch('/api/run', {
+      const runner = labSchedule?.runner || hostStatus?.runner || 'codex'
+      const preflight = await fetch(`/api/run/preflight?runner=${encodeURIComponent(runner)}`).then(r => r.json())
+      setPreflightBySlot(prev => ({ ...prev, core: preflight }))
+      if (!preflight.ok) {
+        setLaunchErrors(prev => ({ ...prev, core: firstPreflightIssue(preflight) }))
+        return
+      }
+      setLaunchErrors(prev => ({ ...prev, core: null }))
+      const res = await fetch('/api/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ runner: labSchedule?.runner || hostStatus?.runner || 'codex' }),
-      }).then(r => r.json())
+        body: JSON.stringify({ runner }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.ok) throw new Error(firstPreflightIssue(data.preflight) || data.error || 'failed to launch host runner')
       if (data.ok) { labStartTimeRef.current = Date.now(); setLabElapsed(0); setLabRunning(true) }
-    } catch {}
-    setTimeout(() => setLabLaunching(false), 800)
+    } catch (err) {
+      setLaunchErrors(prev => ({ ...prev, core: err.message }))
+    } finally {
+      setTimeout(() => setLabLaunching(false), 800)
+    }
   }
 
   const updateLabSchedule = async (enabled) => {
@@ -596,9 +609,20 @@ export function ProjectPanel() {
 
   const runProjectSlot = async (id) => {
     try {
-      await fetch(`/api/incubators/${id}/run`, { method: 'POST' })
+      const preflight = await fetch(`/api/incubators/${id}/preflight`).then(r => r.json())
+      setPreflightBySlot(prev => ({ ...prev, [id]: preflight }))
+      if (!preflight.ok) {
+        setLaunchErrors(prev => ({ ...prev, [id]: firstPreflightIssue(preflight) }))
+        return
+      }
+      setLaunchErrors(prev => ({ ...prev, [id]: null }))
+      const res = await fetch(`/api/incubators/${id}/run`, { method: 'POST' })
+      const data = await res.json()
+      if (!res.ok || data.ok === false) throw new Error(firstPreflightIssue(data.preflight) || data.error || 'failed to launch incubator')
       await fetchIncubators()
-    } catch {}
+    } catch (err) {
+      setLaunchErrors(prev => ({ ...prev, [id]: err.message }))
+    }
   }
 
   const updateProjectSchedule = async (slot, enabled) => {
@@ -641,6 +665,30 @@ export function ProjectPanel() {
     }
   }
 
+  const createIncubatorFromIdea = async () => {
+    const idea = newIdea.trim()
+    if (idea.length < 8 || creatingIdea) return
+    setCreatingIdea(true)
+    setCreateError(null)
+    try {
+      const res = await fetch('/api/incubators/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idea }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.ok) throw new Error(data.error || 'failed to create incubator')
+      setNewIdea('')
+      setSelected(data.slot?.id || data.slot?.project || 'core')
+      setAddOpen(false)
+      await fetchProjects()
+      await fetchIncubators()
+    } catch (err) {
+      setCreateError(err.message)
+    } finally {
+      setCreatingIdea(false)
+    }
+  }
   const removeIncubator = async (id) => {
     if (id === 'rat-deposit') return
     try {
@@ -650,10 +698,37 @@ export function ProjectPanel() {
     } catch {}
   }
 
+  const sendProjectFeedback = async (id) => {
+    const feedback = (steerTextBySlot[id] || '').trim()
+    if (!feedback || steerStateBySlot[id] === 'saving') return
+    setSteerStateBySlot(prev => ({ ...prev, [id]: 'saving' }))
+    try {
+      const endpoint = id === 'core' ? '/api/lab/feedback' : `/api/incubators/${id}/feedback`
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feedback }),
+      })
+      const data = await res.json()
+      if (!res.ok || !data.ok) throw new Error(data.error || 'failed to save feedback')
+      setSteerTextBySlot(prev => ({ ...prev, [id]: '' }))
+      setSteerStateBySlot(prev => ({ ...prev, [id]: 'saved' }))
+      setLaunchErrors(prev => ({ ...prev, [id]: null }))
+      if (id === 'core') await fetchHostStatus()
+      await fetchIncubators()
+      setTimeout(() => {
+        setSteerStateBySlot(prev => prev[id] === 'saved' ? ({ ...prev, [id]: null }) : prev)
+      }, 1600)
+    } catch (err) {
+      setSteerStateBySlot(prev => ({ ...prev, [id]: 'error' }))
+      console.warn('failed to save incubator feedback', err)
+    }
+  }
   const coreSlot = {
     id: 'core', type: 'Core Incubator', label: '∞', tone: 'core', name: hostStatus?.project || 'pi-pulse',
     runner: labSchedule?.runner || hostStatus?.runner, schedule: labSchedule, running: labRunning,
     elapsed: labElapsed, runCount: hostStatus?.runCount, charges: '∞', status: hostStatus, runs: hostRuns,
+    latestUserFeedback: hostStatus?.latestUserFeedback, feedbackUpdatedAt: hostStatus?.feedbackUpdatedAt,
     onRun: handleLabRun, onToggle: () => updateLabSchedule(!labSchedule?.enabled), launching: labLaunching,
     availableRunners: ['codex', 'claude'],
     onRunnerChange: updateLabRunner,
@@ -683,6 +758,25 @@ export function ProjectPanel() {
   const color = activeSlot.tone === 'core' ? '#22d3ee' : '#a78bfa'
   const existingIds = new Set(incubators.map(s => s.id))
   const addableProjects = projects.filter(p => !existingIds.has(p.dir))
+  const activePreflight = preflightBySlot[activeSlot.id]
+  const readinessIssue = launchErrors[activeSlot.id] || firstPreflightIssue(activePreflight)
+
+  useEffect(() => {
+    let cancelled = false
+    const runner = activeSlot.runner || activeSlot.schedule?.runner || 'codex'
+    const url = activeSlot.id === 'core'
+      ? `/api/run/preflight?runner=${encodeURIComponent(runner)}`
+      : `/api/incubators/${activeSlot.id}/preflight`
+    fetch(url)
+      .then(r => r.json())
+      .then(d => {
+        if (!cancelled) setPreflightBySlot(prev => ({ ...prev, [activeSlot.id]: d }))
+      })
+      .catch(err => {
+        if (!cancelled) setLaunchErrors(prev => ({ ...prev, [activeSlot.id]: err.message }))
+      })
+    return () => { cancelled = true }
+  }, [activeSlot.id, activeSlot.runner, activeSlot.schedule?.runner])
 
   return (
     <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, delay: 0.3 }} className="panel" style={{ padding: 0, overflow: 'visible', position: 'relative' }}>
@@ -715,7 +809,26 @@ export function ProjectPanel() {
               <span style={{ fontSize: '0.58rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.12em' }}>Add Incubator</span>
             </button>
             {addOpen && (
-              <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 6, zIndex: 20, minWidth: 240, background: '#111118', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: 6, boxShadow: '0 8px 32px rgba(0,0,0,0.6)' }}>
+              <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 6, zIndex: 20, minWidth: 330, maxWidth: 380, background: '#111118', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: 6, boxShadow: '0 8px 32px rgba(0,0,0,0.6)' }}>
+                <div style={{ padding: 8, display: 'grid', gap: 7, borderBottom: '1px solid rgba(255,255,255,0.08)', marginBottom: 6 }}>
+                  <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'rgba(167,139,250,0.84)' }}>Create from idea</div>
+                  <textarea
+                    value={newIdea}
+                    onChange={e => { setNewIdea(e.target.value); setCreateError(null) }}
+                    rows={4}
+                    placeholder="Write the project idea here..."
+                    style={{ resize: 'vertical', minHeight: 78, borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(0,0,0,0.28)', color: 'rgba(241,245,249,0.84)', padding: '8px 9px', fontSize: '0.72rem', lineHeight: 1.35, outline: 'none' }}
+                  />
+                  {createError && <div style={{ fontSize: '0.62rem', color: 'rgba(248,113,113,0.82)', fontFamily: 'monospace' }}>{createError}</div>}
+                  <button
+                    onClick={createIncubatorFromIdea}
+                    disabled={creatingIdea || newIdea.trim().length < 8}
+                    style={{ border: '1px solid rgba(167,139,250,0.32)', background: 'rgba(167,139,250,0.12)', color: '#a78bfa', borderRadius: 6, padding: '7px 9px', cursor: (creatingIdea || newIdea.trim().length < 8) ? 'not-allowed' : 'pointer', fontSize: '0.6rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.08em', opacity: (creatingIdea || newIdea.trim().length < 8) ? 0.5 : 1 }}
+                  >
+                    {creatingIdea ? 'creating...' : 'create incubator'}
+                  </button>
+                </div>
+                <div style={{ padding: '3px 8px 6px', fontSize: '0.55rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(71,85,105,0.58)' }}>Existing projects</div>
                 {addableProjects.length === 0 ? <div style={{ padding: 10, fontSize: '0.7rem', color: 'rgba(148,163,184,0.5)' }}>no available projects</div> : addableProjects.map(p => (
                   <button key={p.dir} onClick={() => addIncubator(p.dir)} style={{ width: '100%', border: 'none', background: 'transparent', padding: '8px 10px', textAlign: 'left', cursor: 'pointer', borderRadius: 6 }}>
                     <div style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'rgba(241,245,249,0.78)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{p.name}</div>
@@ -748,11 +861,19 @@ export function ProjectPanel() {
           {displayRuns.length === 0 ? <div style={{ fontSize: '0.75rem', color: 'rgba(71,85,105,0.35)', fontFamily: 'monospace' }}>no runs yet</div> : displayRuns.map((run, i) => {
             const runColor = TYPE_COLOR[run.type] ?? 'rgba(71,85,105,0.5)'
             const what = run['Failure'] || run['Error'] || run['Goal'] || run['Done'] || run['What I investigated'] || run['Investigated'] || run['What I built'] || run['What I changed'] || run['What changed'] || run['What improved'] || run['What I found'] || run['Finding'] || run['Key finding'] || run['Suggested next move'] || 'stdout captured with no summary'
+            const failureDetail = run.type === 'FAILED' ? (run.detail || what) : ''
+            const summaryLimit = run.type === 'FAILED' ? 180 : 92
             const isLast = i === displayRuns.length - 1
             return <div key={`${activeSlot.id}-${run.signature || `${run.num}-${run.date}-${run.type}-${run.attempt || i}`}`} style={{ display: 'flex', gap: 10, paddingBottom: isLast ? 0 : 14, position: 'relative' }}>
               {!isLast && <div style={{ position: 'absolute', left: 3, top: 9, bottom: 0, width: 1, background: 'linear-gradient(to bottom, var(--border), transparent)' }} />}
               <div style={{ width: 7, height: 7, borderRadius: '50%', background: runColor, flexShrink: 0, marginTop: 3, boxShadow: `0 0 5px ${runColor}66` }} />
-              <div><div style={{ display: 'flex', gap: 6, marginBottom: 2, flexWrap: 'wrap' }}><span style={{ fontSize: '0.57rem', fontFamily: 'monospace', color: runColor, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{run.type ?? 'run'}</span><span style={{ fontSize: '0.57rem', color: 'rgba(71,85,105,0.5)' }}>#{run.num} {run.date}{runAttemptText(run)}</span></div><div style={{ fontSize: '0.77rem', color: 'rgba(241,245,249,0.72)', lineHeight: 1.4 }}>{what.length > 92 ? what.slice(0, 92) + '…' : what}</div></div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ display: 'flex', gap: 6, marginBottom: 2, flexWrap: 'wrap' }}><span style={{ fontSize: '0.57rem', fontFamily: 'monospace', color: runColor, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{run.type ?? 'run'}</span><span style={{ fontSize: '0.57rem', color: 'rgba(71,85,105,0.5)' }}>#{run.num} {run.date}{runAttemptText(run)}</span></div>
+                <div style={{ fontSize: '0.77rem', color: 'rgba(241,245,249,0.72)', lineHeight: 1.4 }}>{what.length > summaryLimit ? what.slice(0, summaryLimit) + '…' : what}</div>
+                {failureDetail && (
+                  <pre style={{ margin: '6px 0 0', maxHeight: 120, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', borderLeft: `2px solid ${runColor}`, padding: '6px 8px', background: 'rgba(248,113,113,0.055)', color: 'rgba(254,202,202,0.86)', fontSize: '0.64rem', lineHeight: 1.45, fontFamily: 'monospace' }}>{failureDetail}</pre>
+                )}
+              </div>
             </div>
           })}
         </div>
@@ -769,6 +890,38 @@ export function ProjectPanel() {
               onChange={activeSlot.onRunnerChange}
             />
           </div>
+          <div style={{ display: 'grid', gap: 7 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                <div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)' }}>Steer</div>
+                {steerStateBySlot[activeSlot.id] === 'saved' && <span style={{ fontSize: '0.55rem', fontFamily: 'monospace', color: '#22c55e', textTransform: 'uppercase', letterSpacing: '0.08em' }}>saved</span>}
+                {steerStateBySlot[activeSlot.id] === 'error' && <span style={{ fontSize: '0.55rem', fontFamily: 'monospace', color: '#f87171', textTransform: 'uppercase', letterSpacing: '0.08em' }}>error</span>}
+              </div>
+              {activeSlot.latestUserFeedback && (
+                <div style={{ borderLeft: '2px solid rgba(167,139,250,0.35)', paddingLeft: 8, fontSize: '0.66rem', color: 'rgba(148,163,184,0.68)', lineHeight: 1.35 }}>
+                  latest: {activeSlot.latestUserFeedback.length > 120 ? activeSlot.latestUserFeedback.slice(0, 120) + '...' : activeSlot.latestUserFeedback}
+                </div>
+              )}
+              <textarea
+                value={steerTextBySlot[activeSlot.id] || ''}
+                onChange={e => setSteerTextBySlot(prev => ({ ...prev, [activeSlot.id]: e.target.value }))}
+                rows={4}
+                placeholder="I like where this is heading, but I am missing..."
+                style={{ resize: 'vertical', minHeight: 82, borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(0,0,0,0.22)', color: 'rgba(241,245,249,0.84)', padding: '8px 9px', fontSize: '0.72rem', lineHeight: 1.35, outline: 'none' }}
+              />
+              <button
+                onClick={() => sendProjectFeedback(activeSlot.id)}
+                disabled={steerStateBySlot[activeSlot.id] === 'saving' || !(steerTextBySlot[activeSlot.id] || '').trim()}
+                style={{ border: '1px solid rgba(167,139,250,0.3)', background: 'rgba(167,139,250,0.09)', color: '#a78bfa', borderRadius: 6, padding: '7px 9px', cursor: (steerStateBySlot[activeSlot.id] === 'saving' || !(steerTextBySlot[activeSlot.id] || '').trim()) ? 'not-allowed' : 'pointer', fontSize: '0.6rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.08em', opacity: (steerStateBySlot[activeSlot.id] === 'saving' || !(steerTextBySlot[activeSlot.id] || '').trim()) ? 0.52 : 1 }}
+              >
+                {steerStateBySlot[activeSlot.id] === 'saving' ? 'saving...' : 'save feedback for next run'}
+              </button>
+            </div>
+          {readinessIssue && (
+            <div style={{ border: '1px solid rgba(248,113,113,0.18)', background: 'rgba(248,113,113,0.055)', borderRadius: 6, padding: '7px 9px' }}>
+              <div style={{ fontSize: '0.56rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(248,113,113,0.78)', marginBottom: 3 }}>Runner blocked</div>
+              <div style={{ fontSize: '0.68rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(254,202,202,0.86)' }}>{readinessIssue}</div>
+            </div>
+          )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', minWidth: 44 }}>Sched</div><div style={{ flex: 1, fontSize: '0.72rem', fontFamily: 'monospace', color: activeSlot.schedule?.enabled ? '#22c55e' : 'rgba(71,85,105,0.35)' }}>{activeSlot.schedule?.enabled ? `every ${fmtInterval(activeSlot.schedule.intervalHours)} · next ${fmtCountdown(activeSlot.schedule.nextRunAt)}` : 'off'}</div><button onClick={activeSlot.onToggle} style={{ background: 'none', border: `1px solid ${activeSlot.schedule?.enabled ? 'rgba(34,197,94,0.3)' : 'rgba(255,255,255,0.08)'}`, borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: '0.6rem', fontFamily: 'monospace', letterSpacing: '0.06em', color: activeSlot.schedule?.enabled ? '#22c55e' : 'rgba(71,85,105,0.5)' }}>{activeSlot.schedule?.enabled ? 'pause' : 'start'}</button></div>
           <motion.button whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }} onClick={activeSlot.onRun} disabled={activeSlot.launching || activeSlot.running} style={{ marginTop: 'auto', width: '100%', padding: '10px 14px', borderRadius: 9, border: `1px solid ${color}45`, background: `${color}14`, cursor: (activeSlot.launching || activeSlot.running) ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 10, opacity: (activeSlot.launching || activeSlot.running) ? 0.72 : 1 }}><div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, background: `${color}20`, display: 'flex', alignItems: 'center', justifyContent: 'center', color }}>{activeSlot.launching || activeSlot.running ? <motion.div animate={{ rotate: 360 }} transition={{ duration: 1.2, repeat: Infinity, ease: 'linear' }}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 11-6.219-8.56" strokeLinecap="round" /></svg></motion.div> : <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>}</div><div style={{ textAlign: 'left' }}><div style={{ fontSize: '0.8rem', fontWeight: 600, color, letterSpacing: '0.04em' }}>{activeSlot.launching ? 'STARTING…' : activeSlot.running ? 'INCUBATING' : 'RUN INCUBATOR'}</div><div style={{ fontSize: '0.65rem', color: 'rgba(71,85,105,0.65)', marginTop: 1 }}>{activeSlot.running ? `${fmtElapsed(activeSlot.elapsed)} elapsed` : `run #${nextRunNum} · ${(activeSlot.lastRunType || activeSlot.status?.lastRunType || 'mutate').toLowerCase()} next`}</div></div></motion.button>
         </div>
