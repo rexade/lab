@@ -3,14 +3,8 @@
 ## ghost/whisper/oracle as incubated project
 The quartet (src/ghost/) is dormant — 5 standalone JS files, ports 3032–3036. Per the seed, it must NOT be integrated into Pi Pulse's Pulse tab UI. The correct pattern: create `projects/ghost-trio/status.json` with repo/runLog/runScript fields, point `mounted.json` at it, restart pi-pulse. Then the quartet gets its own ProjectPanel slot and run history without touching the waveform layer. One status.json + one run script = fully mounted. This is the right way to continue the ghost/oracle work without violating the "no new instruments" rule.
 
-## server.js: make repo status.json optional (unblocks ghost-trio mount)
-`/api/child/status` reads `CHILD_STATUS_PATH` (`<repo>/status.json`) as required, but ghost-trio has no `src/ghost/status.json` — only a lab status file. If ghost-trio is mounted, the endpoint throws and falls back to hardcoded `{ project: 'race-whisperer-predict', runCount: 0 }`. Fix: wrap the CHILD_STATUS_PATH read in its own try/catch, fall through to lab-status-only if absent. Also fix the two hardcoded `'race-whisperer-predict'` strings in error paths (lines 436, 484) to use `mountedProject.name`. ~10 lines in server.js. After this fix, any project with only a lab status.json (no separate repo status.json) will mount cleanly.
-
-## loadMountedProject() fallback hardening
-`server.js:432–443` silently falls back to race-whisperer-predict paths if `mounted.json` is missing or malformed. This masks config failures — a bad mounted.json produces a working server pointing at the wrong project. Replace the silent catch with a `console.error('INCUBATOR: mounted.json load failed, using fallback')` warn so failures are visible in systemd logs. One-line fix, not urgent but worth doing before adding a second project.
-
-## ProjectPanel dropdown overflow fix — NEXT BUILD TARGET
-`ProjectPanel` wrapper (`motion.div`, line 301–306) has `overflow: 'hidden'`. The hot-swap project switcher dropdown uses `position: absolute, zIndex: 20` and extends below the header row — it will be clipped by the parent's overflow. Fix: change `overflow: 'hidden'` → `overflow: 'visible'` on the panel wrapper. The switching overlay uses `position: absolute, inset: 0, borderRadius: 'inherit'` so it is self-contained and doesn't need the parent to clip. One property change, then `npm run build` + `sudo systemctl restart pi-pulse`.
+## server.js: replace hardcoded 'race-whisperer-predict' fallback strings
+`loadMountedProject()` in `server.js` has hardcoded fallback values (`name: 'race-whisperer-predict'`, `dir: '/home/admin/race-whisperer-predict'`, etc.) that fire when `mounted.json` is missing or malformed. The silent-catch was fixed on 2026-07-03 (now logs `console.error`), but the fallback still steers a broken config at race-whisperer. Better fallback: throw and let systemd surface it, OR fall back to a minimal safe stub that clearly identifies as a config-error state. Not urgent — the console.error already makes the failure visible.
 
 Ideas worth revisiting. Add to this over time.
 

@@ -10,4 +10,4 @@
 **Companion:** race-whisperer-predict at /home/admin/race-whisperer-predict (separate loop)
 **Run loop:** create → mutate → research → mutate → repeat
 **Run log:** /home/admin/lab/RUN_LOG.md
-**Current run count:** ~57
+**Current run count:** ~87
