@@ -87,6 +87,7 @@ PYEOF
 # Run Claude Code headless in the lab directory
 cd "$LAB_DIR"
 FULL_PROMPT=$(cat "$PROMPT_FILE")
+BUILD_MARKER=$(mktemp)
 CLAUDE_EXIT=0
 OUTPUT=$(claude \
     --print \
@@ -103,12 +104,39 @@ fi
 
 echo "[run-lab] run complete, logging"
 
+# Post-run build check — not a milestone gate, just "did it compile".
+# Only fires when the run actually touched pi-pulse source; catches a run
+# claiming success while leaving the UI broken (decisions.md: never deploy
+# a failing build).
+BUILD_NOTE=""
+CHANGED=$(find "$LAB_DIR/src/pi-pulse/src" \
+    "$LAB_DIR/src/pi-pulse/server.js" \
+    "$LAB_DIR/src/pi-pulse/index.html" \
+    "$LAB_DIR/src/pi-pulse/tailwind.config.js" \
+    "$LAB_DIR/src/pi-pulse/postcss.config.js" \
+    "$LAB_DIR/src/pi-pulse/vite.config.js" \
+    -type f -newer "$BUILD_MARKER" -print -quit 2>/dev/null || true)
+rm -f "$BUILD_MARKER"
+if [ -n "$CHANGED" ]; then
+    echo "[run-lab] pi-pulse source changed — verifying npm run build"
+    if (cd "$LAB_DIR/src/pi-pulse" && npm run build > /dev/null 2>&1); then
+        BUILD_NOTE="[build check] PASS — this run changed pi-pulse and npm run build succeeded"
+    else
+        BUILD_NOTE="[build check] FAIL — this run changed pi-pulse and npm run build FAILED; UI may be broken"
+    fi
+    echo "[run-lab] $BUILD_NOTE"
+fi
+
 # Claude should have written directly to RUN_LOG.md and ACTIVE_THREADS.md
 # as instructed by the prompt. Append its stdout too as a fallback record.
 {
     echo ""
     echo "<!-- stdout from run $((RUN_COUNT + 1)) $TIMESTAMP -->"
     echo "$OUTPUT"
+    if [ -n "$BUILD_NOTE" ]; then
+        echo ""
+        echo "$BUILD_NOTE"
+    fi
     echo ""
 } >> "$LOG_FILE"
 
