@@ -23,7 +23,7 @@ RUN_TYPES=("create" "mutate" "research" "mutate")
 # Derive from max existing run number, not header count.
 # Handles duplicates (runs 6/9/59 have appeared twice) and gaps (12/24/33 missing)
 # without collision on the next number.
-LAST_RUN=$(grep -oE "^## Run [0-9]+" "$LOG_FILE" 2>/dev/null | grep -oE "[0-9]+" | sort -n | tail -1)
+LAST_RUN=$(grep -oE "^## Run [0-9]+" "$LOG_FILE" 2>/dev/null | grep -oE "[0-9]+" | sort -n | tail -1 || true)
 RUN_COUNT=${LAST_RUN:-0}
 
 if [[ "${1:-}" =~ ^(create|mutate|research|harvest)$ ]]; then

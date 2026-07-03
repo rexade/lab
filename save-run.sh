@@ -10,7 +10,7 @@ PALACE=/home/admin/.local/bin/mempalace
 RUNS_DIR="$LAB_DIR/memory/runs"
 mkdir -p "$RUNS_DIR"
 
-RUN_NUM="${1:-$(grep -oE "^## Run [0-9]+" "$LAB_DIR/RUN_LOG.md" 2>/dev/null | grep -oE "[0-9]+" | sort -n | tail -1)}"
+RUN_NUM="${1:-$(grep -oE "^## Run [0-9]+" "$LAB_DIR/RUN_LOG.md" 2>/dev/null | grep -oE "[0-9]+" | sort -n | tail -1 || true)}"
 RUN_NUM=${RUN_NUM:-0}
 
 python3 - "$LAB_DIR/RUN_LOG.md" "$RUN_NUM" "$RUNS_DIR" << 'PYEOF'

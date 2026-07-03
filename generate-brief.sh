@@ -8,7 +8,7 @@ set -euo pipefail
 LAB_DIR=/home/admin/lab
 PALACE=/home/admin/.local/bin/mempalace
 RUN_TYPE=${1:-mutate}
-LAST_RUN=$(grep -oE "^## Run [0-9]+" "$LAB_DIR/RUN_LOG.md" 2>/dev/null | grep -oE "[0-9]+" | sort -n | tail -1)
+LAST_RUN=$(grep -oE "^## Run [0-9]+" "$LAB_DIR/RUN_LOG.md" 2>/dev/null | grep -oE "[0-9]+" | sort -n | tail -1 || true)
 RUN_COUNT=${LAST_RUN:-0}
 NEXT_RUN=$((RUN_COUNT + 1))
 
