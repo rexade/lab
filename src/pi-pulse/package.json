@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"vite\" \"node server.js\"",
-    "build": "vite build",
+    "build": "npm run test:trust && vite build",
     "preview": "vite preview",
-    "start": "node server.js"
+    "start": "node server.js",
+    "test:trust": "node scripts/trust-fixtures.mjs && node scripts/trust-smoke.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.85.0",

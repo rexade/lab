@@ -1,0 +1,30 @@
+{
+  "project": "tidebound-harbor",
+  "status": "active",
+  "phase": "m0-feel-spike",
+  "runner": "codex",
+  "repo": "/home/admin/tidebound-harbor",
+  "runLog": "/home/admin/tidebound-harbor/reports/RUN_LOG.md",
+  "recentRuns": "/home/admin/tidebound-harbor/reports/RECENT_RUNS.md",
+  "runScript": "/home/admin/lab/projects/tidebound-harbor/run-tidebound-harbor.sh",
+  "claudeRunScript": "/home/admin/lab/src/pi-pulse/scripts/run-claude-incubator.sh",
+  "promptDir": "/home/admin/tidebound-harbor/prompts",
+  "feedbackPath": "/home/admin/tidebound-harbor/reports/USER_FEEDBACK.md",
+  "playUrl": "https://pirates.rexthedog.space",
+  "runTypes": [
+    "mutate",
+    "research",
+    "mutate"
+  ],
+  "runCount": 4,
+  "lastRun": "2026-07-05",
+  "lastRunType": "MUTATE",
+  "lastRunStatus": "ok",
+  "current_focus": "M0 feel spike is code complete and verified: Deckcurse's Sinking Deck combat (player + Cutlass slash/hitstop + one Bilge Rat) rendered through Tidebound's 2.5D iso projection, all 14 headless contract checks green, four acceptance shots captured. GO/NO-GO feel verdict pending Henrik's browser playtest at pirates.rexthedog.space.",
+  "next_run_goal": "If the M0 verdict is recorded in reports/M0_DOD.md: on GO write the M1 ability-kit plan (docs/plans/) and execute its first task; on NO-GO tune move_speed/heading lerp per the verdict notes and re-export the web build. While the verdict is pending, do only the safe TODO.md items that do not change feel constants.",
+  "notes": "Successor to then-make-it-pirates-but-do-not-make-it-a- (Deckcurse), which is retired. Plan-driven milestones with headless contract tests; see CLAUDE.md in the repo.",
+  "codexBypass": true,
+  "claudeBypass": true,
+  "claudeModel": "sonnet",
+  "launcher": "/home/admin/lab/projects/tidebound-harbor/run-tidebound-harbor.sh"
+}

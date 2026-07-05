@@ -1,8 +1,8 @@
 {
-  "runCount": 95,
-  "lastRun": "2026-07-03",
+  "runCount": 191,
+  "lastRun": "2026-07-05",
   "lastRunType": "RESEARCH",
-  "syncedAt": "2026-07-03T17:11:13.743Z",
+  "syncedAt": "2026-07-05T17:34:25.775Z",
   "project": "pi-pulse",
   "status": "active",
   "phase": "incubator-improvement",
@@ -19,7 +19,10 @@
   ],
   "codexBypass": true,
   "current_focus": "Core incubator should improve the incubator system itself: clearer run outputs, better failed-run parsing, per-incubator AI feedback, runner reliability, and UI that makes process state obvious.",
-  "next_run_goal": "Mutate Pi Pulse as an incubator host. First priority: make AI feedback cached per incubator and only regenerated on explicit refresh or a completed new run; fix any HTML-as-JSON API fallthroughs; make failed stdout runs visible as FAILED with the real error instead of dashes.",
+  "next_run_goal": "Use latest user feedback: Still not able to switch to Claude for my newly created Incubator. And i cant see run history properly",
   "notes": "User directive 2026-07-03: Core incubator focus is the incubator, not child project feature work. Improve output quality, process reliability, run history, runner switching, and the UI around those loops.",
-  "lastRunStatus": "ok"
+  "lastRunStatus": "ok",
+  "feedbackPath": "/home/admin/lab/USER_FEEDBACK.md",
+  "latestUserFeedback": "Still not able to switch to Claude for my newly created Incubator. And i cant see run history properly",
+  "feedbackUpdatedAt": "2026-07-04T13:01:18.597Z"
 }

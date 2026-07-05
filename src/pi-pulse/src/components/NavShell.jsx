@@ -11,8 +11,11 @@ function useClock() {
   return time
 }
 
-export function NavShell({ hostname, connected, uptime, runCount, activeTab, onTabChange }) {
+export function NavShell({ hostname, connected, uptime, runCount, serviceHealth, activeTab, onTabChange }) {
   const clock = useClock()
+  const sourceChanged = serviceHealth?.source?.changedSinceStart
+  const serviceLabel = sourceChanged ? 'stale' : connected ? 'live' : 'demo'
+  const serviceColor = sourceChanged ? '#fb923c' : connected ? 'var(--accent)' : '#f87171'
   return (
     <motion.header
       initial={{ opacity: 0, y: -12 }}
@@ -133,13 +136,17 @@ export function NavShell({ hostname, connected, uptime, runCount, activeTab, onT
 
         <div className="flex items-center gap-2">
           <motion.div
-            animate={connected ? { opacity: [1, 0.4, 1] } : { opacity: 1 }}
+            animate={connected && !sourceChanged ? { opacity: [1, 0.4, 1] } : { opacity: 1 }}
             transition={{ duration: 1.8, repeat: Infinity }}
             className="w-2 h-2 rounded-full"
-            style={{ background: connected ? 'var(--accent)' : '#f87171' }}
+            style={{ background: serviceColor }}
           />
-          <span className="text-xs" style={{ color: connected ? 'var(--accent)' : '#f87171' }}>
-            {connected ? 'live' : 'demo'}
+          <span
+            className="text-xs"
+            title={sourceChanged ? `service source changed since ${serviceHealth?.startedAt || 'boot'}` : undefined}
+            style={{ color: serviceColor }}
+          >
+            {serviceLabel}
           </span>
         </div>
 

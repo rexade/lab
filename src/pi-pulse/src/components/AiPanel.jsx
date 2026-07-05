@@ -1,33 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 
-const KEY_MAP = {
-  DIRECTION: ['direction', 'dir', 'duration', 'heading'],
-  STRONGEST: ['strongest', 'strong', 'best', 'winning'],
-  WEAKEST:   ['weakest', 'weak', 'worst', 'problem'],
-  DRIFT:     ['drift', 'drifting'],
-  NEXT:      ['next', 'mutate', 'suggested', 'suggestion', 'move', 'priority'],
-}
-
-function parseAnalysis(text) {
-  const fields = {}
-  const cleaned = text.replace(/\*\*/g, '').replace(/\r/g, '')
-  const re = /([A-Z]{2,}[A-Z\s]*):\s*\n?([\s\S]*?)(?=\n[A-Z]{2,}[A-Z\s]*:|$)/g
-  let m
-  while ((m = re.exec(cleaned)) !== null) {
-    const rawKey = m[1].trim().toLowerCase()
-    const value = m[2].trim().replace(/\n+/g, ' ')
-    if (!value) continue
-    for (const [canonical, aliases] of Object.entries(KEY_MAP)) {
-      if (aliases.some(a => rawKey.includes(a))) {
-        fields[canonical] = value
-        break
-      }
-    }
-  }
-  return fields
-}
-
 const FIELD_META = [
   { key: 'DIRECTION', label: 'Direction', color: 'var(--accent)' },
   { key: 'STRONGEST', label: 'Strongest', color: '#22c55e' },
@@ -35,6 +8,18 @@ const FIELD_META = [
   { key: 'DRIFT',     label: 'Drift',     color: '#a78bfa' },
   { key: 'NEXT',      label: 'Next move', color: '#38bdf8' },
 ]
+const FIELD_KEYS = FIELD_META.map(f => f.key)
+
+function normalizeAnalysis(data = {}) {
+  const fields = data.fields && typeof data.fields === 'object' ? data.fields : {}
+  return {
+    ...fields,
+    missing: Array.isArray(data.missing) ? data.missing : FIELD_KEYS.filter(key => !fields[key]),
+    malformed: !!data.malformed,
+    model: data.model || 'qwen2.5-instruct:1.5b',
+    source: data.source || 'local-ollama-qwen',
+  }
+}
 
 // ─── Analysis body ─────────────────────────────────────────────────────────────
 
@@ -119,7 +104,7 @@ function AnalysisBody({ loading, analysis, aiError, unavailable, aiLastRun, comp
                   last run {aiLastRun}
                 </span>
                 <span style={{ fontSize: '0.6rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.3)' }}>
-                  · qwen2.5-instruct:1.5b
+                  · {analysis.model}
                 </span>
               </div>
             )}
@@ -194,7 +179,7 @@ function AnalysisBody({ loading, analysis, aiError, unavailable, aiLastRun, comp
           ))}
           {aiLastRun && (
             <p className="text-xs font-mono mt-1" style={{ color: 'var(--muted)' }}>
-              last run {aiLastRun} · qwen2.5-instruct:1.5b
+              last run {aiLastRun} · {analysis.model}
             </p>
           )}
         </div>
@@ -229,8 +214,8 @@ export function AiPanel({ compact = false, autoTriggerCount = 0 }) {
       .then(r => r.json())
       .then(data => {
         if (data.ok && data.response) {
-          setAnalysis(parseAnalysis(data.response))
-          setLastRun(new Date(data.ts).toLocaleTimeString())
+          setAnalysis(normalizeAnalysis(data))
+          setLastRun(data.ts ? new Date(data.ts).toLocaleTimeString() : null)
         }
       })
       .catch(() => {})
@@ -253,8 +238,8 @@ export function AiPanel({ compact = false, autoTriggerCount = 0 }) {
       const r = await fetch('/api/ai/analyze', { method: 'POST' })
       const data = await r.json()
       if (!data.ok) throw new Error(data.error || 'Analysis failed')
-      setAnalysis(parseAnalysis(data.response))
-      setLastRun(new Date().toLocaleTimeString())
+      setAnalysis(normalizeAnalysis(data))
+      setLastRun(data.ts ? new Date(data.ts).toLocaleTimeString() : new Date().toLocaleTimeString())
     } catch (err) {
       setError(err.message)
     } finally {

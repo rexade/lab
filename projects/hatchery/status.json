@@ -3,11 +3,24 @@
   "phase": "hatching",
   "repo": "/home/admin/hatchery",
   "runLog": "/home/admin/hatchery/RUN_LOG.md",
-  "runScript": "/home/admin/run-hatchery.sh",
+  "runScript": "/home/admin/lab/projects/hatchery/run-hatchery.sh",
   "runCount": 0,
   "lastRun": null,
   "lastRunType": null,
   "model": "gemma4:e4b",
   "notes": "Visual artifact generator. Creates small interactive HTML experiences.",
-  "gallery": "http://localhost:8088"
+  "gallery": "http://localhost:8088",
+  "recentRuns": "/home/admin/hatchery/RECENT_RUNS.md",
+  "promptDir": "/home/admin/hatchery/prompts",
+  "runTypes": [
+    "mutate",
+    "research",
+    "mutate"
+  ],
+  "codexBypass": true,
+  "claudeBypass": true,
+  "feedbackPath": "/home/admin/hatchery/reports/USER_FEEDBACK.md",
+  "launcher": "/home/admin/lab/projects/hatchery/run-hatchery.sh",
+  "claudeRunScript": "/home/admin/lab/src/pi-pulse/scripts/run-claude-incubator.sh",
+  "runner": "codex"
 }

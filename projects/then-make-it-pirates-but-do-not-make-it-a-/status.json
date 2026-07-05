@@ -1,0 +1,30 @@
+{
+  "project": "then-make-it-pirates-but-do-not-make-it-a-",
+  "status": "paused",
+  "phase": "retired-superseded",
+  "runner": "codex",
+  "repo": "/home/admin/then-make-it-pirates-but-do-not-make-it-a-",
+  "runLog": "/home/admin/then-make-it-pirates-but-do-not-make-it-a-/reports/RUN_LOG.md",
+  "recentRuns": "/home/admin/then-make-it-pirates-but-do-not-make-it-a-/reports/RECENT_RUNS.md",
+  "runScript": "/home/admin/lab/scripts/run-codex-incubator.sh",
+  "promptDir": "/home/admin/then-make-it-pirates-but-do-not-make-it-a-/prompts",
+  "feedbackPath": "/home/admin/then-make-it-pirates-but-do-not-make-it-a-/reports/USER_FEEDBACK.md",
+  "runTypes": [
+    "create",
+    "mutate",
+    "research",
+    "mutate"
+  ],
+  "runCount": 54,
+  "lastRun": "2026-07-05",
+  "lastRunType": "MUTATE",
+  "current_focus": "Then make it pirates, but do not make it a slow ship game.\n\nKeep the same core:\n\n> Top-down isometric action roguelike with Dota-like abilities, addictive movement, extraction greed, and physical enemy reactions.\n\n\n\nNew theme: Blackwake Relay\n\nYou are a cursed",
+  "next_run_goal": "Use latest user feedback: take inspiration from the best rpgs , arpgs and roguelikes. Theme , addtictive loop, etc research this",
+  "notes": "PAUSED 2026-07-05: superseded by the tidebound-harbor incubator (/home/admin/tidebound-harbor), which rebuilds Deckcurse's proven combat feel in a true 2.5D iso render per the merge design doc. Keep this repo as reference for feel constants and the WorldLoopManager loop shape; do not run new mutations here.",
+  "codexBypass": true,
+  "latestUserFeedback": "take inspiration from the best rpgs , arpgs and roguelikes. Theme , addtictive loop, etc research this",
+  "feedbackUpdatedAt": "2026-07-04T21:15:43.563Z",
+  "lastRunStatus": "ok",
+  "claudeRunScript": "/home/admin/lab/src/pi-pulse/scripts/run-claude-incubator.sh",
+  "claudeBypass": true
+}

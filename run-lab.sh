@@ -97,14 +97,45 @@ PYEOF
 
 # Run Claude Code headless in the lab directory
 cd "$LAB_DIR"
+STATUS_FILE=$LAB_DIR/projects/pi-pulse/status.json
+FEEDBACK_UPDATED_AT=""
 FEEDBACK_BLOCK=""
-if [ -f "$FEEDBACK_FILE" ]; then
-    FEEDBACK_TEXT=$(tail -n 120 "$FEEDBACK_FILE" || true)
-    if [ -n "$FEEDBACK_TEXT" ]; then
-        FEEDBACK_BLOCK=$(printf '\n\nUSER FEEDBACK / STEERING NOTES:\n%s' "$FEEDBACK_TEXT")
-    fi
+PENDING_FEEDBACK_TEXT=$(python3 -c "
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+    updated = data.get('feedbackUpdatedAt') or ''
+    consumed = data.get('feedbackConsumedAt') or ''
+    text = (data.get('latestUserFeedback') or '').strip()
+    if text and updated and updated > consumed:
+        print(updated)
+        print(text[:1200])
+except Exception:
+    pass" "$STATUS_FILE" 2>/dev/null)
+if [ -n "$PENDING_FEEDBACK_TEXT" ]; then
+    FEEDBACK_UPDATED_AT=$(printf '%s
+' "$PENDING_FEEDBACK_TEXT" | head -n 1)
+    LATEST_FEEDBACK_TEXT=$(printf '%s
+' "$PENDING_FEEDBACK_TEXT" | tail -n +2)
+    RECENT_FEEDBACK_TEXT=$(tail -n 120 "$FEEDBACK_FILE" 2>/dev/null || true)
+    FEEDBACK_BLOCK=$(printf "PENDING USER STEERING - HIGHEST PRIORITY FOR THIS RUN:
+%s
+
+RECENT STEERING CONTEXT:
+%s" "$LATEST_FEEDBACK_TEXT" "$RECENT_FEEDBACK_TEXT")
 fi
-FULL_PROMPT=$(printf '%s%s' "$(cat "$PROMPT_FILE")" "$FEEDBACK_BLOCK")
+BASE_PROMPT=$(cat "$PROMPT_FILE")
+if [ -n "$FEEDBACK_BLOCK" ]; then
+    FULL_PROMPT=$(printf "The following pending user steering overrides older backlog, memory, and inferred goals when they conflict. Make this run visibly address it. Runs without pending steering should follow the base prompt normally.
+
+%s
+
+--- BASE RUN PROMPT ---
+
+%s" "$FEEDBACK_BLOCK" "$BASE_PROMPT")
+else
+    FULL_PROMPT="$BASE_PROMPT"
+fi
 BUILD_MARKER=$(mktemp)
 CLAUDE_EXIT=0
 OUTPUT=$(claude \
@@ -158,6 +189,23 @@ fi
     fi
     echo ""
 } >> "$LOG_FILE"
+
+if [ -n "${FEEDBACK_UPDATED_AT:-}" ]; then
+    python3 -c "
+import json, sys
+path, consumed_at, run_num = sys.argv[1:4]
+try:
+    data = json.load(open(path))
+except Exception:
+    data = {}
+if data.get('feedbackUpdatedAt') == consumed_at:
+    data['feedbackConsumedAt'] = consumed_at
+    data['feedbackConsumedRun'] = int(run_num)
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+" "$STATUS_FILE" "$FEEDBACK_UPDATED_AT" "$((RUN_COUNT + 1))" || echo "[run-lab] feedback consume marker failed (non-fatal)"
+fi
 
 # Save run summary to structured memory and mine just the memory dir
 bash "$LAB_DIR/save-run.sh" "$((RUN_COUNT + 1))" || echo "[run-lab] save-run failed (non-fatal)"

@@ -1,0 +1,29 @@
+{
+  "project": "jag-skulle-vilja-ha-en-s-g-bock-d-r-jag-ka",
+  "status": "seeded",
+  "phase": "idea-seed",
+  "runner": "codex",
+  "repo": "/home/admin/jag-skulle-vilja-ha-en-s-g-bock-d-r-jag-ka",
+  "runLog": "/home/admin/jag-skulle-vilja-ha-en-s-g-bock-d-r-jag-ka/reports/RUN_LOG.md",
+  "recentRuns": "/home/admin/jag-skulle-vilja-ha-en-s-g-bock-d-r-jag-ka/reports/RECENT_RUNS.md",
+  "runScript": "/home/admin/lab/projects/jag-skulle-vilja-ha-en-s-g-bock-d-r-jag-ka/run-jag-skulle-vilja-ha-en-s-g-bock-d-r-jag-ka.sh",
+  "promptDir": "/home/admin/jag-skulle-vilja-ha-en-s-g-bock-d-r-jag-ka/prompts",
+  "feedbackPath": "/home/admin/jag-skulle-vilja-ha-en-s-g-bock-d-r-jag-ka/reports/USER_FEEDBACK.md",
+  "runTypes": [
+    "create",
+    "mutate",
+    "research",
+    "mutate"
+  ],
+  "runCount": 28,
+  "lastRun": "2026-07-05",
+  "lastRunType": "MUTATE",
+  "current_focus": "Jag skulle vilja ha en såg bock. Där jag kan använda som arbetsställning. Som skall tåla minst 100kg och vara mobil och lätthanterlig. Jag vill att du designer den optimala såg bocken.  Undersök och ge ritningar och bilder.",
+  "next_run_goal": "Run CREATE to turn this idea into the first usable local prototype.",
+  "notes": "Created from Pi Pulse Add Incubator idea box.",
+  "codexBypass": true,
+  "lastRunStatus": "ok",
+  "claudeBypass": true,
+  "launcher": "/home/admin/lab/projects/jag-skulle-vilja-ha-en-s-g-bock-d-r-jag-ka/run-jag-skulle-vilja-ha-en-s-g-bock-d-r-jag-ka.sh",
+  "claudeRunScript": "/home/admin/lab/src/pi-pulse/scripts/run-claude-incubator.sh"
+}

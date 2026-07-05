@@ -1,224 +1,8 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
-
-// ─── AI analysis strip ────────────────────────────────────────────────────────
-
-const AI_FIELD_META = [
-  { key: 'DIRECTION', label: 'Direction', color: 'var(--accent)' },
-  { key: 'STRONGEST', label: 'Strongest', color: '#22c55e' },
-  { key: 'WEAKEST',   label: 'Weakest',   color: '#f97316' },
-  { key: 'DRIFT',     label: 'Drift',     color: '#a78bfa' },
-  { key: 'NEXT',      label: 'Next',      color: '#38bdf8' },
-]
-const AI_FIELD_KEYS = AI_FIELD_META.map(f => f.key)
-
-function normalizeAnalysis(data = {}) {
-  const raw = String(data.response || data.raw || '').trim()
-  const fields = data.fields && typeof data.fields === 'object' ? data.fields : {}
-  const missing = Array.isArray(data.missing) ? data.missing : AI_FIELD_KEYS.filter(key => !fields[key])
-  return {
-    fields,
-    missing,
-    raw,
-    malformed: typeof data.malformed === 'boolean' ? data.malformed : (!!raw && missing.length > 0),
-    model: data.model || 'qwen2.5-instruct:1.5b',
-    source: data.source || 'local-ollama-qwen',
-    incubatorId: data.incubatorId,
-    project: data.project,
-  }
-}
-
-function AiStrip({ slotId, autoTrigger }) {
-  const [open, setOpen]         = useState(false)
-  const [analysis, setAnalysis] = useState(null)
-  const [loading, setLoading]   = useState(false)
-  const [error, setError]       = useState(null)
-  const [lastRun, setLastRun]   = useState(null)
-  const prevTriggerBySlotRef    = useRef({})
-
-  useEffect(() => {
-    setAnalysis(null)
-    setError(null)
-    setLastRun(null)
-    if (!slotId) return
-    fetch(`/api/incubators/${slotId}/ai/latest`)
-      .then(async r => {
-        const text = await r.text()
-        try { return JSON.parse(text) }
-        catch { throw new Error('AI feedback API returned HTML, not JSON') }
-      })
-      .then(d => {
-        if (d.ok && d.response) {
-          setAnalysis(normalizeAnalysis(d))
-          setLastRun(d.ts ? new Date(d.ts).toLocaleTimeString() : null)
-        }
-      })
-      .catch(err => setError(err.message))
-  }, [slotId])
-
-  useEffect(() => {
-    if (!slotId) return
-    const prev = prevTriggerBySlotRef.current[slotId]
-    if (prev == null) {
-      prevTriggerBySlotRef.current[slotId] = autoTrigger
-      return
-    }
-    if (autoTrigger > prev && !loading) {
-      prevTriggerBySlotRef.current[slotId] = autoTrigger
-      runAnalysis()
-    } else if (autoTrigger > prev) {
-      prevTriggerBySlotRef.current[slotId] = autoTrigger
-    }
-  }, [slotId, autoTrigger])
-
-  async function runAnalysis(e) {
-    e?.stopPropagation()
-    setLoading(true)
-    setError(null)
-    setOpen(true)
-    try {
-      const r = await fetch(`/api/incubators/${slotId}/ai/analyze`, { method: 'POST' })
-      const text = await r.text()
-      let d
-      try { d = JSON.parse(text) }
-      catch { throw new Error('AI feedback API returned HTML, not JSON') }
-      if (!d.ok) throw new Error(d.error || 'failed')
-      setAnalysis(normalizeAnalysis(d))
-      setLastRun(d.ts ? new Date(d.ts).toLocaleTimeString() : new Date().toLocaleTimeString())
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const fields = analysis?.fields || {}
-  const preview = fields.DIRECTION || analysis?.raw?.split('\n').find(Boolean) || ''
-  const active = loading || !!analysis?.raw
-
-  return (
-    <>
-      {/* Header strip */}
-      <div
-        role="button" tabIndex={0}
-        onClick={() => setOpen(o => !o)}
-        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') setOpen(o => !o) }}
-        style={{
-          borderTop: active
-            ? '1px solid color-mix(in srgb, #a78bfa 28%, transparent)'
-            : '1px solid var(--border)',
-          padding: '10px 24px', cursor: 'pointer',
-          display: 'flex', alignItems: 'center', gap: 8,
-          background: active ? 'color-mix(in srgb, #a78bfa 3%, transparent)' : 'transparent',
-          transition: 'background 0.5s ease, border-top-color 0.5s ease',
-          position: 'relative', overflow: 'hidden',
-        }}
-        onMouseEnter={e => { e.currentTarget.style.background = active ? 'color-mix(in srgb, #a78bfa 5%, transparent)' : 'rgba(255,255,255,0.02)' }}
-        onMouseLeave={e => { e.currentTarget.style.background = active ? 'color-mix(in srgb, #a78bfa 3%, transparent)' : 'transparent' }}
-      >
-        {loading && (
-          <motion.div
-            initial={{ x: '-100%' }} animate={{ x: '240%' }}
-            transition={{ duration: 1.7, repeat: Infinity, ease: 'linear' }}
-            style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: '42%',
-              background: 'linear-gradient(90deg, transparent, color-mix(in srgb, #a78bfa 22%, transparent), transparent)',
-              pointerEvents: 'none' }}
-          />
-        )}
-        <span style={{ fontSize: '0.6rem', fontFamily: 'monospace', fontWeight: 600,
-          textTransform: 'uppercase', letterSpacing: '0.12em',
-          color: active ? '#a78bfa' : 'var(--muted)', position: 'relative' }}>
-          Local Ollama/Qwen
-        </span>
-        <motion.div
-          animate={analysis ? { opacity: [1, 0.3, 1] } : {}}
-          transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
-          style={{ width: 5, height: 5, borderRadius: '50%', background: error ? '#ef4444' : analysis?.malformed ? '#f59e0b' : '#22c55e', flexShrink: 0 }}
-        />
-        <span style={{ flex: 1, fontSize: '0.67rem', fontFamily: 'monospace',
-          color: !open && preview ? 'rgba(241,245,249,0.55)' : 'rgba(71,85,105,0.4)',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {!open && preview
-            ? (preview.length > 60 ? preview.slice(0, 60) + '…' : preview)
-            : !open && loading ? 'analyzing…' : !open ? 'ready' : ''}
-        </span>
-        <button onClick={e => { e.stopPropagation(); runAnalysis() }} disabled={loading}
-          title="Refresh local Ollama/Qwen analysis"
-          style={{ background: 'none', border: 'none', padding: '2px 4px', cursor: loading ? 'default' : 'pointer',
-            opacity: loading ? 0.18 : 0.32, color: 'rgba(148,163,184,1)', display: 'flex', alignItems: 'center',
-            transition: 'opacity 0.2s ease', flexShrink: 0 }}
-          onMouseEnter={e => { if (!loading) e.currentTarget.style.opacity = '0.72' }}
-          onMouseLeave={e => { e.currentTarget.style.opacity = loading ? '0.18' : '0.32' }}>
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
-          </svg>
-        </button>
-        <motion.svg animate={{ rotate: open ? 180 : 0 }} transition={{ duration: 0.2 }}
-          width="10" height="10" viewBox="0 0 24 24" fill="none"
-          stroke="rgba(71,85,105,0.5)" strokeWidth="2.5" strokeLinecap="round" style={{ flexShrink: 0 }}>
-          <polyline points="6 9 12 15 18 9" />
-        </motion.svg>
-      </div>
-
-      {/* Collapsible body */}
-      <motion.div
-        initial={false}
-        animate={{ height: open ? 'auto' : 0, opacity: open ? 1 : 0 }}
-        transition={{ height: { duration: 0.22, ease: [0.4, 0, 0.2, 1] }, opacity: { duration: 0.15 } }}
-        style={{ overflow: 'hidden' }}
-      >
-        <div style={{ padding: '4px 24px 16px' }}>
-          {error && (
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '5px 0 4px' }}>
-              <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#ef4444', flexShrink: 0 }} />
-              <span style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'rgba(248,113,113,0.8)' }}>{error}</span>
-            </div>
-          )}
-          {AI_FIELD_META.map((f, i) => (
-            <div key={f.key} style={{ display: 'flex', gap: 12, alignItems: loading ? 'center' : 'flex-start',
-              padding: '6px 0', borderBottom: i < AI_FIELD_META.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
-              <span style={{ fontSize: '0.57rem', fontFamily: 'monospace', textTransform: 'uppercase',
-                letterSpacing: '0.1em', fontWeight: 600, color: f.color,
-                minWidth: 68, flexShrink: 0, opacity: (!analysis && !loading) ? 0.4 : 1 }}>
-                {f.label}
-              </span>
-              {loading ? (
-                <div className="animate-pulse" style={{ height: 7, flex: 1, background: 'rgba(255,255,255,0.07)', borderRadius: 3 }} />
-              ) : (
-                <span style={{ fontSize: '0.78rem', fontFamily: 'monospace', lineHeight: 1.5,
-                  color: fields[f.key] ? 'rgba(241,245,249,0.85)' : analysis?.malformed ? 'rgba(245,158,11,0.72)' : 'rgba(71,85,105,0.32)' }}>
-                  {fields[f.key] ?? (analysis?.malformed ? 'missing from saved response' : '—')}
-                </span>
-              )}
-            </div>
-          ))}
-          {analysis?.malformed && (
-            <div style={{ marginTop: 8, border: '1px solid rgba(245,158,11,0.18)', background: 'rgba(245,158,11,0.05)', borderRadius: 6, padding: '8px 10px' }}>
-              <div style={{ fontSize: '0.56rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(245,158,11,0.8)', marginBottom: 6 }}>
-                raw local qwen response
-              </div>
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '0.68rem', lineHeight: 1.45, fontFamily: 'monospace', color: 'rgba(241,245,249,0.72)', maxHeight: 160, overflow: 'auto' }}>{analysis.raw}</pre>
-            </div>
-          )}
-          {lastRun && !loading && (
-            <div style={{ paddingTop: 7, borderTop: '1px solid rgba(255,255,255,0.04)', marginTop: 2 }}>
-              <span style={{ fontSize: '0.59rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.45)' }}>
-                saved {lastRun} · local Ollama/Qwen · {analysis?.model}
-              </span>
-            </div>
-          )}
-        </div>
-      </motion.div>
-    </>
-  )
-}
-
-const TYPE_COLOR = {
-  MUTATE:   '#a78bfa',
-  RESEARCH: '#34d399',
-  CREATE:   '#22d3ee',
-  FAILED:   '#f87171',
-}
+import { latestCompletedRunSignature, newestFailedRunKey } from '../lib/runSignals.js'
+import { AiStrip } from './AiStrip.js'
+import { failureSignal, RunHistoryList } from './RunHistoryList.js'
 
 function fmtElapsed(secs) {
   const m = Math.floor(secs / 60)
@@ -241,8 +25,40 @@ function fmtInterval(hours) {
   return mins < 60 ? `${mins}m` : `${hours}h`
 }
 
-function runAttemptText(run) {
-  return run.attemptTotal > 1 && run.attempt ? ` · attempt ${run.attempt}/${run.attemptTotal}` : ''
+function shortPath(value = '') {
+  const parts = String(value || '').split('/').filter(Boolean)
+  return parts.length > 1 ? parts.slice(-2).join('/') : (parts[0] || 'missing')
+}
+
+function shortCommand(value = '') {
+  const command = String(value || '').trim()
+  if (!command) return 'missing'
+  return command.length > 118 ? `...${command.slice(-115)}` : command
+}
+
+function timeValue(ts) {
+  if (!ts) return 0
+  const value = typeof ts === 'number' ? ts : Date.parse(ts)
+  return Number.isFinite(value) ? value : 0
+}
+
+function fmtScheduleTime(ts) {
+  const value = timeValue(ts)
+  if (!value) return 'unknown'
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(value))
+}
+
+function latestScheduleBlock(schedule = {}) {
+  if (!schedule) return null
+  const blockedAt = timeValue(schedule.lastScheduleBlockedAt)
+  if (!blockedAt) return null
+  const lastSuccess = timeValue(schedule.lastScheduledRun)
+  return blockedAt > lastSuccess ? schedule.lastScheduleBlockedAt : null
 }
 
 function firstPreflightIssue(preflight) {
@@ -252,20 +68,96 @@ function firstPreflightIssue(preflight) {
   return `${failed.label}: ${failed.detail}`
 }
 
-function IncubatorSlot({ slot, onToggle, onRun }) {
+function mutationBlockMessage(data = {}, fallback = 'request failed') {
+  if (data.code === 'STALE_SERVICE_SOURCE') {
+    return 'Pi Pulse service source is stale; restart Pi Pulse before switching runners.'
+  }
+  return firstPreflightIssue(data.preflight || data.setup || data) || data.error || fallback
+}
+
+function isStaleSourceBlock(message = '') {
+  return String(message).toLowerCase().includes('service source is stale')
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function readApiJson(response, label = 'API request') {
+  const text = await response.text()
+  try {
+    return JSON.parse(text)
+  } catch {
+    const contentType = response.headers.get('content-type') || 'unknown content-type'
+    const kind = text.trim().startsWith('<') ? 'returned HTML instead of JSON' : 'returned non-JSON'
+    throw new Error(`${label} ${kind} (${response.status} ${contentType})`)
+  }
+}
+
+async function fetchApiJson(url, options) {
+  const response = await fetch(url, options)
+  const data = await readApiJson(response, url)
+  return { response, data }
+}
+
+async function waitForPulseHealthy(timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs
+  await sleep(650)
+  while (Date.now() < deadline) {
+    try {
+      const { response: res, data } = await fetchApiJson('/api/health', { cache: 'no-store' })
+      if (res.ok && data.ok) return data
+    } catch {
+      // The service is expected to drop briefly while the supervisor restarts it.
+    }
+    await sleep(450)
+  }
+  throw new Error('Pi Pulse restart did not come back in time')
+}
+
+function preflightFailureRows(preflight) {
+  if (!preflight || preflight.ok) return []
+  const failedChecks = (preflight.checks || []).filter(check => !check.ok)
+  if (failedChecks.length > 0) {
+    return failedChecks.map(check => {
+      const label = check.label || check.id || 'check'
+      const detail = check.detail || 'failed'
+      return `${label}: ${detail}${check.path ? ` (${check.path})` : ''}`
+    })
+  }
+  return [preflight.error || 'runner preflight failed']
+}
+
+function selectedHistoryRuns(runs = [], limit = 5) {
+  const recent = runs.slice(-limit)
+  const latestFailure = [...runs].reverse().find(run => run?.type === 'FAILED')
+  if (!latestFailure || recent.includes(latestFailure)) return recent
+  return [...recent, latestFailure]
+}
+
+function IncubatorSlot({ slot, onToggle, onRun, readinessIssue = null, readinessDetails = [] }) {
   const enabled = !!slot.schedule?.enabled
   const active = !!slot.running
   const due = fmtCountdown(slot.schedule?.nextRunAt)
   const runner = slot.runner || slot.schedule?.runner || 'script'
-  const ringColor = slot.tone === 'core' ? '#22d3ee' : '#a78bfa'
-  const statusColor = active ? ringColor : enabled ? '#22c55e' : 'rgba(71,85,105,0.45)'
+  const ringColor = '#a78bfa'
+  const blockedAt = latestScheduleBlock(slot.schedule)
+  const runnerBlocked = !!readinessIssue
+  const lastRunFailed = slot.lastRunStatus === 'failed' || slot.status?.lastRunStatus === 'failed'
+  const lastFailureDetail = slot.lastRunFailure || slot.status?.lastRunFailure || ''
+  const failureVisible = runnerBlocked || lastRunFailed
+  const statusColor = active ? ringColor : (runnerBlocked || blockedAt || lastRunFailed) ? '#f87171' : enabled ? '#22c55e' : 'rgba(71,85,105,0.45)'
   const level = Math.max(1, Math.floor((slot.runCount || 0) / 5) + 1)
   const xp = Math.min(100, ((slot.runCount || 0) % 5) * 20)
+  const blockedDetail = readinessDetails[0] || readinessIssue || failureSignal(lastFailureDetail)
 
   return (
-    <div style={{
-      border: `1px solid ${active ? `${ringColor}55` : 'rgba(255,255,255,0.08)'}`,
-      background: active ? `color-mix(in srgb, ${ringColor} 7%, rgba(8,10,14,0.96))` : 'rgba(8,10,14,0.72)',
+    <div
+      data-card-run-blocked={runnerBlocked ? 'true' : 'false'}
+      data-card-preflight-detail={readinessDetails.length ? 'true' : 'false'}
+      style={{
+      border: `1px solid ${active ? `${ringColor}55` : runnerBlocked ? 'rgba(248,113,113,0.24)' : 'rgba(255,255,255,0.08)'}`,
+      background: active ? `color-mix(in srgb, ${ringColor} 7%, rgba(8,10,14,0.96))` : runnerBlocked ? 'rgba(248,113,113,0.045)' : 'rgba(8,10,14,0.72)',
       borderRadius: 8,
       padding: 12,
       display: 'grid',
@@ -333,7 +225,7 @@ function IncubatorSlot({ slot, onToggle, onRun }) {
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}>
-            {active ? 'incubating' : enabled ? `every ${fmtInterval(slot.schedule?.intervalHours)}` : 'paused'}
+            {active ? 'incubating' : runnerBlocked ? 'runner blocked' : blockedAt ? 'schedule blocked' : lastRunFailed ? 'last failed' : enabled ? `every ${fmtInterval(slot.schedule?.intervalHours)}` : 'paused'}
           </span>
         </div>
         <div style={{
@@ -358,8 +250,16 @@ function IncubatorSlot({ slot, onToggle, onRun }) {
         }}>
           <span>{runner}</span>
           <span>{slot.charges ?? '∞'} charges</span>
-          <span>{active ? fmtElapsed(slot.elapsed || 0) : enabled ? `next ${due}` : 'no timer'}</span>
+          <span>{active ? fmtElapsed(slot.elapsed || 0) : runnerBlocked ? 'preflight failed' : blockedAt ? `blocked ${fmtScheduleTime(blockedAt)}` : lastRunFailed ? 'failure recorded' : enabled ? `next ${due}` : 'no timer'}</span>
         </div>
+        {failureVisible && (
+          <div data-card-last-run-failure={lastRunFailed ? slot.id : undefined} style={{ marginTop: 7, display: 'flex', gap: 6, alignItems: 'flex-start', borderLeft: '2px solid rgba(248,113,113,0.42)', paddingLeft: 7 }}>
+            <span style={{ fontSize: '0.54rem', fontFamily: 'monospace', color: '#f87171', textTransform: 'uppercase', letterSpacing: '0.08em', flexShrink: 0 }}>fail</span>
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.6rem', fontFamily: 'monospace', color: 'rgba(254,202,202,0.76)' }}>
+              {blockedDetail}
+            </span>
+          </div>
+        )}
         <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 8, alignItems: 'center' }}>
           <span style={{
             fontSize: '0.56rem',
@@ -386,14 +286,15 @@ function IncubatorSlot({ slot, onToggle, onRun }) {
         <button
           onClick={onRun}
           disabled={active}
-          title={`Run ${slot.name}`}
+          title={runnerBlocked ? `Record blocked run: ${readinessIssue}` : `Run ${slot.name}`}
+          data-card-run-button={slot.id}
           style={{
             width: 28,
             height: 28,
             borderRadius: 6,
-            border: `1px solid ${ringColor}33`,
-            background: `${ringColor}14`,
-            color: ringColor,
+            border: `1px solid ${runnerBlocked ? 'rgba(248,113,113,0.28)' : `${ringColor}33`}`,
+            background: runnerBlocked ? 'rgba(248,113,113,0.08)' : `${ringColor}14`,
+            color: runnerBlocked ? '#f87171' : ringColor,
             cursor: active ? 'not-allowed' : 'pointer',
             display: 'grid',
             placeItems: 'center',
@@ -463,15 +364,10 @@ function RunnerSwitch({ value, available = ['codex', 'claude'], onChange, disabl
 }
 
 export function ProjectPanel() {
-  const [selected, setSelected] = useState('core')
-  const [hostStatus, setHostStatus] = useState(null)
-  const [hostRuns, setHostRuns] = useState([])
-  const [labSchedule, setLabSchedule] = useState(null)
-  const [labRunning, setLabRunning] = useState(false)
-  const [labElapsed, setLabElapsed] = useState(0)
-  const [labLaunching, setLabLaunching] = useState(false)
+  const [selected, setSelected] = useState(null)
   const [incubators, setIncubators] = useState([])
   const [runsBySlot, setRunsBySlot] = useState({})
+  const [historyErrorsBySlot, setHistoryErrorsBySlot] = useState({})
   const [projects, setProjects] = useState([])
   const [addOpen, setAddOpen] = useState(false)
   const [newIdea, setNewIdea] = useState('')
@@ -483,20 +379,14 @@ export function ProjectPanel() {
   const [aiTriggersBySlot, setAiTriggersBySlot] = useState({})
   const [preflightBySlot, setPreflightBySlot] = useState({})
   const [launchErrors, setLaunchErrors] = useState({})
-  const labStartTimeRef = useRef(null)
+  const [runnerNoticeBySlot, setRunnerNoticeBySlot] = useState({})
+  const [runnerReceiptsBySlot, setRunnerReceiptsBySlot] = useState({})
+  const [expandedFailureKeys, setExpandedFailureKeys] = useState({})
+  const [serviceRestarting, setServiceRestarting] = useState(false)
   const runSignatureBySlotRef = useRef({})
 
-  const fetchHostStatus = () => fetch('/api/project/status').then(r => r.json()).then(setHostStatus).catch(() => {})
-
-  const latestRunSignature = (runs) => {
-    const latest = runs.at(-1)
-    if (!latest) return 'empty'
-    const what = latest['Failure'] || latest['Error'] || latest['Goal'] || latest['Done'] || latest['What I investigated'] || latest['Investigated'] || latest['What I built'] || latest['What I changed'] || latest['What changed'] || latest['What improved'] || latest['What I found'] || latest['Finding'] || latest['Key finding'] || latest['Suggested next move'] || ''
-    return latest.signature || `${latest.num ?? ''}|${latest.date ?? ''}|${latest.type ?? ''}|${what}|${runs.length}`
-  }
-
   const noteLatestRun = (id, runs) => {
-    const signature = latestRunSignature(runs)
+    const signature = latestCompletedRunSignature(runs)
     const prev = runSignatureBySlotRef.current[id]
     if (prev != null && signature !== prev) {
       setAiTriggersBySlot(current => ({ ...current, [id]: (current[id] || 0) + 1 }))
@@ -504,121 +394,69 @@ export function ProjectPanel() {
     runSignatureBySlotRef.current[id] = signature
   }
 
-  const fetchHostRuns = () => fetch('/api/runs').then(r => r.json()).then(runs => {
-    setHostRuns(runs)
-    noteLatestRun('core', runs)
-  }).catch(() => {})
-  const fetchLabSchedule = () => fetch('/api/lab/schedule').then(r => r.json()).then(d => { if (d.ok) setLabSchedule(d) }).catch(() => {})
-  const fetchProjects = () => fetch('/api/projects/list').then(r => r.json()).then(d => { if (d.ok) setProjects(d.projects) }).catch(() => {})
+  const fetchProjects = () => fetchApiJson('/api/projects/list').then(({ data: d }) => { if (d.ok) setProjects(d.projects) }).catch(() => {})
 
   const fetchIncubators = async () => {
     try {
-      const d = await fetch('/api/incubators').then(r => r.json())
+      const { data: d } = await fetchApiJson('/api/incubators')
       if (d.ok) {
         setIncubators(d.slots)
-        for (const slot of d.slots) fetchSlotRuns(slot.id)
+        for (const slot of d.slots) {
+          fetchSlotRuns(slot.id)
+          fetchSlotPreflight(slot.id)
+        }
       }
     } catch {}
   }
 
   const fetchSlotRuns = async (id) => {
     try {
-      const d = await fetch(`/api/incubators/${id}/runs`).then(r => r.json())
-      if (d.ok) {
-        setRunsBySlot(prev => ({ ...prev, [id]: d.runs }))
-        noteLatestRun(id, d.runs)
+      const { response: res, data: d } = await fetchApiJson(`/api/incubators/${id}/runs`)
+      if (!res.ok || d.ok === false) {
+        throw new Error(d.error || `history request failed with ${res.status}`)
       }
-    } catch {}
-  }
-
-  const fetchRunStates = async () => {
-    try {
-      const d = await fetch('/api/run/status').then(r => r.json())
-      setLabRunning(!!d.running)
-      if (d.running && d.startTime) labStartTimeRef.current = d.startTime
-    } catch {}
-  }
-
-  useEffect(() => {
-    fetchHostStatus(); fetchHostRuns(); fetchLabSchedule(); fetchProjects(); fetchIncubators(); fetchRunStates()
-    const hostStream = new EventSource('/api/runs/stream')
-    hostStream.onmessage = () => { fetchHostRuns(); fetchHostStatus(); fetchRunStates() }
-    const incStream = new EventSource('/api/incubators/stream')
-    incStream.onmessage = () => { fetchIncubators() }
-    const poll = setInterval(() => {
-      fetchHostStatus(); fetchHostRuns(); fetchLabSchedule(); fetchProjects(); fetchIncubators(); fetchRunStates()
-    }, 30000)
-    return () => { hostStream.close(); incStream.close(); clearInterval(poll) }
-  }, [])
-
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (labRunning && labStartTimeRef.current) setLabElapsed(Math.floor((Date.now() - labStartTimeRef.current) / 1000))
-    }, 1000)
-    return () => clearInterval(id)
-  }, [labRunning])
-
-  const handleLabRun = async () => {
-    if (labLaunching || labRunning) return
-    setLabLaunching(true)
-    try {
-      const runner = labSchedule?.runner || hostStatus?.runner || 'codex'
-      const preflight = await fetch(`/api/run/preflight?runner=${encodeURIComponent(runner)}`).then(r => r.json())
-      setPreflightBySlot(prev => ({ ...prev, core: preflight }))
-      if (!preflight.ok) {
-        setLaunchErrors(prev => ({ ...prev, core: firstPreflightIssue(preflight) }))
-        return
-      }
-      setLaunchErrors(prev => ({ ...prev, core: null }))
-      const res = await fetch('/api/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ runner }),
-      })
-      const data = await res.json()
-      if (!res.ok || !data.ok) throw new Error(firstPreflightIssue(data.preflight) || data.error || 'failed to launch host runner')
-      if (data.ok) { labStartTimeRef.current = Date.now(); setLabElapsed(0); setLabRunning(true) }
+      setRunsBySlot(prev => ({ ...prev, [id]: d.runs }))
+      setHistoryErrorsBySlot(prev => ({ ...prev, [id]: null }))
+      noteLatestRun(id, d.runs)
     } catch (err) {
-      setLaunchErrors(prev => ({ ...prev, core: err.message }))
-    } finally {
-      setTimeout(() => setLabLaunching(false), 800)
+      setRunsBySlot(prev => ({ ...prev, [id]: [] }))
+      setHistoryErrorsBySlot(prev => ({ ...prev, [id]: err.message || 'failed to load run history' }))
     }
   }
 
-  const updateLabSchedule = async (enabled) => {
+  const fetchSlotPreflight = async (id) => {
     try {
-      const d = await fetch('/api/lab/schedule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled, intervalHours: labSchedule?.intervalHours || 0.5, runner: labSchedule?.runner || hostStatus?.runner || 'codex' }),
-      }).then(r => r.json())
-      if (d.ok) setLabSchedule(d)
-    } catch {}
+      const { data: d } = await fetchApiJson(`/api/incubators/${id}/preflight`)
+      setPreflightBySlot(prev => ({ ...prev, [id]: d }))
+      if (d.ok) setLaunchErrors(prev => ({ ...prev, [id]: null }))
+    } catch (err) {
+      setLaunchErrors(prev => ({ ...prev, [id]: err.message }))
+    }
   }
 
-  const updateLabRunner = async (runner) => {
-    try {
-      const d = await fetch('/api/lab/schedule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: labSchedule?.enabled ?? false, intervalHours: labSchedule?.intervalHours || 0.5, runner }),
-      }).then(r => r.json())
-      if (d.ok) setLabSchedule(d)
-    } catch {}
-  }
+  useEffect(() => {
+    fetchProjects(); fetchIncubators()
+    const incStream = new EventSource('/api/incubators/stream')
+    incStream.onmessage = () => { fetchIncubators() }
+    const poll = setInterval(() => {
+      fetchProjects(); fetchIncubators()
+    }, 30000)
+    return () => { incStream.close(); clearInterval(poll) }
+  }, [])
 
   const runProjectSlot = async (id) => {
     try {
-      const preflight = await fetch(`/api/incubators/${id}/preflight`).then(r => r.json())
+      const { data: preflight } = await fetchApiJson(`/api/incubators/${id}/preflight`)
       setPreflightBySlot(prev => ({ ...prev, [id]: preflight }))
       if (!preflight.ok) {
         setLaunchErrors(prev => ({ ...prev, [id]: firstPreflightIssue(preflight) }))
-        return
       }
-      setLaunchErrors(prev => ({ ...prev, [id]: null }))
-      const res = await fetch(`/api/incubators/${id}/run`, { method: 'POST' })
-      const data = await res.json()
-      if (!res.ok || data.ok === false) throw new Error(firstPreflightIssue(data.preflight) || data.error || 'failed to launch incubator')
+      if (preflight.ok) setLaunchErrors(prev => ({ ...prev, [id]: null }))
+      const { response: res, data } = await fetchApiJson(`/api/incubators/${id}/run`, { method: 'POST' })
+      if (!res.ok || data.ok === false) {
+        await fetchSlotRuns(id)
+        throw new Error(mutationBlockMessage(data, 'failed to launch incubator'))
+      }
       await fetchIncubators()
     } catch (err) {
       setLaunchErrors(prev => ({ ...prev, [id]: err.message }))
@@ -627,34 +465,94 @@ export function ProjectPanel() {
 
   const updateProjectSchedule = async (slot, enabled) => {
     try {
-      const d = await fetch(`/api/incubators/${slot.id}/schedule`, {
+      const { response: res, data: d } = await fetchApiJson(`/api/incubators/${slot.id}/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled, intervalHours: slot.intervalHours || 0.5 }),
-      }).then(r => r.json())
+      })
+      if (!res.ok || !d.ok) throw new Error(d.error || 'failed to update schedule')
       if (d.ok) await fetchIncubators()
-    } catch {}
+      setLaunchErrors(prev => ({ ...prev, [slot.id]: null }))
+    } catch (err) {
+      setLaunchErrors(prev => ({ ...prev, [slot.id]: err.message }))
+    }
   }
 
   const updateProjectRunner = async (slot, runner) => {
-    try {
-      const d = await fetch(`/api/incubators/${slot.id}/runner`, {
+    const performSwitch = async (allowStaleRestart = true) => {
+      const { response: res, data: d } = await fetchApiJson(`/api/incubators/${slot.id}/runner`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ runner }),
-      }).then(r => r.json())
-      if (d.ok) await fetchIncubators()
-    } catch {}
+      })
+      if (!res.ok || !d.ok) {
+        if (d.code === 'STALE_SERVICE_SOURCE' && allowStaleRestart) {
+          setRunnerNoticeBySlot(prev => ({ ...prev, [slot.id]: `Pi Pulse source stale; restarting service, then retrying ${runner} relay switch.` }))
+          await restartPulseService()
+          return performSwitch(false)
+        }
+        const setup = d.setup || d.preflight || { ok: false, runner, error: d.error || 'failed to update runner', checks: [] }
+        const message = mutationBlockMessage(d, 'failed to update runner')
+        setPreflightBySlot(prev => ({ ...prev, [slot.id]: setup }))
+        setRunnerNoticeBySlot(prev => ({ ...prev, [slot.id]: null }))
+        setRunnerReceiptsBySlot(prev => ({
+          ...prev,
+          [slot.id]: {
+            runner,
+            ok: false,
+            message,
+            command: setup.command || null,
+            checks: preflightFailureRows(setup),
+            historyRecorded: false,
+            ts: Date.now(),
+          },
+        }))
+        throw new Error(message)
+      }
+      return d
+    }
+
+    try {
+      const d = await performSwitch()
+      setLaunchErrors(prev => ({ ...prev, [slot.id]: null }))
+      setRunnerNoticeBySlot(prev => ({ ...prev, [slot.id]: d.warning || `${runner} relay selected` }))
+      if (d.preflight || d.setup) setPreflightBySlot(prev => ({ ...prev, [slot.id]: d.preflight || d.setup }))
+      setRunnerReceiptsBySlot(prev => ({
+        ...prev,
+        [slot.id]: {
+          runner,
+          ok: d.preflight?.ok !== false,
+          message: d.warning || `${runner} relay selected`,
+          command: d.preflight?.command || null,
+          checks: preflightFailureRows(d.preflight || d.setup),
+          historyRecorded: !!d.historyRecorded,
+          ts: Date.now(),
+        },
+      }))
+      if (d.slot) setIncubators(prev => prev.map(item => item.id === slot.id ? d.slot : item))
+      await fetchIncubators()
+      const { data: preflight } = await fetchApiJson(`/api/incubators/${slot.id}/preflight`)
+      setPreflightBySlot(prev => ({ ...prev, [slot.id]: preflight }))
+      await fetchSlotRuns(slot.id)
+      const keepNotice = d.historyRecorded || String(d.warning || '').includes('blocked')
+      if (!keepNotice) {
+        setTimeout(() => {
+          setRunnerNoticeBySlot(prev => prev[slot.id] ? ({ ...prev, [slot.id]: null }) : prev)
+        }, 2600)
+      }
+    } catch (err) {
+      setLaunchErrors(prev => ({ ...prev, [slot.id]: err.message }))
+    }
   }
 
   const addIncubator = async (project) => {
     setSwitching(true)
     try {
-      const d = await fetch('/api/incubators', {
+      const { data: d } = await fetchApiJson('/api/incubators', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ project, enabled: false, intervalHours: 0.5 }),
-      }).then(r => r.json())
+      })
       if (d.ok) {
         setSelected(project)
         setAddOpen(false)
@@ -671,15 +569,14 @@ export function ProjectPanel() {
     setCreatingIdea(true)
     setCreateError(null)
     try {
-      const res = await fetch('/api/incubators/create', {
+      const { response: res, data } = await fetchApiJson('/api/incubators/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idea }),
       })
-      const data = await res.json()
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed to create incubator')
       setNewIdea('')
-      setSelected(data.slot?.id || data.slot?.project || 'core')
+      setSelected(data.slot?.id || data.slot?.project || null)
       setAddOpen(false)
       await fetchProjects()
       await fetchIncubators()
@@ -693,7 +590,7 @@ export function ProjectPanel() {
     if (id === 'rat-deposit') return
     try {
       await fetch(`/api/incubators/${id}`, { method: 'DELETE' })
-      setSelected('core')
+      setSelected(null)
       await fetchIncubators()
     } catch {}
   }
@@ -703,18 +600,16 @@ export function ProjectPanel() {
     if (!feedback || steerStateBySlot[id] === 'saving') return
     setSteerStateBySlot(prev => ({ ...prev, [id]: 'saving' }))
     try {
-      const endpoint = id === 'core' ? '/api/lab/feedback' : `/api/incubators/${id}/feedback`
-      const res = await fetch(endpoint, {
+      const endpoint = `/api/incubators/${id}/feedback`
+      const { response: res, data } = await fetchApiJson(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ feedback }),
       })
-      const data = await res.json()
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed to save feedback')
       setSteerTextBySlot(prev => ({ ...prev, [id]: '' }))
       setSteerStateBySlot(prev => ({ ...prev, [id]: 'saved' }))
       setLaunchErrors(prev => ({ ...prev, [id]: null }))
-      if (id === 'core') await fetchHostStatus()
       await fetchIncubators()
       setTimeout(() => {
         setSteerStateBySlot(prev => prev[id] === 'saved' ? ({ ...prev, [id]: null }) : prev)
@@ -724,14 +619,21 @@ export function ProjectPanel() {
       console.warn('failed to save incubator feedback', err)
     }
   }
-  const coreSlot = {
-    id: 'core', type: 'Core Incubator', label: '∞', tone: 'core', name: hostStatus?.project || 'pi-pulse',
-    runner: labSchedule?.runner || hostStatus?.runner, schedule: labSchedule, running: labRunning,
-    elapsed: labElapsed, runCount: hostStatus?.runCount, charges: '∞', status: hostStatus, runs: hostRuns,
-    latestUserFeedback: hostStatus?.latestUserFeedback, feedbackUpdatedAt: hostStatus?.feedbackUpdatedAt,
-    onRun: handleLabRun, onToggle: () => updateLabSchedule(!labSchedule?.enabled), launching: labLaunching,
-    availableRunners: ['codex', 'claude'],
-    onRunnerChange: updateLabRunner,
+
+  const restartPulseService = async () => {
+    if (serviceRestarting) return waitForPulseHealthy()
+    setServiceRestarting(true)
+    try {
+      await fetch('/api/restart', { method: 'POST' })
+    } catch {
+      // The request can be cut short by the process exiting for restart.
+    }
+    try {
+      await waitForPulseHealthy()
+      return true
+    } finally {
+      setServiceRestarting(false)
+    }
   }
 
   const projectSlots = incubators.map(slot => ({
@@ -751,25 +653,99 @@ export function ProjectPanel() {
     launching: false,
   }))
 
-  const slots = [coreSlot, ...projectSlots]
-  const activeSlot = slots.find(s => s.id === selected) || slots[0]
-  const displayRuns = (activeSlot.runs || []).slice(-5).reverse()
+  const slots = [...projectSlots]
+  // With the core slot retired, slots is empty until /api/incubators
+  // responds. Keep hook order stable: never early-return before the
+  // trailing hooks - derive against a placeholder and gate in the JSX.
+  const slotsLoading = slots.length === 0
+  const placeholderSlot = { id: '__loading__', runs: [], schedule: {}, status: {} }
+  const activeSlot = slots.find(s => s.id === selected) || slots[0] || placeholderSlot
+  const displayRuns = selectedHistoryRuns(activeSlot.runs || []).reverse()
+  const defaultOpenFailureKey = newestFailedRunKey(displayRuns, activeSlot.id)
+  const historyError = historyErrorsBySlot[activeSlot.id]
   const nextRunNum = (activeSlot.runCount ?? activeSlot.runs?.length ?? 0) + 1
-  const color = activeSlot.tone === 'core' ? '#22d3ee' : '#a78bfa'
+  const color = '#a78bfa'
   const existingIds = new Set(incubators.map(s => s.id))
   const addableProjects = projects.filter(p => !existingIds.has(p.dir))
   const activePreflight = preflightBySlot[activeSlot.id]
+  const runnerNotice = runnerNoticeBySlot[activeSlot.id]
+  const runnerReceipt = runnerReceiptsBySlot[activeSlot.id]
   const readinessIssue = launchErrors[activeSlot.id] || firstPreflightIssue(activePreflight)
+  const readinessDetails = preflightFailureRows(activePreflight)
+  const latestDisplayedFailure = displayRuns.find(run => run?.type === 'FAILED') || null
+  const latestDisplayedFailurePinned = latestDisplayedFailure && !(activeSlot.runs || []).slice(-5).includes(latestDisplayedFailure)
+  const preflightRunnerLabel = activePreflight?.runner || activeSlot.runner || activeSlot.schedule?.runner || 'runner'
+  const claudeSetup = activeSlot.runnerSetups?.claude
+  const claudeSetupDetails = preflightFailureRows(claudeSetup)
+  const showClaudeSetup = claudeSetup && !claudeSetup.ok
+  const runnerBlocked = !!readinessIssue
+  const selectedRunner = activeSlot.runner || activeSlot.schedule?.runner || 'script'
+  const selectedRunnerLaunchOk = !activePreflight || activePreflight.ok !== false
+  const runnerReceiptLabel = selectedRunner === 'claude'
+    ? selectedRunnerLaunchOk ? 'Claude selected and launchable' : 'Claude selected, launch blocked'
+    : selectedRunnerLaunchOk ? 'Codex selected and launchable' : 'Codex selected, launch blocked'
+  const staleSourceBlocked = isStaleSourceBlock(readinessIssue)
+  const activeScheduleBlockedAt = latestScheduleBlock(activeSlot.schedule)
+  const activeLastRunFailed = activeSlot.lastRunStatus === 'failed' || activeSlot.status?.lastRunStatus === 'failed'
+  const activeLastFailure = activeSlot.lastRunFailure || activeSlot.status?.lastRunFailure || ''
+  const activeLastFailureSource = activeSlot.lastRunFailureSource || activeSlot.status?.lastRunFailureSource || 'last run'
+  const activeStatusColor = activeSlot.running ? color : (activeScheduleBlockedAt || activeLastRunFailed) ? '#f87171' : '#22c55e'
+  const runDisabled = activeSlot.launching || activeSlot.running
+  const runButtonColor = runnerBlocked ? '#f87171' : color
+  const runButtonLabel = runnerBlocked
+    ? 'RUNNER BLOCKED'
+    : activeSlot.launching ? 'STARTING...' : activeSlot.running ? 'INCUBATING' : 'RUN INCUBATOR'
+  const runButtonDetail = runnerBlocked
+    ? `click to record failure: ${readinessIssue.slice(0, 72)}`
+    : activeSlot.running ? `${fmtElapsed(activeSlot.elapsed)} elapsed` : `run #${nextRunNum} · ${(activeSlot.lastRunType || activeSlot.status?.lastRunType || 'mutate').toLowerCase()} next`
+  const activeRunnerRows = [
+    `selected: ${selectedRunner}`,
+    `launch: ${shortPath(activeSlot.launchScript || activeSlot.status?.runScript)}`,
+    activePreflight?.command ? `command: ${shortCommand(activePreflight.command)}` : null,
+    selectedRunner === 'claude' ? `relay: ${shortPath(activeSlot.claudeRelayScript || activeSlot.relayScript || claudeSetup?.expectedScript)}` : null,
+    selectedRunner === 'claude' ? `model: ${activeSlot.claudeModel || claudeSetup?.model || 'Claude CLI default'}` : null,
+  ].filter(Boolean)
+
+  const renderSlotCard = (slot) => {
+    const slotPreflight = preflightBySlot[slot.id]
+    const slotReadinessIssue = launchErrors[slot.id] || firstPreflightIssue(slotPreflight)
+    const slotReadinessDetails = preflightFailureRows(slotPreflight)
+    return (
+      <div
+        key={slot.id}
+        role="button"
+        tabIndex={0}
+        aria-pressed={selected === slot.id}
+        aria-label={`Select incubator ${slot.name || slot.id}`}
+        data-incubator-card={slot.id}
+        data-incubator-selected={selected === slot.id ? 'true' : 'false'}
+        onClick={() => setSelected(slot.id)}
+        onKeyDown={event => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            setSelected(slot.id)
+          }
+        }}
+        style={{ cursor: 'pointer', borderRadius: 9, outline: selected === slot.id ? '1px solid #a78bfa66' : '1px solid transparent', outlineOffset: 2 }}
+      >
+        <IncubatorSlot
+          slot={slot}
+          onToggle={(e) => { e?.stopPropagation?.(); slot.onToggle() }}
+          onRun={(e) => { e?.stopPropagation?.(); slot.onRun() }}
+          readinessIssue={slotReadinessIssue}
+          readinessDetails={slotReadinessDetails}
+        />
+      </div>
+    )
+  }
 
   useEffect(() => {
+    if (activeSlot.id === '__loading__') return undefined
     let cancelled = false
     const runner = activeSlot.runner || activeSlot.schedule?.runner || 'codex'
-    const url = activeSlot.id === 'core'
-      ? `/api/run/preflight?runner=${encodeURIComponent(runner)}`
-      : `/api/incubators/${activeSlot.id}/preflight`
-    fetch(url)
-      .then(r => r.json())
-      .then(d => {
+    const url = `/api/incubators/${activeSlot.id}/preflight`
+    fetchApiJson(url)
+      .then(({ data: d }) => {
         if (!cancelled) setPreflightBySlot(prev => ({ ...prev, [activeSlot.id]: d }))
       })
       .catch(err => {
@@ -777,6 +753,14 @@ export function ProjectPanel() {
       })
     return () => { cancelled = true }
   }, [activeSlot.id, activeSlot.runner, activeSlot.schedule?.runner])
+
+  if (slotsLoading) {
+    return (
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="panel" style={{ padding: 24, fontFamily: 'monospace', fontSize: '0.7rem', color: 'var(--muted)', letterSpacing: '0.1em' }}>
+        loading incubators…
+      </motion.div>
+    )
+  }
 
   return (
     <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, delay: 0.3 }} className="panel" style={{ padding: 0, overflow: 'visible', position: 'relative' }}>
@@ -798,11 +782,7 @@ export function ProjectPanel() {
           </div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
-          {slots.map(slot => (
-            <div key={slot.id} onClick={() => setSelected(slot.id)} style={{ cursor: 'pointer', borderRadius: 9, outline: selected === slot.id ? `1px solid ${slot.tone === 'core' ? '#22d3ee66' : '#a78bfa66'}` : '1px solid transparent', outlineOffset: 2 }}>
-              <IncubatorSlot slot={slot} onToggle={(e) => { e?.stopPropagation?.(); slot.onToggle() }} onRun={(e) => { e?.stopPropagation?.(); slot.onRun() }} />
-            </div>
-          ))}
+          {slots.map(renderSlotCard)}
           <div style={{ position: 'relative' }}>
             <button onClick={() => setAddOpen(o => !o)} style={{ width: '100%', minHeight: 98, border: '1px dashed rgba(148,163,184,0.24)', borderRadius: 8, background: 'rgba(8,10,14,0.42)', color: 'rgba(148,163,184,0.62)', cursor: 'pointer', display: 'grid', placeItems: 'center', gap: 4 }}>
               <span style={{ fontSize: '1.1rem', lineHeight: 1 }}>+</span>
@@ -842,13 +822,13 @@ export function ProjectPanel() {
       </div>
 
       <div style={{ padding: '13px 24px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 9, background: activeSlot.running ? `color-mix(in srgb, ${color} 4%, transparent)` : 'transparent' }}>
-        <motion.div animate={activeSlot.running ? { opacity: [1, 0.3, 1] } : { opacity: 0.7 }} transition={{ duration: 1.4, repeat: activeSlot.running ? Infinity : 0, ease: 'easeInOut' }} style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: activeSlot.running ? color : '#22c55e', boxShadow: activeSlot.running ? `0 0 8px ${color}` : 'none' }} />
+        <motion.div animate={activeSlot.running ? { opacity: [1, 0.3, 1] } : { opacity: 0.7 }} transition={{ duration: 1.4, repeat: activeSlot.running ? Infinity : 0, ease: 'easeInOut' }} style={{ width: 6, height: 6, borderRadius: '50%', flexShrink: 0, background: activeStatusColor, boxShadow: activeSlot.running ? `0 0 8px ${color}` : activeScheduleBlockedAt ? '0 0 8px rgba(248,113,113,0.45)' : 'none' }} />
         <span style={{ fontSize: '0.6rem', fontFamily: 'monospace', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.14em', color }}>{activeSlot.type}</span>
         <span style={{ fontSize: '0.58rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.45)' }}>·</span>
         <span style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'rgba(241,245,249,0.82)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{activeSlot.name}</span>
         {activeSlot.phase && <span style={{ fontSize: '0.54rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.42)', letterSpacing: '0.08em', textTransform: 'uppercase', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 4, padding: '1px 5px' }}>{activeSlot.phase}</span>}
         {activeSlot.playUrl && <a href={activeSlot.playUrl} target="_blank" rel="noreferrer" style={{ fontSize: '0.56rem', fontFamily: 'monospace', color, textTransform: 'uppercase', letterSpacing: '0.08em', textDecoration: 'none' }}>open</a>}
-        {activeSlot.id !== 'core' && activeSlot.id !== 'rat-deposit' && <button onClick={() => removeIncubator(activeSlot.id)} style={{ border: '1px solid rgba(248,113,113,0.18)', background: 'rgba(248,113,113,0.05)', color: 'rgba(248,113,113,0.72)', borderRadius: 4, padding: '1px 6px', fontSize: '0.54rem', fontFamily: 'monospace', cursor: 'pointer' }}>remove</button>}
+        {activeSlot.id !== 'rat-deposit' && <button onClick={() => removeIncubator(activeSlot.id)} style={{ border: '1px solid rgba(248,113,113,0.18)', background: 'rgba(248,113,113,0.05)', color: 'rgba(248,113,113,0.72)', borderRadius: 4, padding: '1px 6px', fontSize: '0.54rem', fontFamily: 'monospace', cursor: 'pointer' }}>remove</button>}
         <span style={{ marginLeft: 'auto', fontSize: '0.6rem', fontFamily: 'monospace', color: activeSlot.running ? color : 'rgba(71,85,105,0.48)' }}>{activeSlot.running ? `running · ${fmtElapsed(activeSlot.elapsed)}` : `run #${activeSlot.runCount ?? activeSlot.runs?.length ?? 0} · ${activeSlot.lastRun ?? activeSlot.status?.lastRun ?? '—'}`}</span>
       </div>
 
@@ -856,26 +836,34 @@ export function ProjectPanel() {
         <div style={{ padding: '16px 24px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
             <div style={{ fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.14em', color: 'var(--muted)' }}>Run History</div>
-            <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.45)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{activeSlot.id === 'core' ? 'host log' : 'project log'}</div>
+            <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.45)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>project log</div>
           </div>
-          {displayRuns.length === 0 ? <div style={{ fontSize: '0.75rem', color: 'rgba(71,85,105,0.35)', fontFamily: 'monospace' }}>no runs yet</div> : displayRuns.map((run, i) => {
-            const runColor = TYPE_COLOR[run.type] ?? 'rgba(71,85,105,0.5)'
-            const what = run['Failure'] || run['Error'] || run['Goal'] || run['Done'] || run['What I investigated'] || run['Investigated'] || run['What I built'] || run['What I changed'] || run['What changed'] || run['What improved'] || run['What I found'] || run['Finding'] || run['Key finding'] || run['Suggested next move'] || 'stdout captured with no summary'
-            const failureDetail = run.type === 'FAILED' ? (run.detail || what) : ''
-            const summaryLimit = run.type === 'FAILED' ? 180 : 92
-            const isLast = i === displayRuns.length - 1
-            return <div key={`${activeSlot.id}-${run.signature || `${run.num}-${run.date}-${run.type}-${run.attempt || i}`}`} style={{ display: 'flex', gap: 10, paddingBottom: isLast ? 0 : 14, position: 'relative' }}>
-              {!isLast && <div style={{ position: 'absolute', left: 3, top: 9, bottom: 0, width: 1, background: 'linear-gradient(to bottom, var(--border), transparent)' }} />}
-              <div style={{ width: 7, height: 7, borderRadius: '50%', background: runColor, flexShrink: 0, marginTop: 3, boxShadow: `0 0 5px ${runColor}66` }} />
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ display: 'flex', gap: 6, marginBottom: 2, flexWrap: 'wrap' }}><span style={{ fontSize: '0.57rem', fontFamily: 'monospace', color: runColor, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{run.type ?? 'run'}</span><span style={{ fontSize: '0.57rem', color: 'rgba(71,85,105,0.5)' }}>#{run.num} {run.date}{runAttemptText(run)}</span></div>
-                <div style={{ fontSize: '0.77rem', color: 'rgba(241,245,249,0.72)', lineHeight: 1.4 }}>{what.length > summaryLimit ? what.slice(0, summaryLimit) + '…' : what}</div>
-                {failureDetail && (
-                  <pre style={{ margin: '6px 0 0', maxHeight: 120, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', borderLeft: `2px solid ${runColor}`, padding: '6px 8px', background: 'rgba(248,113,113,0.055)', color: 'rgba(254,202,202,0.86)', fontSize: '0.64rem', lineHeight: 1.45, fontFamily: 'monospace' }}>{failureDetail}</pre>
-                )}
+          {latestDisplayedFailure && (
+            <div data-history-failure-receipt={activeSlot.id} style={{ marginBottom: 10, border: '1px solid rgba(248,113,113,0.16)', borderLeft: '3px solid rgba(248,113,113,0.72)', borderRadius: 7, background: 'rgba(248,113,113,0.045)', padding: '7px 9px', display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: '0.55rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#f87171' }}>failure visible</div>
+                <div style={{ marginTop: 3, fontSize: '0.62rem', fontFamily: 'monospace', color: 'rgba(254,202,202,0.76)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  run #{latestDisplayedFailure.num ?? '?'} is {latestDisplayedFailurePinned ? 'pinned with recent history' : 'inside recent history'}
+                </div>
+              </div>
+              <div style={{ flexShrink: 0, fontSize: '0.54rem', fontFamily: 'monospace', color: 'rgba(248,113,113,0.58)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                expands below
               </div>
             </div>
-          })}
+          )}
+          {historyError && (
+            <div data-run-history-error={activeSlot.id} style={{ marginBottom: 10, border: '1px solid rgba(248,113,113,0.18)', borderLeft: '3px solid rgba(248,113,113,0.78)', borderRadius: 7, background: 'rgba(248,113,113,0.055)', padding: '8px 9px' }}>
+              <div style={{ fontSize: '0.55rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#f87171' }}>history unavailable</div>
+              <div style={{ marginTop: 4, fontSize: '0.64rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(254,202,202,0.84)', wordBreak: 'break-word' }}>{historyError}</div>
+            </div>
+          )}
+          <RunHistoryList
+            displayRuns={displayRuns}
+            slotId={activeSlot.id}
+            expandedFailureKeys={expandedFailureKeys}
+            setExpandedFailureKeys={setExpandedFailureKeys}
+            defaultOpenFailureKey={defaultOpenFailureKey}
+          />
         </div>
         <div className="max-md:hidden" style={{ background: 'var(--border)', margin: '12px 0' }} />
         <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -890,6 +878,82 @@ export function ProjectPanel() {
               onChange={activeSlot.onRunnerChange}
             />
           </div>
+          <div data-runner-relay-detail={activeSlot.id} style={{ display: 'grid', gap: 3, borderLeft: `2px solid ${selectedRunner === 'claude' ? 'rgba(167,139,250,0.38)' : 'rgba(34,211,238,0.24)'}`, paddingLeft: 8 }}>
+            <div data-runner-switch-receipt={activeSlot.id} data-runner-launch-ok={selectedRunnerLaunchOk ? 'true' : 'false'} style={{ fontSize: '0.57rem', fontFamily: 'monospace', color: selectedRunnerLaunchOk ? 'rgba(134,239,172,0.76)' : 'rgba(254,202,202,0.82)', lineHeight: 1.32, wordBreak: 'break-word', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {runnerReceiptLabel}
+            </div>
+            {activeRunnerRows.map(row => (
+              <div key={row} style={{ fontSize: '0.57rem', fontFamily: 'monospace', color: selectedRunner === 'claude' ? 'rgba(216,180,254,0.76)' : 'rgba(148,163,184,0.58)', lineHeight: 1.32, wordBreak: 'break-word' }}>
+                {row}
+              </div>
+            ))}
+          </div>
+          {runnerNotice && (
+            <div data-runner-switch-notice={activeSlot.id} style={{ borderLeft: `2px solid ${runnerNotice.includes('blocked') ? 'rgba(245,158,11,0.48)' : `${color}66`}`, paddingLeft: 8, fontSize: '0.62rem', fontFamily: 'monospace', lineHeight: 1.35, color: runnerNotice.includes('blocked') ? 'rgba(253,230,138,0.8)' : 'rgba(167,139,250,0.78)' }}>
+              {runnerNotice}
+            </div>
+          )}
+          {runnerReceipt && (
+            <div data-runner-switch-receipt-detail={activeSlot.id} data-runner-switch-history-recorded={runnerReceipt.historyRecorded ? 'true' : 'false'} style={{ border: `1px solid ${runnerReceipt.ok ? 'rgba(34,197,94,0.16)' : 'rgba(248,113,113,0.18)'}`, background: runnerReceipt.ok ? 'rgba(34,197,94,0.035)' : 'rgba(248,113,113,0.045)', borderRadius: 6, padding: '7px 9px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 5 }}>
+                <div style={{ fontSize: '0.55rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: runnerReceipt.ok ? 'rgba(134,239,172,0.78)' : 'rgba(248,113,113,0.78)' }}>Runner switch receipt</div>
+                <div style={{ fontSize: '0.52rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.08em', color: runnerReceipt.historyRecorded ? 'rgba(254,202,202,0.62)' : 'rgba(148,163,184,0.52)' }}>
+                  {runnerReceipt.historyRecorded ? 'FAILED row written' : runnerReceipt.ok ? 'launchable' : 'blocked'}
+                </div>
+              </div>
+              <div style={{ display: 'grid', gap: 4 }}>
+                <div style={{ fontSize: '0.6rem', fontFamily: 'monospace', lineHeight: 1.35, color: runnerReceipt.ok ? 'rgba(187,247,208,0.76)' : 'rgba(254,202,202,0.78)', wordBreak: 'break-word' }}>
+                  selected: {runnerReceipt.runner} · {runnerReceipt.ok ? 'preflight ok' : 'preflight blocked'}
+                </div>
+                {runnerReceipt.command && (
+                  <div style={{ borderLeft: '2px solid rgba(148,163,184,0.24)', paddingLeft: 7, fontSize: '0.57rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(148,163,184,0.68)', wordBreak: 'break-word' }}>
+                    command: {shortCommand(runnerReceipt.command)}
+                  </div>
+                )}
+                {runnerReceipt.message && !runnerReceipt.ok && (
+                  <div style={{ borderLeft: '2px solid rgba(248,113,113,0.34)', paddingLeft: 7, fontSize: '0.58rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(254,202,202,0.72)', wordBreak: 'break-word' }}>
+                    {runnerReceipt.message}
+                  </div>
+                )}
+                {runnerReceipt.checks?.slice(0, 4).map(detail => (
+                  <div key={detail} style={{ borderLeft: `2px solid ${runnerReceipt.ok ? 'rgba(34,197,94,0.22)' : 'rgba(248,113,113,0.34)'}`, paddingLeft: 7, fontSize: '0.57rem', fontFamily: 'monospace', lineHeight: 1.35, color: runnerReceipt.ok ? 'rgba(187,247,208,0.62)' : 'rgba(254,202,202,0.7)', wordBreak: 'break-word' }}>
+                    {detail}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {activeLastRunFailed && (
+            <div data-last-run-failure={activeSlot.id} style={{ border: '1px solid rgba(248,113,113,0.18)', background: 'rgba(248,113,113,0.055)', borderRadius: 6, padding: '7px 9px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 3 }}>
+                <div style={{ fontSize: '0.56rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(248,113,113,0.78)' }}>Last run failed</div>
+                <div style={{ fontSize: '0.52rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(254,202,202,0.5)' }}>{activeLastFailureSource}</div>
+              </div>
+              <div style={{ fontSize: '0.66rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(254,202,202,0.82)', wordBreak: 'break-word' }}>
+                {failureSignal(activeLastFailure)}
+              </div>
+            </div>
+          )}
+          {showClaudeSetup && (
+            <div data-runner-setup="claude" data-runner-setup-ok="false" style={{ border: '1px solid rgba(248,113,113,0.16)', background: 'rgba(248,113,113,0.045)', borderRadius: 6, padding: '7px 9px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 4 }}>
+                <div style={{ fontSize: '0.55rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(248,113,113,0.78)' }}>Claude setup incomplete</div>
+                <div style={{ fontSize: '0.52rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(254,202,202,0.5)' }}>relay switch preflight</div>
+              </div>
+              <div style={{ fontSize: '0.64rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(254,202,202,0.82)', wordBreak: 'break-word' }}>
+                {claudeSetup.error || 'Claude runner setup failed'}
+              </div>
+              {claudeSetupDetails.length > 0 && (
+                <div style={{ marginTop: 7, display: 'grid', gap: 4 }}>
+                  {claudeSetupDetails.map(detail => (
+                    <div key={detail} style={{ borderLeft: '2px solid rgba(248,113,113,0.34)', paddingLeft: 7, fontSize: '0.59rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(254,202,202,0.7)', wordBreak: 'break-word' }}>
+                      {detail}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <div style={{ display: 'grid', gap: 7 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                 <div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)' }}>Steer</div>
@@ -917,16 +981,89 @@ export function ProjectPanel() {
               </button>
             </div>
           {readinessIssue && (
-            <div style={{ border: '1px solid rgba(248,113,113,0.18)', background: 'rgba(248,113,113,0.055)', borderRadius: 6, padding: '7px 9px' }}>
-              <div style={{ fontSize: '0.56rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(248,113,113,0.78)', marginBottom: 3 }}>Runner blocked</div>
+            <div data-preflight-detail={readinessDetails.length ? 'true' : 'false'} style={{ border: '1px solid rgba(248,113,113,0.18)', background: 'rgba(248,113,113,0.055)', borderRadius: 6, padding: '7px 9px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', marginBottom: 3 }}>
+                <div style={{ fontSize: '0.56rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(248,113,113,0.78)' }}>Runner blocked</div>
+                <div style={{ fontSize: '0.52rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(254,202,202,0.5)' }}>{preflightRunnerLabel} preflight</div>
+              </div>
               <div style={{ fontSize: '0.68rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(254,202,202,0.86)' }}>{readinessIssue}</div>
+              {readinessDetails.length > 0 && (
+                <div style={{ marginTop: 7, display: 'grid', gap: 4 }}>
+                  {readinessDetails.map(detail => (
+                    <div key={detail} style={{ borderLeft: '2px solid rgba(248,113,113,0.36)', paddingLeft: 7, fontSize: '0.6rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(254,202,202,0.72)', wordBreak: 'break-word' }}>
+                      {detail}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {staleSourceBlocked && (
+                <button
+                  type="button"
+                  onClick={restartPulseService}
+                  disabled={serviceRestarting}
+                  data-restart-pulse-service="true"
+                  style={{ marginTop: 8, border: '1px solid rgba(251,146,60,0.28)', background: 'rgba(251,146,60,0.08)', color: 'rgba(253,186,116,0.92)', borderRadius: 5, padding: '5px 8px', cursor: serviceRestarting ? 'not-allowed' : 'pointer', fontSize: '0.58rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.08em' }}
+                >
+                  {serviceRestarting ? 'restarting pi pulse...' : 'restart pi pulse service'}
+                </button>
+              )}
             </div>
           )}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', minWidth: 44 }}>Sched</div><div style={{ flex: 1, fontSize: '0.72rem', fontFamily: 'monospace', color: activeSlot.schedule?.enabled ? '#22c55e' : 'rgba(71,85,105,0.35)' }}>{activeSlot.schedule?.enabled ? `every ${fmtInterval(activeSlot.schedule.intervalHours)} · next ${fmtCountdown(activeSlot.schedule.nextRunAt)}` : 'off'}</div><button onClick={activeSlot.onToggle} style={{ background: 'none', border: `1px solid ${activeSlot.schedule?.enabled ? 'rgba(34,197,94,0.3)' : 'rgba(255,255,255,0.08)'}`, borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: '0.6rem', fontFamily: 'monospace', letterSpacing: '0.06em', color: activeSlot.schedule?.enabled ? '#22c55e' : 'rgba(71,85,105,0.5)' }}>{activeSlot.schedule?.enabled ? 'pause' : 'start'}</button></div>
-          <motion.button whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }} onClick={activeSlot.onRun} disabled={activeSlot.launching || activeSlot.running} style={{ marginTop: 'auto', width: '100%', padding: '10px 14px', borderRadius: 9, border: `1px solid ${color}45`, background: `${color}14`, cursor: (activeSlot.launching || activeSlot.running) ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: 10, opacity: (activeSlot.launching || activeSlot.running) ? 0.72 : 1 }}><div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, background: `${color}20`, display: 'flex', alignItems: 'center', justifyContent: 'center', color }}>{activeSlot.launching || activeSlot.running ? <motion.div animate={{ rotate: 360 }} transition={{ duration: 1.2, repeat: Infinity, ease: 'linear' }}><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 11-6.219-8.56" strokeLinecap="round" /></svg></motion.div> : <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>}</div><div style={{ textAlign: 'left' }}><div style={{ fontSize: '0.8rem', fontWeight: 600, color, letterSpacing: '0.04em' }}>{activeSlot.launching ? 'STARTING…' : activeSlot.running ? 'INCUBATING' : 'RUN INCUBATOR'}</div><div style={{ fontSize: '0.65rem', color: 'rgba(71,85,105,0.65)', marginTop: 1 }}>{activeSlot.running ? `${fmtElapsed(activeSlot.elapsed)} elapsed` : `run #${nextRunNum} · ${(activeSlot.lastRunType || activeSlot.status?.lastRunType || 'mutate').toLowerCase()} next`}</div></div></motion.button>
+          <div style={{ display: 'grid', gap: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', minWidth: 44 }}>Sched</div>
+              <div style={{ flex: 1, fontSize: '0.72rem', fontFamily: 'monospace', color: activeScheduleBlockedAt ? '#f87171' : activeSlot.schedule?.enabled ? '#22c55e' : 'rgba(71,85,105,0.35)' }}>
+                {activeScheduleBlockedAt
+                  ? `blocked ${fmtScheduleTime(activeScheduleBlockedAt)} · next ${fmtCountdown(activeSlot.schedule?.nextRunAt) || 'manual'}`
+                  : activeSlot.schedule?.enabled ? `every ${fmtInterval(activeSlot.schedule.intervalHours)} · next ${fmtCountdown(activeSlot.schedule.nextRunAt)}` : 'off'}
+              </div>
+              <button onClick={activeSlot.onToggle} style={{ background: 'none', border: `1px solid ${activeSlot.schedule?.enabled ? 'rgba(34,197,94,0.3)' : 'rgba(255,255,255,0.08)'}`, borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontSize: '0.6rem', fontFamily: 'monospace', letterSpacing: '0.06em', color: activeSlot.schedule?.enabled ? '#22c55e' : 'rgba(71,85,105,0.5)' }}>{activeSlot.schedule?.enabled ? 'pause' : 'start'}</button>
+            </div>
+            {activeScheduleBlockedAt && (
+              <div style={{ marginLeft: 52, borderLeft: '2px solid rgba(248,113,113,0.35)', paddingLeft: 8, fontSize: '0.63rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(254,202,202,0.78)' }}>
+                latest scheduled run was blocked by preflight; history should contain a FAILED row with command detail
+              </div>
+            )}
+          </div>
+          <motion.button
+            whileHover={runDisabled ? {} : { scale: 1.01 }}
+            whileTap={runDisabled ? {} : { scale: 0.98 }}
+            onClick={() => { if (!runDisabled) activeSlot.onRun?.() }}
+            disabled={runDisabled}
+            data-run-blocked={runnerBlocked ? 'true' : 'false'}
+            style={{
+              marginTop: 'auto',
+              width: '100%',
+              padding: '10px 14px',
+              borderRadius: 9,
+              border: `1px solid ${runButtonColor}45`,
+              background: runnerBlocked ? 'rgba(248,113,113,0.07)' : `${color}14`,
+              cursor: runDisabled ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              opacity: activeSlot.launching || activeSlot.running ? 0.72 : 1,
+            }}
+          >
+            <div style={{ width: 28, height: 28, borderRadius: 6, flexShrink: 0, background: `${runButtonColor}20`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: runButtonColor }}>
+              {activeSlot.launching || activeSlot.running ? (
+                <motion.div animate={{ rotate: 360 }} transition={{ duration: 1.2, repeat: Infinity, ease: 'linear' }}>
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 11-6.219-8.56" strokeLinecap="round" /></svg>
+                </motion.div>
+              ) : runnerBlocked ? (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+              ) : (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3" /></svg>
+              )}
+            </div>
+            <div style={{ textAlign: 'left', minWidth: 0 }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 600, color: runButtonColor, letterSpacing: '0.04em' }}>{runButtonLabel}</div>
+              <div style={{ fontSize: '0.65rem', color: runnerBlocked ? 'rgba(254,202,202,0.72)' : 'rgba(71,85,105,0.65)', marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{runButtonDetail}</div>
+            </div>
+          </motion.button>
         </div>
       </div>
-      <div style={{ background: 'rgba(0,0,0,0.15)' }}><AiStrip slotId={activeSlot.id} autoTrigger={aiTriggersBySlot[activeSlot.id] || 0} /></div>
+      <div data-active-ai-slot={activeSlot.id} style={{ background: 'rgba(0,0,0,0.15)' }}><AiStrip slotId={activeSlot.id} autoTrigger={aiTriggersBySlot[activeSlot.id] || 0} /></div>
     </motion.div>
   )
 }

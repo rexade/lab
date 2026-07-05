@@ -1,0 +1,24 @@
+{
+  "project": "rat-deposit",
+  "status": "active",
+  "phase": "prototype",
+  "runner": "codex",
+  "repo": "/home/admin/rat-deposit",
+  "runLog": "/home/admin/rat-deposit/reports/RUN_LOG.md",
+  "runScript": "/home/admin/lab/scripts/run-codex-incubator.sh",
+  "promptDir": "/home/admin/rat-deposit/prompts",
+  "runTypes": [
+    "create",
+    "mutate",
+    "research",
+    "mutate"
+  ],
+  "runCount": 4,
+  "lastRun": "2026-07-03",
+  "lastRunType": "RESEARCH",
+  "current_focus": "First playable prototype exists, but the target direction is now a serious, systems-forward indie roguelike rather than a flash-style arcade game.",
+  "next_run_goal": "Mutate toward a compact AAA-indie roguelike feel: darker atmosphere, room/run progression, meaningful risk-reward systems, tool tradeoffs, and more polished HUD/canvas presentation.",
+  "notes": "Codex-backed incubator project. User wants project iterations to come through the incubator, not direct manual game edits.",
+  "codexBypass": true,
+  "lastRunStatus": "ok"
+}

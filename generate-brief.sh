@@ -41,9 +41,24 @@ try:
     print('\n'.join(bullets)[:250])
 except: pass" 2>/dev/null)
 
+PENDING_FEEDBACK=$(python3 -c "
+import json, sys
+try:
+    data = json.load(open('$LAB_DIR/projects/pi-pulse/status.json'))
+    updated = data.get('feedbackUpdatedAt') or ''
+    consumed = data.get('feedbackConsumedAt') or ''
+    text = (data.get('latestUserFeedback') or '').strip()
+    if text and updated and updated > consumed:
+        print(text[:650])
+except Exception:
+    pass" 2>/dev/null)
 cat > "$LAB_DIR/MEMORY_BRIEF.md" << BRIEF
 # Memory Brief — ${RUN_TYPE^^} #${NEXT_RUN}
 *$(date '+%Y-%m-%d %H:%M') — pre-run context*
+
+## Pending user steering
+${PENDING_FEEDBACK:-"(none pending)"}
+
 
 ## Palace context (L0+L1)
 ${WAKEUP:-"(palace unavailable — read TASTE_PROFILE.md and DAILY_SEED.md)"}

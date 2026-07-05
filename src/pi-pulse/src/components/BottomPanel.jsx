@@ -810,7 +810,7 @@ export function BottomPanel({ stats }) {
               System Tools
             </div>
             <div style={{ marginTop: 4, fontSize: '0.72rem', color: 'rgba(148,163,184,0.58)', lineHeight: 1.35 }}>
-              Host runs now live in the Core Incubator.
+              Host self-runs are retired; project incubators run below.
             </div>
           </div>
 

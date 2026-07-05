@@ -13,8 +13,9 @@
 
 ## Architecture
 - SSE (not WebSocket or polling) for live stats push — 2s interval, paused when no clients
-- Single `buildStatsPayload()` call per tick — cache result as `lastStatsPayload`
-- `getNetworkRate()` is stateful (byte-delta) — never call it twice in the same tick
+- SSE sends one `buildStatsPayload()` result per tick via `lastStatsPayload`.
+- `pushDaySnapshot()` must call `buildStatsPayload()` fresh so the 24h graph keeps recording while the dashboard is closed.
+- `getNetworkRate()` is stateful (byte-delta), so it returns the cached rate for sub-second duplicate calls.
 - Only edit /home/admin/lab/src/ — no other directories
 - Never deploy if `npm run build` fails or throws warnings
 

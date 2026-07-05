@@ -6,19 +6,25 @@
   "repo": "/home/admin/taste-trainer",
   "runLog": "/home/admin/taste-trainer/reports/RUN_LOG.md",
   "recentRuns": "/home/admin/taste-trainer/reports/RECENT_RUNS.md",
-  "runScript": "/home/admin/lab/scripts/run-codex-incubator.sh",
+  "runScript": "/home/admin/lab/projects/taste-trainer/run-taste-trainer.sh",
   "promptDir": "/home/admin/taste-trainer/prompts",
   "runTypes": [
     "mutate",
     "research",
     "mutate"
   ],
-  "runCount": 7,
-  "lastRun": "2026-07-03",
+  "runCount": 85,
+  "lastRun": "2026-07-05",
   "lastRunType": "MUTATE",
   "current_focus": "Train incubator taste with best-of-3 choices, lightweight taste labels, and an evidence-weighted profile for future prompts.",
-  "next_run_goal": "Add import/export for the local comparison archive so taste evidence can move between browsers and machines.",
+  "next_run_goal": "Use latest user feedback: the ui for taste trainer is all over the place, i dont know what to press and also , some questions are way to hard to hunderstand, like what does it mean?",
   "notes": "Replaces the Rat Deposit incubator slot. Keep it local, dark, minimal, and useful as prompt context.",
   "codexBypass": true,
-  "lastRunStatus": "ok"
+  "lastRunStatus": "ok",
+  "feedbackPath": "/home/admin/taste-trainer/reports/USER_FEEDBACK.md",
+  "latestUserFeedback": "the ui for taste trainer is all over the place, i dont know what to press and also , some questions are way to hard to hunderstand, like what does it mean?",
+  "feedbackUpdatedAt": "2026-07-04T20:58:42.686Z",
+  "claudeBypass": true,
+  "launcher": "/home/admin/lab/projects/taste-trainer/run-taste-trainer.sh",
+  "claudeRunScript": "/home/admin/lab/src/pi-pulse/scripts/run-claude-incubator.sh"
 }

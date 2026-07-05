@@ -1,5 +1,11 @@
 # lab — a feral Pi incubator
 
+A Raspberry Pi-hosted creative incubator for autonomous AI work.
+
+Pi Lab runs repeated create/mutate/research loops against mounted projects. It keeps memory, taste feedback, run history, failure visibility, and human steering in one small local system.
+
+This is not a generic dashboard. It is a workshop for producing weird, shippable creative software. Steer it toward higher trust per run, not more widgets.
+
 > **AI handover.** This file is written for the next agent that lands in this repo — Claude Code, Codex, or whatever you are. Read it end-to-end before touching anything. The invariants below are load-bearing; the taste rules are not suggestions.
 
 ---
@@ -139,22 +145,22 @@ The script figures out the next run number, generates the brief, calls Claude Co
 
 ### Start / restart the pi-pulse dashboard
 
-Runs as a native `node server.js` process supervised by `src/pi-pulse/start.sh` under systemd (unit: `pi-pulse.service`). NOT in Docker. Port 8089.
+Runs as a native `node server.js` process supervised by systemd (unit: `pi-pulse.service`). NOT in Docker. Port 8089.
 
 ```bash
 sudo systemctl restart pi-pulse
 # or on the Pi if systemd unit is missing:
-cd /home/admin/lab/src/pi-pulse && ./start.sh
+cd /home/admin/lab/src/pi-pulse && npm start
 ```
 
-The supervisor auto-restarts on `dist/` change (Vite build), so `npm run build` inside `src/pi-pulse/` is the live-reload path.
+The server reads built assets from `dist/` on each request, so a fresh Vite build is picked up without restarting the service.
 
 ### Rebuild the React frontend
 
 ```bash
 cd /home/admin/lab/src/pi-pulse
 npm install       # node_modules is gitignored — first clone needs this
-npm run build     # emits dist/, server picks up and restarts
+npm run build     # emits dist/, server serves the new build on next request
 ```
 
 ### MemPalace CLI
@@ -209,8 +215,8 @@ The `runScript` lives outside this repo (typically `/home/admin/run-<project>.sh
 
 - **Single-Pi single-point-of-failure.** The Pi's SD card is the only physical copy of the running system beyond this repo. If runtime state matters (day-buffer, live palace state), it lives only on the Pi. This repo is source + config + notes, not a full backup.
 - **Cloudflared lockout.** The Pi is administered through a Cloudflare Tunnel. Never touch `/etc/cloudflared/config.yml` or restart `cloudflared` without understanding you can lock yourself (and the human) out until a physical reboot. The human explicitly asks to be warned before any change touching networking, Docker, or Cloudflare.
-- **Port 8089 double-bind.** `start.sh` will retry-until-free, but if `server.js` crashes mid-listen, an EADDRINUSE loop can burn ~10s. Not fatal.
-- **`fs.watch` unreliability.** `server.js` uses `fs.watch` on `RUN_LOG.md` and `dist/`. It's not guaranteed to fire on all filesystems. There's no polling fallback for RUN_LOG.md — if a run happens and the UI doesn't update, refresh the browser once and check the console.
+- **Port 8089 double-bind.** `pi-pulse.service` owns restarts. Do not add wrapper restart loops or port-kill guards; a busy port should fail loudly in the journal.
+- **`fs.watch` unreliability.** `server.js` uses `fs.watch` on `RUN_LOG.md`. It's not guaranteed to fire on all filesystems. There's no polling fallback for RUN_LOG.md — if a run happens and the UI doesn't update, refresh the browser once and check the console.
 - **qwen tokenization artifacts.** DRIFT_FEEDBACK sometimes contains garbled tokens like `"arenaught"` or `"areading"` — that's the 1.5B model breaking grammar, not corruption. Don't chase it.
 - **The palace can be stale.** `save-run.sh` mines `memory/` after each run, but the source of truth for "what happened" is still `RUN_LOG.md`. Trust the log first.
 

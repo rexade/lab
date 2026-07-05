@@ -1,69 +1,111 @@
 import express from 'express'
 import fs from 'fs'
 import os from 'os'
+import { createHash } from 'crypto'
 import { spawn, execSync } from 'child_process'
 import { fileURLToPath } from 'url'
-import { dirname, join } from 'path'
+import { basename, dirname, join } from 'path'
+import {
+  appendFailedPreflightEntry,
+  appendFailedRunEntry,
+  aiFeedbackPayload,
+  capturedFailureDetail,
+  checkClaudeCommand,
+  checkClaudeModel,
+  checkPath,
+  firstRunnableClaudeModel,
+  hydrateAiFeedback,
+  parseRunsFromLog,
+  preflightFailureDetail,
+  preflightRunConfig,
+  runsWithPinnedLatestFailure,
+  SAFE_CLAUDE_MODEL,
+  summarizeRun,
+} from './server-core.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
-const PORT = 8089
-const RUN_LOG_PATH = '/home/admin/lab/RUN_LOG.md'
+const PORT = Number(process.env.PORT || 8089)
+const SERVER_STARTED_AT = Date.now()
+const SCHEDULES_ENABLED = process.env.PI_PULSE_DISABLE_SCHEDULES !== '1'
+const LAB_ROOT = process.env.PI_PULSE_LAB_ROOT || '/home/admin/lab'
+const PROJECTS_DIR = process.env.PI_PULSE_PROJECTS_DIR || join(LAB_ROOT, 'projects')
+const RUN_LOG_PATH = process.env.PI_PULSE_RUN_LOG_PATH || join(LAB_ROOT, 'RUN_LOG.md')
+const PROJECT_STATUS_PATH = process.env.PI_PULSE_PROJECT_STATUS_PATH || join(PROJECTS_DIR, 'pi-pulse', 'status.json')
+const LAB_SCHEDULE_PATH = process.env.PI_PULSE_LAB_SCHEDULE_PATH || join(PROJECTS_DIR, 'pi-pulse', 'schedule.json')
+const RUN_CAPTURE_DIR = process.env.PI_PULSE_RUN_CAPTURE_DIR || join(PROJECTS_DIR, '.run-capture')
+const DAILY_SEED_PATH = process.env.PI_PULSE_DAILY_SEED_PATH || join(LAB_ROOT, 'DAILY_SEED.md')
+const CORE_SEED_PATH = process.env.PI_PULSE_CORE_SEED_PATH || join(PROJECTS_DIR, 'pi-pulse', 'seed.md')
+const CORE_FEEDBACK_JSON = process.env.PI_PULSE_CORE_FEEDBACK_JSON || join(LAB_ROOT, 'DRIFT_FEEDBACK.json')
+const CORE_FEEDBACK_MD = process.env.PI_PULSE_CORE_FEEDBACK_MD || join(LAB_ROOT, 'DRIFT_FEEDBACK.md')
+const USER_FEEDBACK_PATH = process.env.PI_PULSE_USER_FEEDBACK_PATH || join(LAB_ROOT, 'USER_FEEDBACK.md')
+const DEFAULT_LAB_RUNNER = 'codex'
+const GENERIC_CLAUDE_INCUBATOR_SCRIPT = process.env.PI_PULSE_CLAUDE_INCUBATOR_SCRIPT || join(__dirname, 'scripts', 'run-claude-incubator.sh')
+const DEFAULT_CLAUDE_MODEL = process.env.PI_PULSE_DEFAULT_CLAUDE_MODEL || SAFE_CLAUDE_MODEL
+const SOURCE_HEALTH_FILES = [
+  join(__dirname, 'server.js'),
+  join(__dirname, 'server-core.js'),
+  join(__dirname, 'scripts', 'run-claude-incubator.sh'),
+  ...String(process.env.PI_PULSE_SOURCE_HEALTH_FILES || '').split(':').filter(Boolean),
+]
 
-const AI_FIELD_KEYS = ['DIRECTION', 'STRONGEST', 'WEAKEST', 'DRIFT', 'NEXT']
-const AI_FIELD_ALIASES = {
-  'NEXT MOVE': 'NEXT',
-  'NEXT ACTION': 'NEXT',
-  'SUGGESTED NEXT MOVE': 'NEXT',
-  'STRONGEST SIGNAL': 'STRONGEST',
-  'WEAKEST SIGNAL': 'WEAKEST',
-  'WEAKNESS': 'WEAKEST',
-}
-
-function parseAiFeedback(text = '') {
-  const raw = String(text || '').trim()
-  const fields = {}
-  const cleaned = raw.replace(/\*\*/g, '').replace(/\r/g, '')
-  const re = /([A-Z]{2,}[A-Z\s]*):\s*\n?([\s\S]*?)(?=\n[A-Z]{2,}[A-Z\s]*:|$)/g
-  let m
-  while ((m = re.exec(cleaned)) !== null) {
-    const label = m[1].trim().toUpperCase()
-    const key = AI_FIELD_ALIASES[label] || label
-    const value = m[2].trim().replace(/\n+/g, ' ')
-    if (value && AI_FIELD_KEYS.includes(key)) fields[key] = value
+function sourceSnapshot() {
+  const hash = createHash('sha256')
+  let latestMtimeMs = 0
+  const files = SOURCE_HEALTH_FILES.map(filePath => {
+    const label = filePath.startsWith(__dirname) ? filePath.slice(__dirname.length + 1) : filePath
+    try {
+      const st = fs.statSync(filePath)
+      const content = fs.readFileSync(filePath)
+      hash.update(label)
+      hash.update('\0')
+      hash.update(content)
+      hash.update('\0')
+      latestMtimeMs = Math.max(latestMtimeMs, st.mtimeMs)
+      return { path: label, mtime: new Date(st.mtimeMs).toISOString(), bytes: st.size }
+    } catch (err) {
+      hash.update(label)
+      hash.update(`\0missing:${err.code || err.message}\0`)
+      return { path: label, error: err.code || err.message }
+    }
+  })
+  return {
+    fingerprint: hash.digest('hex').slice(0, 12),
+    latestMtime: latestMtimeMs ? new Date(latestMtimeMs).toISOString() : null,
+    files,
   }
-  const missing = AI_FIELD_KEYS.filter(key => !fields[key])
-  return { fields, missing, malformed: !!raw && missing.length > 0 }
 }
 
-function aiFeedbackPayload({ response, model, incubatorId = 'core', project = 'pi-pulse', ts = Date.now(), source = 'local-ollama-qwen' }) {
+const BOOT_SOURCE_SNAPSHOT = sourceSnapshot()
+
+function serviceHealth() {
+  const currentSource = sourceSnapshot()
+  const changedSinceStart = currentSource.fingerprint !== BOOT_SOURCE_SNAPSHOT.fingerprint
   return {
     ok: true,
-    incubatorId,
-    project,
-    response,
-    model,
-    source,
-    ts,
-    ...parseAiFeedback(response),
+    ts: Date.now(),
+    pid: process.pid,
+    startedAt: new Date(SERVER_STARTED_AT).toISOString(),
+    uptimeSeconds: Math.floor((Date.now() - SERVER_STARTED_AT) / 1000),
+    source: {
+      ...currentSource,
+      bootFingerprint: BOOT_SOURCE_SNAPSHOT.fingerprint,
+      bootLatestMtime: BOOT_SOURCE_SNAPSHOT.latestMtime,
+      changedSinceStart,
+    },
   }
 }
 
-function hydrateAiFeedback(data, target = {}) {
-  const response = data.response ?? data.raw ?? ''
-  const parsed = parseAiFeedback(response)
-  const fields = data.fields && typeof data.fields === 'object' ? data.fields : parsed.fields
-  const missing = Array.isArray(data.missing) ? data.missing : AI_FIELD_KEYS.filter(key => !fields[key])
-  return {
-    ...data,
-    response,
-    incubatorId: data.incubatorId ?? target.id ?? 'core',
-    project: data.project ?? target.project ?? 'pi-pulse',
-    source: data.source ?? 'local-ollama-qwen',
-    fields,
-    missing,
-    malformed: typeof data.malformed === 'boolean' ? data.malformed : (!!response && missing.length > 0),
-  }
+function requireFreshSource(req, res, next) {
+  const health = serviceHealth()
+  if (!health.source.changedSinceStart) return next()
+  return res.status(409).json({
+    ok: false,
+    code: 'STALE_SERVICE_SOURCE',
+    error: 'service source changed since start; restart Pi Pulse before mutating runner state',
+    startedAt: health.startedAt,
+    source: health.source,
+  })
 }
 
 // CPU usage calculation (requires two samples)
@@ -71,9 +113,12 @@ let prevCpuTimes = null
 
 // Network I/O — requires two samples to compute bytes/sec rate
 let prevNetSample = null
+let lastNetRate = { rx: 0, tx: 0, iface: 'unknown' }
 
-// Cached last stats payload — used by pushDaySnapshot to avoid double-sampling
+// Cached last stats payload — used for SSE fanout.
 let lastStatsPayload = null
+
+let diskInfoCache = { ts: 0, value: null }
 
 // Active run tracking — cleared after process exits and status is read
 let activeRun = null // { pid, startTime }
@@ -85,16 +130,16 @@ const LAB_RUNNERS = {
   },
   codex: {
     script: '/home/admin/lab/scripts/run-codex-incubator.sh',
-    args: ['/home/admin/lab/projects/pi-pulse/status.json'],
+    args: [PROJECT_STATUS_PATH],
   },
 }
-const LAB_SCHEDULE_PATH = '/home/admin/lab/projects/pi-pulse/schedule.json'
-let labScheduleState = { enabled: false, intervalHours: 2, runner: 'claude', nextRunAt: null, lastScheduledRun: null, autoRunsSinceHuman: 0 }
+let labScheduleState = { enabled: false, intervalHours: 2, runner: DEFAULT_LAB_RUNNER, nextRunAt: null, lastScheduledRun: null, autoRunsSinceHuman: 0 }
 
 try {
   const raw = fs.readFileSync(LAB_SCHEDULE_PATH, 'utf8')
   const loaded = JSON.parse(raw)
   labScheduleState = { ...labScheduleState, ...loaded }
+  labScheduleState.runner = normalizeLabRunner(labScheduleState.runner)
   if (labScheduleState.enabled && labScheduleState.nextRunAt && labScheduleState.nextRunAt < Date.now()) {
     labScheduleState.nextRunAt = Date.now() + labScheduleState.intervalHours * 60 * 60 * 1000
   }
@@ -116,88 +161,7 @@ function activeRunAlive() {
 }
 
 function normalizeLabRunner(runner) {
-  return Object.hasOwn(LAB_RUNNERS, runner) ? runner : 'claude'
-}
-
-function readinessCheck(id, label, ok, detail, path = null) {
-  return { id, label, ok: !!ok, detail, ...(path ? { path } : {}) }
-}
-
-function checkPath(id, label, targetPath, kind = 'file') {
-  if (!targetPath) return readinessCheck(id, label, false, 'missing path')
-  try {
-    const st = fs.statSync(targetPath)
-    const typeOk = kind === 'dir' ? st.isDirectory() : st.isFile()
-    return readinessCheck(id, label, typeOk, typeOk ? 'ok' : `not a ${kind}`, targetPath)
-  } catch (err) {
-    return readinessCheck(id, label, false, err.code === 'ENOENT' ? 'not found' : err.message, targetPath)
-  }
-}
-
-function checkWritableLog(id, label, logPath) {
-  if (!logPath) return readinessCheck(id, label, false, 'missing run log path')
-  const parent = dirname(logPath)
-  try {
-    fs.accessSync(parent, fs.constants.W_OK)
-    return readinessCheck(id, label, true, fs.existsSync(logPath) ? 'ok' : 'will create on first write', logPath)
-  } catch (err) {
-    return readinessCheck(id, label, false, err.code === 'ENOENT' ? 'log directory not found' : err.message, logPath)
-  }
-}
-
-function checkCommand(id, command, fallbackPath = null) {
-  if (fallbackPath) {
-    try {
-      fs.accessSync(fallbackPath, fs.constants.X_OK)
-      return readinessCheck(id, `${command} binary`, true, fallbackPath, fallbackPath)
-    } catch { /* fall back to PATH check */ }
-  }
-  try {
-    execSync(`command -v ${command}`, { stdio: 'ignore', shell: '/bin/bash', timeout: 3000 })
-    return readinessCheck(id, `${command} binary`, true, 'ok')
-  } catch {
-    const detail = fallbackPath
-      ? `${command} not found in PATH and fallback is not executable: ${fallbackPath}`
-      : `${command} not found in PATH`
-    return readinessCheck(id, `${command} binary`, false, detail, fallbackPath)
-  }
-}
-
-function checkClaudeModel(model) {
-  if (!model || model === 'fable') {
-    return readinessCheck('model', 'Claude model', false, model ? `${model} is not a runnable Claude model` : 'missing Claude model')
-  }
-  return readinessCheck('model', 'Claude model', true, model)
-}
-
-function preflightRunConfig({ id, project, runner, runScript, repo, runLog, statusPath, promptDir, runTypes, runType, claudeModel }) {
-  const selectedRunner = runner || 'script'
-  const checks = [
-    checkPath('status', 'status file', statusPath),
-    checkPath('script', 'run script', runScript),
-    checkPath('repo', 'repo directory', repo || '/home/admin/lab', 'dir'),
-    checkWritableLog('log', 'run log', runLog),
-  ]
-
-  if (selectedRunner === 'codex' || runScript?.includes('run-codex-incubator.sh')) {
-    const selectedRunType = runType || runTypes?.[0] || 'mutate'
-    checks.push(checkCommand('binary', 'codex', process.env.CODEX_BIN || '/home/admin/.npm-global/bin/codex'))
-    checks.push(checkPath('promptDir', 'prompt directory', promptDir, 'dir'))
-    checks.push(checkPath('prompt', `${selectedRunType} prompt`, promptDir ? join(promptDir, `${selectedRunType}.md`) : null))
-  } else if (selectedRunner === 'claude') {
-    checks.push(checkCommand('binary', 'claude'))
-    checks.push(checkClaudeModel(claudeModel))
-  }
-
-  const ok = checks.every(c => c.ok)
-  return {
-    ok,
-    id,
-    project,
-    runner: selectedRunner,
-    checks,
-    error: ok ? null : checks.find(c => !c.ok)?.detail || 'runner preflight failed',
-  }
+  return Object.hasOwn(LAB_RUNNERS, runner) ? runner : DEFAULT_LAB_RUNNER
 }
 
 function preflightLabRun(runner = labScheduleState.runner) {
@@ -205,34 +169,149 @@ function preflightLabRun(runner = labScheduleState.runner) {
   const cfg = LAB_RUNNERS[selected]
   let status = {}
   try { status = JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8')) } catch {}
+  const claudeModel = selected === 'claude'
+    ? firstRunnableClaudeModel(
+        status.claudeModel,
+        process.env.CLAUDE_MODEL,
+        process.env.DEFAULT_CLAUDE_MODEL,
+        DEFAULT_CLAUDE_MODEL,
+        SAFE_CLAUDE_MODEL
+      )
+    : status.claudeModel
   return preflightRunConfig({
     id: 'core',
     project: status.project || 'pi-pulse',
     runner: selected,
     runScript: cfg.script,
-    repo: '/home/admin/lab',
+    repo: LAB_ROOT,
     runLog: RUN_LOG_PATH,
     statusPath: PROJECT_STATUS_PATH,
     promptDir: status.promptDir,
     runTypes: status.runTypes,
-    claudeModel: status.claudeModel,
+    claudeModel,
+    allowClaudeDefaultModel: selected === 'claude',
   })
 }
 
 function preflightIncubatorRun(slot, runType = null) {
-  const cfg = readStatusAt(slot.statusPath)
-  return preflightRunConfig({
+  const { status: cfg } = repairClaudeRunnerStatusIfNeeded(slot.statusPath)
+  const selected = cfg.runner ?? 'script'
+  const claudeModel = selected === 'claude'
+    ? firstRunnableClaudeModel(
+        cfg.claudeModel,
+        process.env.CLAUDE_MODEL,
+        process.env.DEFAULT_CLAUDE_MODEL,
+        DEFAULT_CLAUDE_MODEL,
+        SAFE_CLAUDE_MODEL
+      )
+    : cfg.claudeModel
+  const preflight = preflightRunConfig({
     id: slot.id,
     project: cfg.project,
-    runner: cfg.runner ?? 'script',
+    runner: selected,
     runScript: cfg.runScript,
+    relayScript: selected === 'claude' ? cfg.claudeRunScript : null,
+    launcher: cfg.launcher ?? null,
     repo: cfg.repo,
     runLog: cfg.runLog,
     statusPath: slot.statusPath,
     promptDir: cfg.promptDir,
     runTypes: cfg.runTypes,
     runType,
-    claudeModel: cfg.claudeModel,
+    claudeModel,
+    allowClaudeDefaultModel: selected === 'claude',
+  })
+  return {
+    ...preflight,
+    statusPath: slot.statusPath,
+    command: incubatorLaunchCommand(cfg, slot.statusPath, runType),
+  }
+}
+
+function nextCoreRunNum() {
+  try { return (JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8')).runCount ?? 0) + 1 } catch { return 1 }
+}
+
+function nextIncubatorRunNum(slot) {
+  try {
+    const status = readStatusAt(slot.statusPath)
+    let latest = Number(status.runCount || 0)
+    if (status.runLog) {
+      try {
+        const runs = parseRunsFromLog(fs.readFileSync(status.runLog, 'utf8'))
+        latest = Math.max(latest, ...runs.map(run => Number(run.num || 0)))
+      } catch {}
+    }
+    return latest + 1
+  } catch { return 1 }
+}
+
+function markIncubatorPreflightAttempt({ statusPath, preflight, num, label }) {
+  if (!statusPath || !num) return
+  try {
+    const status = readStatusAt(statusPath)
+    const today = new Date().toISOString().slice(0, 10)
+    status.runCount = Math.max(Number(status.runCount || 0), Number(num))
+    status.lastRun = today
+    status.lastRunType = 'FAILED'
+    status.lastRunStatus = 'failed'
+    status.lastRunFailure = preflightFailureDetail(preflight) || preflight?.error || 'runner preflight failed'
+    status.lastRunFailureSource = label
+    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
+  } catch {}
+}
+
+function markIncubatorProcessFailure({ statusPath, capturePath, code, signal, num }) {
+  if (!statusPath || !num) return
+  try {
+    const status = readStatusAt(statusPath)
+    const today = new Date().toISOString().slice(0, 10)
+    const reason = signal ? `signal ${signal}` : `exit ${code}`
+    status.runCount = Math.max(Number(status.runCount || 0), Number(num))
+    status.lastRun = today
+    status.lastRunType = 'FAILED'
+    status.lastRunStatus = 'failed'
+    status.lastRunFailure = capturedFailureDetail(capturePath) || `runner process failed with ${reason}`
+    status.lastRunFailureSource = 'process exit'
+    status.lastRunExit = reason
+    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
+  } catch {}
+}
+
+function appendIncubatorPreflightFailure({ slot, runLogPath, preflight, source, label }) {
+  const num = nextIncubatorRunNum(slot)
+  appendFailedPreflightEntry({ runLogPath, preflight, num, source, label })
+  markIncubatorPreflightAttempt({ statusPath: slot.statusPath, preflight, num, label })
+  return num
+}
+
+function appendManualPreflightFailure({ slot = null, runLogPath, preflight, num = null }) {
+  if (slot) {
+    return appendIncubatorPreflightFailure({
+      slot,
+      runLogPath,
+      preflight,
+      source: 'manual-preflight',
+      label: 'manual preflight',
+    })
+  }
+  appendFailedPreflightEntry({
+    runLogPath,
+    preflight,
+    num,
+    source: 'manual-preflight',
+    label: 'manual preflight',
+  })
+  return num
+}
+
+function appendRunnerSwitchPreflightFailure({ slot, runLogPath, preflight }) {
+  return appendIncubatorPreflightFailure({
+    slot,
+    runLogPath,
+    preflight,
+    source: 'runner-switch-preflight',
+    label: 'runner switch preflight',
   })
 }
 
@@ -241,29 +320,6 @@ function preflightIncubatorRun(slot, runType = null) {
 // spawnTrackedRun keeps the child detached but routes its output to a capture
 // file; on non-zero exit it appends a FAILED stdout block — with the actual
 // command error — to the target run log so the parser surfaces it.
-const RUN_CAPTURE_DIR = '/home/admin/lab/projects/.run-capture'
-
-function appendFailedRunEntry({ runLogPath, capturePath, code, signal, num }) {
-  if (!runLogPath || !num) return
-  let detail = ''
-  try {
-    const lines = fs.readFileSync(capturePath, 'utf8').split('\n').map(l => l.trim()).filter(Boolean)
-    detail = lines.slice(-3).join(' · ').slice(0, 280)
-  } catch { /* capture file missing — still record the exit */ }
-  const date = new Date().toISOString().slice(0, 10)
-  const reason = signal ? `signal ${signal}` : `exit ${code}`
-  // The **Run N — FAILED —** line pins the run number for the parser, so the
-  // marker slot number is never shifted by legacyOffset on the host log.
-  const block = [
-    '',
-    `<!-- stdout from run ${num} ${date} server-captured -->`,
-    `[run failed — ${reason}] ${detail || 'no output before exit'}`,
-    `**Run ${num} — FAILED — server capture**`,
-    '',
-  ].join('\n')
-  try { fs.appendFileSync(runLogPath, block) } catch { /* log dir may not exist */ }
-}
-
 function spawnTrackedRun({ script, args = [], cwd, captureName, runLogPath, nextRunNum, onExit }) {
   let stdio = 'ignore'
   const capturePath = join(RUN_CAPTURE_DIR, `${captureName}.log`)
@@ -277,9 +333,12 @@ function spawnTrackedRun({ script, args = [], cwd, captureName, runLogPath, next
   child.unref()
   child.on('exit', (code, signal) => {
     if (code || signal) {
-      appendFailedRunEntry({ runLogPath, capturePath, code, signal, num: nextRunNum?.() ?? 0 })
+      const failedRunNum = nextRunNum?.() ?? 0
+      appendFailedRunEntry({ runLogPath, capturePath, code, signal, num: failedRunNum })
+      onExit?.(code, signal, { capturePath, failedRunNum })
+      return
     }
-    onExit?.(code, signal)
+    onExit?.(code, signal, { capturePath, failedRunNum: null })
   })
   return child
 }
@@ -292,12 +351,10 @@ function startLabRun(runner = labScheduleState.runner) {
   const child = spawnTrackedRun({
     script: cfg.script,
     args: cfg.args,
-    cwd: '/home/admin/lab',
+    cwd: LAB_ROOT,
     captureName: `core-${selected}`,
     runLogPath: RUN_LOG_PATH,
-    nextRunNum: () => {
-      try { return (JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8')).runCount ?? 0) + 1 } catch { return 1 }
-    },
+    nextRunNum: nextCoreRunNum,
   })
   activeRun = { pid: child.pid, startTime: Date.now(), runner: selected }
   return child
@@ -333,14 +390,25 @@ function getMemInfo() {
   try {
     const mem = fs.readFileSync('/proc/meminfo', 'utf8')
     const parse = (key) => {
-      const match = mem.match(new RegExp(`${key}:\\s+(\\d+)`))
+      const match = mem.match(new RegExp(key + ':\\s+(\\d+)'))
       return match ? parseInt(match[1]) * 1024 : 0
     }
     const total = parse('MemTotal')
+    const available = parse('MemAvailable')
+    if (total > 0 && available > 0) {
+      const used = total - available
+      return {
+        total,
+        used,
+        free: available,
+        percent: Math.round((used / total) * 100),
+      }
+    }
     const free = parse('MemFree')
     const buffers = parse('Buffers')
     const cached = parse('Cached')
-    const used = total - free - buffers - cached
+    const reclaimable = parse('SReclaimable')
+    const used = total - free - buffers - cached - reclaimable
     return {
       total,
       used,
@@ -398,19 +466,47 @@ function formatUptime(seconds) {
 }
 
 function getDiskInfo() {
+  const now = Date.now()
+  if (now - diskInfoCache.ts < 30_000) return diskInfoCache.value
+
   try {
-    const out = execSync('df -B1 / 2>/dev/null', { timeout: 3000 }).toString().trim()
+    if (typeof fs.statfsSync === 'function') {
+      const stats = fs.statfsSync('/')
+      const bsize = Number(stats.bsize)
+      const total = Number(stats.blocks) * bsize
+      const free = Number(stats.bfree) * bsize
+      const available = Number(stats.bavail) * bsize
+      const used = Math.max(0, total - free)
+      const percent = used + available > 0 ? Math.round((used / (used + available)) * 100) : 0
+      diskInfoCache = {
+        ts: now,
+        value: {
+          totalGB: (total / 1e9).toFixed(1),
+          usedGB: (used / 1e9).toFixed(1),
+          percent,
+        },
+      }
+      return diskInfoCache.value
+    }
+  } catch { /* fall back to df below */ }
+
+  try {
+    const out = execSync('df -B1 /', { timeout: 3000 }).toString().trim()
     const lines = out.split('\n')
     if (lines.length < 2) return null
     const parts = lines[1].trim().split(/\s+/)
     const total = parseInt(parts[1])
     const used = parseInt(parts[2])
     const pct = parseInt(parts[4])
-    return {
-      totalGB: (total / 1e9).toFixed(1),
-      usedGB: (used / 1e9).toFixed(1),
-      percent: isNaN(pct) ? 0 : pct,
+    diskInfoCache = {
+      ts: now,
+      value: {
+        totalGB: (total / 1e9).toFixed(1),
+        usedGB: (used / 1e9).toFixed(1),
+        percent: isNaN(pct) ? 0 : pct,
+      },
     }
+    return diskInfoCache.value
   } catch {
     return null
   }
@@ -432,24 +528,28 @@ function getNetworkRate() {
       const tx = fields[8]  // transmit bytes
       if (!best || rx > best.rx) best = { iface, rx, tx, ts: Date.now() }
     }
-    if (!best) return { rx: 0, tx: 0, iface: 'unknown' }
+    if (!best) {
+      lastNetRate = { rx: 0, tx: 0, iface: 'unknown' }
+      return lastNetRate
+    }
     if (!prevNetSample || best.iface !== prevNetSample.iface) {
       prevNetSample = best
-      return { rx: 0, tx: 0, iface: best.iface }
+      lastNetRate = { rx: 0, tx: 0, iface: best.iface }
+      return lastNetRate
     }
     const dt = (best.ts - prevNetSample.ts) / 1000
+    if (dt < 1) return { ...lastNetRate, iface: best.iface }
     const rx = dt > 0 ? Math.max(0, Math.round((best.rx - prevNetSample.rx) / dt)) : 0
     const tx = dt > 0 ? Math.max(0, Math.round((best.tx - prevNetSample.tx) / dt)) : 0
     prevNetSample = best
-    return { rx, tx, iface: best.iface }
+    lastNetRate = { rx, tx, iface: best.iface }
+    return lastNetRate
   } catch {
     return { rx: 0, tx: 0, iface: 'unknown' }
   }
 }
 
 // ─── Project status sync ──────────────────────────────────────────────────────
-
-const PROJECT_STATUS_PATH = '/home/admin/lab/projects/pi-pulse/status.json'
 
 function syncProjectStatus() {
   try {
@@ -472,8 +572,8 @@ function syncProjectStatus() {
 
     // Keep project-level seed.md in sync with the daily seed
     try {
-      const seedContent = fs.readFileSync('/home/admin/lab/DAILY_SEED.md', 'utf8')
-      fs.writeFileSync('/home/admin/lab/projects/pi-pulse/seed.md', seedContent)
+      const seedContent = fs.readFileSync(DAILY_SEED_PATH, 'utf8')
+      fs.writeFileSync(CORE_SEED_PATH, seedContent)
     } catch { /* non-fatal */ }
   } catch (err) {
     console.warn('[pi-pulse] status sync error:', err.message)
@@ -534,7 +634,7 @@ try {
 } catch { /* file doesn't exist yet — start fresh */ }
 
 function pushDaySnapshot() {
-  const p = lastStatsPayload || buildStatsPayload()
+  const p = buildStatsPayload()
   dayBuffer.push({ ts: Date.now(), cpu: p.cpu ?? 0, temp: p.temperature ?? null, mem: p.memory?.percent ?? 0, rx: p.net?.rx ?? 0, tx: p.net?.tx ?? 0 })
   if (dayBuffer.length > DAY_BUFFER_MAX) dayBuffer.shift()
   // Persist async — don't block the event loop
@@ -573,7 +673,10 @@ app.get('/api/stats/stream', (req, res) => {
   statsClients.add(res)
   startStatsPush()
   // Push immediately so the client gets data right away
-  try { res.write(`data: ${JSON.stringify(buildStatsPayload())}\n\n`) } catch {}
+  try {
+    lastStatsPayload = buildStatsPayload()
+    res.write(`data: ${JSON.stringify(lastStatsPayload)}\n\n`)
+  } catch {}
   const heartbeat = setInterval(() => {
     try { res.write(':heartbeat\n\n') } catch { clearInterval(heartbeat) }
   }, 25000)
@@ -587,168 +690,10 @@ app.get('/api/stats', (req, res) => {
   res.json(buildStatsPayload())
 })
 
-function summarizeRun(run) {
-  return run['Failure'] || run['Error'] || run['Goal'] || run['Done'] ||
-    run['What I investigated'] || run['Investigated'] || run['What I built'] ||
-    run['What I changed'] || run['What changed'] || run['What improved'] || run['What I found'] ||
-    run['Finding'] || run['Key finding'] || run['Suggested next move'] || ''
-}
-
-function publicRun(run) {
-  const { _order, _source, _attemptKey, ...rest } = run
-  return rest
-}
-
-function runSignature(run) {
-  return [
-    run._source ?? 'run',
-    run._order ?? 0,
-    run.num ?? '',
-    run.date ?? '',
-    run.type ?? '',
-    summarizeRun(run),
-  ].join('|')
-}
-
-function meaningfulStdoutLines(body) {
-  return body.split('\n').map(l => l.trim()).filter(Boolean)
-}
-
-function stdoutFailureDetail(lines) {
-  return lines
-    .filter(l =>
-      !l.startsWith('**Run') &&
-      !l.startsWith('---') &&
-      !l.startsWith('```')
-    )
-    .slice(-8)
-    .join('\n')
-    .slice(0, 1200)
-}
-
-function parseStdoutRunBlocks(content, runs, { legacyOffset = false } = {}) {
-  const stdoutRe = /^\s*<!--\s*stdout from (codex\s+)?run (\d+)\s+(\d{4}-\d{2}-\d{2})[^>]*-->([\s\S]*?)(?=^\s*<!--\s*stdout from (?:codex\s+)?run \d|^\s*## Run \d|$(?![\s\S]))/gm
-  let m
-  while ((m = stdoutRe.exec(content)) !== null) {
-    const [, codexMarker, slotStr, date, body] = m
-    const lines = meaningfulStdoutLines(body)
-    const failureLine = lines[0]?.startsWith('[run failed') ? lines[0] : null
-    const failed = Boolean(failureLine)
-    const boldRun = body.match(/\*\*Run (\d+)\s*(?:[—-]\s*([\w ]+?)\s*[—-]|\s*[—-]\s*done)/)
-    const num = boldRun ? parseInt(boldRun[1]) : parseInt(slotStr) + (!codexMarker && legacyOffset ? 1 : 0)
-    if (!num) continue
-
-    const rawType = boldRun?.[2]?.trim().toUpperCase() || ''
-    const type = failed ? 'FAILED' : ['MUTATE','RESEARCH','CREATE','RUN'].find(t => rawType.includes(t)) || rawType || 'RUN'
-    const detailLine = lines.find(l =>
-      !l.startsWith('[run failed') &&
-      !l.startsWith('**Run') &&
-      !l.startsWith('---') &&
-      !l.startsWith('```')
-    )
-    const detail = failed ? stdoutFailureDetail(lines) : ''
-    const summary = failed
-      ? [failureLine, detailLine].filter(Boolean).join(' ')
-      : detailLine || ''
-
-    const formal = runs.find(r => r.num === num && r._source === 'formal')
-    if (formal && !failed) continue
-
-    const run = {
-      num,
-      date,
-      type,
-      ...(failed ? { Failure: summary || detail || 'stdout run failed with no captured output', detail } : {}),
-      'What I changed': summary || 'stdout captured with no summary',
-      _order: m.index,
-      _source: 'stdout',
-    }
-    run.signature = runSignature(run)
-    runs.push(run)
-  }
-}
-
-function parseFormalRunBlocks(content) {
-  const runs = []
-  const formalContent = content.replace(
-    /^\s*<!--\s*stdout from [^>]*-->[\s\S]*?(?=^\s*<!--\s*stdout from |^\s*## Run \d|$(?![\s\S]))/gm,
-    block => block.replace(/[^\n]/g, ' ')
-  )
-  const sections = formalContent.split(/(?=^## Run \d)/m).filter(s => s.trimStart().startsWith('## Run'))
-  let searchFrom = 0
-  for (const block of sections) {
-    const order = formalContent.indexOf(block, searchFrom)
-    if (order >= 0) searchFrom = order + block.length
-    const lines = block.split('\n')
-    const header = lines[0].replace('## Run ', '').trim()
-    const parts = header.split(/\s+[—-]\s+/).map(s => s.trim())
-    const [num, date, type] = parts
-    const fields = {}
-    for (const line of lines.slice(1)) {
-      if (line.startsWith('<!--')) break
-      const m = line.match(/^\*\*(.+?):\*\*\s*(.+)/)
-      if (m) fields[m[1]] = m[2]
-    }
-    const n = parseInt(num) || 0
-    if (n) {
-      const run = { num: n, date, type, ...fields, _order: order >= 0 ? order : runs.length, _source: 'formal' }
-      run.signature = runSignature(run)
-      runs.push(run)
-    }
-  }
-  return runs
-}
-
-function annotateRunAttempts(runs) {
-  const totals = new Map()
-  for (const run of runs) {
-    const key = `${run.num ?? ''}|${run.date ?? ''}`
-    totals.set(key, (totals.get(key) ?? 0) + 1)
-  }
-
-  const seen = new Map()
-  return runs.map(run => {
-    const key = `${run.num ?? ''}|${run.date ?? ''}`
-    const attemptTotal = totals.get(key) ?? 1
-    if (attemptTotal <= 1) return run
-
-    const attempt = (seen.get(key) ?? 0) + 1
-    seen.set(key, attempt)
-    run._attemptKey = key
-    run.attempt = attempt
-    run.attemptTotal = attemptTotal
-    run.signature = `${run.signature}|attempt:${attempt}/${attemptTotal}`
-    return run
-  })
-}
-
-function dedupeCopiedRuns(runs) {
-  const seen = new Set()
-  return runs.filter(run => {
-    const key = [
-      run._source ?? '',
-      run.num ?? '',
-      run.date ?? '',
-      run.type ?? '',
-      summarizeRun(run),
-    ].join('|')
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-}
-
-function parseRunsFromLog(content, options = {}) {
-  const runs = parseFormalRunBlocks(content)
-  parseStdoutRunBlocks(content, runs, options)
-  const sortedRuns = runs.sort((a, b) => (a._order ?? 0) - (b._order ?? 0))
-  return annotateRunAttempts(dedupeCopiedRuns(sortedRuns)).map(publicRun)
-}
-
 app.get('/api/runs', (req, res) => {
   try {
-    const content = fs.readFileSync('/home/admin/lab/RUN_LOG.md', 'utf8')
-    res.json(parseRunsFromLog(content).slice(-10))
+    const content = fs.readFileSync(RUN_LOG_PATH, 'utf8')
+    res.json(runsWithPinnedLatestFailure(parseRunsFromLog(content), 10))
   } catch {
     res.json([])
   }
@@ -760,20 +705,25 @@ app.get('/api/run/preflight', (req, res) => {
 
 app.get('/api/logs', (req, res) => {
   try {
-    const content = fs.readFileSync('/home/admin/lab/RUN_LOG.md', 'utf8')
+    const content = fs.readFileSync(RUN_LOG_PATH, 'utf8')
     res.json({ content })
   } catch {
     res.json({ content: '*(no log file found)*' })
   }
 })
 
-app.post('/api/run', (req, res) => {
+app.post('/api/run', requireFreshSource, (req, res) => {
   if (activeRunAlive()) {
     return res.status(409).json({ ok: false, error: 'lab run already active', pid: activeRun.pid, runner: activeRun.runner })
   }
   const runner = normalizeLabRunner(req.body?.runner || labScheduleState.runner)
   const preflight = preflightLabRun(runner)
   if (!preflight.ok) {
+    appendManualPreflightFailure({
+      runLogPath: RUN_LOG_PATH,
+      preflight,
+      num: nextCoreRunNum(),
+    })
     return res.status(422).json({ ok: false, error: 'runner preflight failed', preflight })
   }
   const child = startLabRun(runner)
@@ -807,30 +757,52 @@ app.get('/api/run/status', (req, res) => {
 })
 
 // Check every 60s - fire the host Pi Pulse lab loop if its schedule is due.
-setInterval(() => {
-  if (!labScheduleState.enabled || !labScheduleState.nextRunAt) return
-  if (Date.now() < labScheduleState.nextRunAt) return
-  if (activeRunAlive()) return
-  const runner = normalizeLabRunner(labScheduleState.runner)
-  const child = startLabRun(runner)
-  if (!child) return
-  console.log(`[pi-pulse] schedule: firing host lab run via ${runner}`)
-  labScheduleState.runner = runner
-  labScheduleState.lastScheduledRun = new Date().toISOString()
-  labScheduleState.nextRunAt = Date.now() + labScheduleState.intervalHours * 60 * 60 * 1000
-  labScheduleState.autoRunsSinceHuman = (labScheduleState.autoRunsSinceHuman || 0) + 1
-  saveLabSchedule()
-}, 60 * 1000)
+if (SCHEDULES_ENABLED) {
+  setInterval(() => {
+    if (!labScheduleState.enabled || !labScheduleState.nextRunAt) return
+    if (Date.now() < labScheduleState.nextRunAt) return
+    if (activeRunAlive()) return
+    const runner = normalizeLabRunner(labScheduleState.runner)
+    const child = startLabRun(runner)
+    if (!child) {
+      const preflight = preflightLabRun(runner)
+      appendFailedPreflightEntry({
+        runLogPath: RUN_LOG_PATH,
+        preflight,
+        num: nextCoreRunNum(),
+      })
+      console.warn(`[pi-pulse] schedule: host preflight blocked run: ${preflight.error || 'runner preflight failed'}`)
+      labScheduleState.runner = runner
+      labScheduleState.lastScheduleBlockedAt = new Date().toISOString()
+      labScheduleState.nextRunAt = Date.now() + labScheduleState.intervalHours * 60 * 60 * 1000
+      saveLabSchedule()
+      return
+    }
+    console.log(`[pi-pulse] schedule: firing host lab run via ${runner}`)
+    labScheduleState.runner = runner
+    labScheduleState.lastScheduledRun = new Date().toISOString()
+    labScheduleState.nextRunAt = Date.now() + labScheduleState.intervalHours * 60 * 60 * 1000
+    labScheduleState.autoRunsSinceHuman = (labScheduleState.autoRunsSinceHuman || 0) + 1
+    saveLabSchedule()
+  }, 60 * 1000)
+}
 
 app.get('/api/lab/schedule', (req, res) => {
   res.json({ ok: true, availableRunners: Object.keys(LAB_RUNNERS), ...labScheduleState })
 })
 
-app.post('/api/lab/schedule', (req, res) => {
+app.post('/api/lab/schedule', requireFreshSource, (req, res) => {
   const { enabled, intervalHours, runner } = req.body ?? {}
+  if (typeof runner === 'string') {
+    const requestedRunner = normalizeLabRunner(runner)
+    if (requestedRunner === 'claude') {
+      const preflight = preflightLabRun(requestedRunner)
+      if (!preflight.ok) return res.status(422).json({ ok: false, error: 'runner preflight failed', preflight })
+    }
+    labScheduleState.runner = requestedRunner
+  }
   if (typeof enabled === 'boolean') labScheduleState.enabled = enabled
   if (typeof intervalHours === 'number' && intervalHours > 0) labScheduleState.intervalHours = intervalHours
-  if (typeof runner === 'string') labScheduleState.runner = normalizeLabRunner(runner)
   if (labScheduleState.enabled) {
     if (!labScheduleState.nextRunAt || labScheduleState.nextRunAt < Date.now()) {
       labScheduleState.nextRunAt = Date.now() + labScheduleState.intervalHours * 60 * 60 * 1000
@@ -844,16 +816,16 @@ app.post('/api/lab/schedule', (req, res) => {
 })
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, ts: Date.now() })
+  res.json(serviceHealth())
 })
 
-app.post('/api/lab/feedback', (req, res) => {
+app.post('/api/lab/feedback', requireFreshSource, (req, res) => {
   const feedback = String(req.body?.feedback || '').trim()
   if (feedback.length < 3) return res.status(400).json({ ok: false, error: 'feedback is too short' })
   try {
     let status = {}
     try { status = JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8')) } catch {}
-    const filePath = status.feedbackPath || '/home/admin/lab/USER_FEEDBACK.md'
+    const filePath = status.feedbackPath || USER_FEEDBACK_PATH
     const stamp = new Date().toISOString()
     fs.mkdirSync(dirname(filePath), { recursive: true })
     if (!fs.existsSync(filePath)) {
@@ -885,7 +857,7 @@ app.get('/api/project/status', (req, res) => {
 
 // ─── Mounted project (config-driven) ──────────────────────────────────────────
 
-const MOUNTED_CONFIG_PATH = '/home/admin/lab/projects/mounted.json'
+const MOUNTED_CONFIG_PATH = process.env.PI_PULSE_MOUNTED_CONFIG_PATH || join(PROJECTS_DIR, 'mounted.json')
 
 function loadMountedProject() {
   try {
@@ -946,7 +918,7 @@ function startChildRun() {
 
 // ─── Multi incubator slots ────────────────────────────────────────────────────
 
-const INCUBATORS_PATH = '/home/admin/lab/projects/incubators.json'
+const INCUBATORS_PATH = process.env.PI_PULSE_INCUBATORS_PATH || join(PROJECTS_DIR, 'incubators.json')
 const activeIncubatorRuns = new Map()
 
 function defaultIncubators() {
@@ -985,12 +957,61 @@ function readStatusAt(statusPath) {
   return JSON.parse(fs.readFileSync(statusPath, 'utf8'))
 }
 
+function expectedClaudeRunScriptForProject(project, cfg = {}) {
+  if (cfg.claudeRunScript === GENERIC_CLAUDE_INCUBATOR_SCRIPT && fs.existsSync(cfg.claudeRunScript)) return cfg.claudeRunScript
+  return GENERIC_CLAUDE_INCUBATOR_SCRIPT
+}
+
+function claudeRunScriptForProject(project, cfg = {}) {
+  const candidate = expectedClaudeRunScriptForProject(project, cfg)
+  return fs.existsSync(candidate) ? candidate : null
+}
+
+function runnableLauncherForStatus(cfg = {}) {
+  if (!cfg.launcher) return null
+  try {
+    fs.accessSync(cfg.launcher, fs.constants.X_OK)
+    return cfg.launcher
+  } catch {
+    return null
+  }
+}
+
+function claudeRunnerSetupForStatus(cfg) {
+  const expectedScript = expectedClaudeRunScriptForProject(cfg.project, cfg)
+  const model = firstRunnableClaudeModel(
+    cfg.claudeModel,
+    process.env.CLAUDE_MODEL,
+    process.env.DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CLAUDE_MODEL,
+    SAFE_CLAUDE_MODEL
+  )
+  const checks = [
+    checkPath('script', 'Claude runner script', expectedScript),
+    checkClaudeCommand(),
+    checkClaudeModel(model, true),
+  ]
+  const ok = checks.every(check => check.ok)
+  return {
+    runner: 'claude',
+    ok,
+    script: claudeRunScriptForProject(cfg.project, cfg),
+    expectedScript,
+    repairedScript: cfg.claudeRunScript && cfg.claudeRunScript !== expectedScript ? cfg.claudeRunScript : null,
+    model,
+    checks,
+    error: ok ? null : checks.find(check => !check.ok)?.detail || 'Claude runner setup failed',
+  }
+}
+
 function hydrateIncubator(slot) {
-  const cfg = readStatusAt(slot.statusPath)
+  const { status: cfg, repaired } = repairClaudeRunnerStatusIfNeeded(slot.statusPath)
   const repoStatusPath = join(cfg.repo, 'status.json')
   let repoStatus = {}
   try { repoStatus = JSON.parse(fs.readFileSync(repoStatusPath, 'utf8')) } catch {}
   const running = getIncubatorRun(slot.id)
+  const claudeSetup = claudeRunnerSetupForStatus(cfg)
+  const claudeRelayScript = claudeSetup.script || claudeSetup.expectedScript || cfg.claudeRunScript || null
   return {
     ...slot,
     project: cfg.project,
@@ -998,17 +1019,24 @@ function hydrateIncubator(slot) {
     runner: cfg.runner ?? 'script',
     repo: cfg.repo,
     runLog: cfg.runLog,
+    launchScript: cfg.runScript ?? null,
+    launcher: cfg.launcher ?? null,
+    claudeRelayScript,
+    relayScript: cfg.runner === 'claude' ? claudeRelayScript : null,
     playUrl: fs.existsSync(join(cfg.repo, 'index.html'))
       ? `/${cfg.project.replace(/[^a-z0-9_-]/gi, '-').toLowerCase()}/`
       : null,
     runCount: cfg.runCount ?? repoStatus.runCount ?? 0,
     lastRun: cfg.lastRun ?? repoStatus.lastRun ?? null,
     lastRunType: cfg.lastRunType ?? repoStatus.lastRunType ?? null,
-    availableRunners: [
-      'codex',
-      ...(claudeRunScriptForProject(cfg.project) ? ['claude'] : []),
-    ],
-    claudeModel: cfg.claudeModel ?? null,
+    lastRunStatus: cfg.lastRunStatus ?? repoStatus.lastRunStatus ?? null,
+    lastRunFailure: cfg.lastRunFailure ?? repoStatus.lastRunFailure ?? null,
+    lastRunFailureSource: cfg.lastRunFailureSource ?? repoStatus.lastRunFailureSource ?? null,
+    lastRunExit: cfg.lastRunExit ?? repoStatus.lastRunExit ?? null,
+    availableRunners: ['codex', 'claude'],
+    runnerSetups: { claude: claudeSetup },
+    repairedRunnerConfig: repaired ? 'claude' : null,
+    claudeModel: firstRunnableClaudeModel(cfg.claudeModel) ?? null,
     codexModel: cfg.codexModel ?? null,
     current_focus: cfg.current_focus ?? repoStatus.current_focus ?? null,
     next_run_goal: cfg.next_run_goal ?? repoStatus.next_run_goal ?? null,
@@ -1038,28 +1066,59 @@ function getIncubatorRun(id) {
   }
 }
 
+function shellQuote(value) {
+  const raw = String(value ?? '')
+  if (!raw) return "''"
+  return /^[A-Za-z0-9_./:=+-]+$/.test(raw) ? raw : `'${raw.replace(/'/g, `'\\''`)}'`
+}
+
+function incubatorRunArgs(cfg, statusPath, runType = null) {
+  const args = []
+  if (
+    cfg.runScript === cfg.launcher ||
+    cfg.runner === 'codex' ||
+    cfg.runScript?.includes('run-codex-incubator.sh')
+  ) {
+    args.push(statusPath)
+    if (runType) args.push(runType)
+  } else if (cfg.runner === 'claude' && cfg.runScript?.includes('run-claude-incubator.sh')) {
+    args.push(statusPath)
+    if (runType) args.push(runType)
+  }
+  return args
+}
+
+function incubatorLaunchCommand(cfg, statusPath, runType = null) {
+  return ['bash', cfg.runScript, ...incubatorRunArgs(cfg, statusPath, runType)]
+    .filter(Boolean)
+    .map(shellQuote)
+    .join(' ')
+}
+
 function startIncubatorRun(slot, runType = null) {
   const alive = getIncubatorRun(slot.id)
   if (alive.running) return { alreadyRunning: true, ...alive }
-  const cfg = readStatusAt(slot.statusPath)
+  const { status: cfg } = repairClaudeRunnerStatusIfNeeded(slot.statusPath)
   const preflight = preflightIncubatorRun(slot, runType)
   if (!preflight.ok) return { ok: false, error: 'runner preflight failed', preflight }
-  const args = []
-  if (cfg.runner === 'codex' || cfg.runScript.includes('run-codex-incubator.sh')) {
-    args.push(slot.statusPath)
-    if (runType) args.push(runType)
-  }
+  const args = incubatorRunArgs(cfg, slot.statusPath, runType)
   const child = spawnTrackedRun({
     script: cfg.runScript,
     args,
     cwd: cfg.repo || '/home/admin/lab',
     captureName: `incubator-${slot.id}`,
     runLogPath: cfg.runLog,
-    nextRunNum: () => {
-      try { return (readStatusAt(slot.statusPath).runCount ?? 0) + 1 } catch { return 1 }
-    },
-    onExit: (code, signal) => {
-      if (!code && !signal) return
+    nextRunNum: () => nextIncubatorRunNum(slot),
+    onExit: (code, signal, exitMeta = {}) => {
+      if (code || signal) {
+        markIncubatorProcessFailure({
+          statusPath: slot.statusPath,
+          capturePath: exitMeta.capturePath,
+          code,
+          signal,
+          num: exitMeta.failedRunNum,
+        })
+      }
       activeIncubatorRuns.delete(slot.id)
       notifyIncubatorClients()
     },
@@ -1069,37 +1128,83 @@ function startIncubatorRun(slot, runType = null) {
   return { ok: true, pid: child.pid, runner: run.runner, startTime: run.startTime }
 }
 
-function claudeRunScriptForProject(project) {
-  const known = {
-    'race-whisperer-predict': '/home/admin/run-race-whisperer.sh',
-    'pi-pulse': '/home/admin/run-lab.sh',
-  }
-  if (known[project]) return known[project]
-  const candidate = `/home/admin/run-${project}.sh`
-  return fs.existsSync(candidate) ? candidate : null
-}
-
 function updateProjectRunner(statusPath, runner) {
-  const status = readStatusAt(statusPath)
+  const normalized = normalizeIncubatorStatus(statusPath)
+  const status = normalized.status
   if (runner === 'codex') {
     status.runner = 'codex'
-    status.runScript = '/home/admin/lab/scripts/run-codex-incubator.sh'
+    status.runScript = runnableLauncherForStatus(status) || '/home/admin/lab/scripts/run-codex-incubator.sh'
     status.promptDir = status.promptDir || join(status.repo, 'prompts')
     status.runTypes = status.runTypes || ['mutate', 'research', 'mutate']
     status.codexBypass = status.codexBypass ?? true
   } else if (runner === 'claude') {
-    const script = claudeRunScriptForProject(status.project)
-    if (!script) {
-      return { ok: false, error: `no Claude runner script found for ${status.project}` }
-    }
+    const setup = claudeRunnerSetupForStatus(status)
+    const relayScript = setup.script || setup.expectedScript || GENERIC_CLAUDE_INCUBATOR_SCRIPT
     status.runner = 'claude'
-    status.runScript = script
-    status.claudeModel = status.claudeModel || 'fable'
+    status.runScript = runnableLauncherForStatus(status) || relayScript
+    if (setup.model) status.claudeModel = setup.model
+    else delete status.claudeModel
+    status.claudeRunScript = relayScript
+    status.claudeBypass = status.claudeBypass ?? true
+    status.promptDir = status.promptDir || join(status.repo, 'prompts')
+    status.runTypes = status.runTypes || ['mutate', 'research', 'mutate']
+    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
+    const selectedDetail = `${setup.model || 'Claude CLI default'} via ${status.runScript}${status.runScript === relayScript ? '' : ` -> ${relayScript}`}`
+    return {
+      ok: true,
+      status,
+      setup,
+      repaired: normalized.repaired,
+      warning: setup.ok ? `Claude relay selected: ${selectedDetail}` : `Claude relay selected but blocked: ${setup.error || 'runner preflight failed'} (${selectedDetail})`,
+    }
   } else {
     return { ok: false, error: 'unsupported runner' }
   }
   fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
-  return { ok: true, status }
+  return { ok: true, status, repaired: normalized.repaired }
+}
+
+function repairClaudeRunnerStatusIfNeeded(statusPath) {
+  const normalized = normalizeIncubatorStatus(statusPath)
+  const status = normalized.status
+  if (status.runner !== 'claude') return normalized
+
+  const setup = claudeRunnerSetupForStatus(status)
+  const next = { ...status }
+  let repaired = normalized.repaired
+  const safeRelayScript = setup.script || setup.expectedScript || GENERIC_CLAUDE_INCUBATOR_SCRIPT
+  const safeRunScript = runnableLauncherForStatus(next) || safeRelayScript
+
+  if (next.runScript !== safeRunScript) {
+    next.runScript = safeRunScript
+    repaired = true
+  }
+  if (next.claudeRunScript !== safeRelayScript) {
+    next.claudeRunScript = safeRelayScript
+    repaired = true
+  }
+  if (next.claudeModel !== setup.model) {
+    if (setup.model) next.claudeModel = setup.model
+    else delete next.claudeModel
+    repaired = true
+  }
+  if (!next.promptDir && next.repo) {
+    next.promptDir = join(next.repo, 'prompts')
+    repaired = true
+  }
+  if (!next.runTypes) {
+    next.runTypes = ['mutate', 'research', 'mutate']
+    repaired = true
+  }
+  if (next.claudeBypass == null) {
+    next.claudeBypass = true
+    repaired = true
+  }
+
+  if (repaired) {
+    fs.writeFileSync(statusPath, JSON.stringify(next, null, 2) + '\n')
+  }
+  return { status: next, repaired }
 }
 
 function slugifyProjectName(text) {
@@ -1119,7 +1224,7 @@ function uniqueIncubatorSlug(seed) {
     const slug = i === 0 ? base : `${base}-${i + 1}`
     if (used.has(slug)) continue
     if (fs.existsSync(join('/home/admin', slug))) continue
-    if (fs.existsSync(join('/home/admin/lab/projects', slug))) continue
+    if (fs.existsSync(join(PROJECTS_DIR, slug))) continue
     return slug
   }
   return `${base}-${Date.now().toString(36)}`
@@ -1145,6 +1250,171 @@ function writeFileIfMissing(filePath, content) {
   fs.writeFileSync(filePath, content)
 }
 
+function ensureDirectory(filePath) {
+  try {
+    fs.mkdirSync(filePath, { recursive: true })
+    return fs.statSync(filePath).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function promptForIncubatorRunType(project, runType) {
+  const normalized = String(runType || 'mutate').toLowerCase()
+  if (normalized === 'create') {
+    return `Create the first tiny local prototype for ${project}.
+
+Rules:
+- Build the smallest usable version first.
+- Keep it local and simple.
+- Append a concise summary to reports/RUN_LOG.md.
+`
+  }
+  if (normalized === 'research') {
+    return `Research the next best move for ${project}.
+
+Use the repo, reports/RUN_LOG.md, reports/RECENT_RUNS.md, and reports/USER_FEEDBACK.md if present. Identify what is unclear, what should be tested next, and what would make the project more useful. Append a concise summary to reports/RUN_LOG.md.
+`
+  }
+  return `Improve ${project} by one focused step.
+
+Before changing anything, read reports/USER_FEEDBACK.md if it exists and treat the latest notes as steering input.
+
+Choose one useful mutation that makes the project more real, testable, or personally aligned. Append a concise summary to reports/RUN_LOG.md.
+`
+}
+
+function safeRunTypeName(runType) {
+  return String(runType || 'mutate').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'mutate'
+}
+
+function ensureIncubatorProjectScaffold(status) {
+  const project = status.project || 'incubator'
+  if (status.repo) ensureDirectory(join(status.repo, 'reports'))
+  if (status.runLog) writeFileIfMissing(status.runLog, '# Run Log\n\n')
+  if (status.recentRuns) writeFileIfMissing(status.recentRuns, '# Recent Runs\n\n*(no runs yet)*\n')
+  if (status.feedbackPath) {
+    writeFileIfMissing(status.feedbackPath, `# User Feedback / Steering Notes
+
+These notes are written from the Pi Pulse UI and injected into future incubator runs.
+`)
+  }
+  if (status.promptDir && ensureDirectory(status.promptDir)) {
+    const runTypes = Array.isArray(status.runTypes) && status.runTypes.length ? status.runTypes : ['mutate']
+    for (const runType of new Set(runTypes.map(safeRunTypeName))) {
+      writeFileIfMissing(join(status.promptDir, `${runType}.md`), promptForIncubatorRunType(project, runType))
+    }
+  }
+}
+
+function writeIncubatorLauncher({ slug, statusPath }) {
+  const launcherPath = join(PROJECTS_DIR, slug, `run-${slug}.sh`)
+  const content = `#!/usr/bin/env bash
+set -euo pipefail
+
+STATUS_PATH="\${1:-${statusPath}}"
+RUN_TYPE="\${2:-}"
+RUNNER=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.runner || 'codex')" "$STATUS_PATH")
+
+if [ "$RUNNER" = "claude" ]; then
+  exec ${GENERIC_CLAUDE_INCUBATOR_SCRIPT} "$STATUS_PATH" "$RUN_TYPE"
+fi
+
+exec /home/admin/lab/scripts/run-codex-incubator.sh "$STATUS_PATH" "$RUN_TYPE"
+`
+  let repaired = false
+  try {
+    const current = fs.existsSync(launcherPath) ? fs.readFileSync(launcherPath, 'utf8') : ''
+    if (current !== content) {
+      fs.mkdirSync(dirname(launcherPath), { recursive: true })
+      fs.writeFileSync(launcherPath, content)
+      repaired = true
+    }
+  } catch {
+    try {
+      fs.mkdirSync(dirname(launcherPath), { recursive: true })
+      fs.writeFileSync(launcherPath, content)
+      repaired = true
+    } catch {}
+  }
+  try { fs.chmodSync(launcherPath, 0o755) } catch {}
+  return { path: launcherPath, repaired }
+}
+
+function normalizeIncubatorStatus(statusPath) {
+  const status = readStatusAt(statusPath)
+  const next = { ...status }
+  let changed = false
+  const project = next.project || basename(dirname(statusPath))
+
+  if (!next.project) {
+    next.project = project
+    changed = true
+  }
+  if (!next.repo) {
+    next.repo = join('/home/admin', project)
+    changed = true
+  }
+  if (!next.runLog && next.repo) {
+    next.runLog = join(next.repo, 'reports', 'RUN_LOG.md')
+    changed = true
+  }
+  if (!next.recentRuns && next.runLog) {
+    next.recentRuns = join(dirname(next.runLog), 'RECENT_RUNS.md')
+    changed = true
+  }
+  if (!next.promptDir && next.repo) {
+    next.promptDir = join(next.repo, 'prompts')
+    changed = true
+  }
+  if (!next.runTypes) {
+    next.runTypes = ['mutate', 'research', 'mutate']
+    changed = true
+  }
+  if (next.codexBypass == null) {
+    next.codexBypass = true
+    changed = true
+  }
+  if (next.claudeBypass == null) {
+    next.claudeBypass = true
+    changed = true
+  }
+  if (!next.feedbackPath && next.repo) {
+    next.feedbackPath = join(next.repo, 'reports', 'USER_FEEDBACK.md')
+    changed = true
+  }
+
+  const launcherInfo = writeIncubatorLauncher({ slug: project, statusPath })
+  const launcher = launcherInfo.path
+  if (launcherInfo.repaired) changed = true
+  if (next.launcher !== launcher) {
+    next.launcher = launcher
+    changed = true
+  }
+  if (next.claudeRunScript !== GENERIC_CLAUDE_INCUBATOR_SCRIPT) {
+    next.claudeRunScript = GENERIC_CLAUDE_INCUBATOR_SCRIPT
+    changed = true
+  }
+  if (next.claudeModel && !firstRunnableClaudeModel(next.claudeModel)) {
+    delete next.claudeModel
+    changed = true
+  }
+
+  const genericEntrypoints = new Set([
+    '/home/admin/lab/scripts/run-codex-incubator.sh',
+    GENERIC_CLAUDE_INCUBATOR_SCRIPT,
+  ])
+  if (!next.runScript || genericEntrypoints.has(next.runScript)) {
+    next.runScript = next.launcher
+    changed = true
+  }
+
+  ensureIncubatorProjectScaffold(next)
+
+  if (changed) fs.writeFileSync(statusPath, JSON.stringify(next, null, 2) + '\n')
+  return { status: next, repaired: changed }
+}
+
 function createIncubatorProjectFromIdea(idea) {
   const cleanIdea = String(idea || '').trim()
   if (cleanIdea.length < 8) {
@@ -1152,7 +1422,7 @@ function createIncubatorProjectFromIdea(idea) {
   }
   const slug = uniqueIncubatorSlug(cleanIdea)
   const repo = join('/home/admin', slug)
-  const labProjectDir = join('/home/admin/lab/projects', slug)
+  const labProjectDir = join(PROJECTS_DIR, slug)
   const promptDir = join(repo, 'prompts')
   const reportsDir = join(repo, 'reports')
   const feedbackPath = join(reportsDir, 'USER_FEEDBACK.md')
@@ -1220,6 +1490,7 @@ ${cleanIdea}
     runLog,
     recentRuns,
     runScript: '/home/admin/lab/scripts/run-codex-incubator.sh',
+    claudeRunScript: GENERIC_CLAUDE_INCUBATOR_SCRIPT,
     promptDir,
     feedbackPath,
     runTypes: ['create', 'mutate', 'research', 'mutate'],
@@ -1230,8 +1501,12 @@ ${cleanIdea}
     next_run_goal: 'Run CREATE to turn this idea into the first usable local prototype.',
     notes: 'Created from Pi Pulse Add Incubator idea box.',
     codexBypass: true,
+    claudeBypass: true,
+    claudeModel: null,
   }
   const statusPath = join(labProjectDir, 'status.json')
+  status.launcher = writeIncubatorLauncher({ slug, statusPath }).path
+  status.runScript = status.launcher
   fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
   return { ok: true, slug, statusPath, status }
 }
@@ -1260,7 +1535,7 @@ for (const slot of readIncubators().slots) {
 
 // ─── Incubator auto-schedule ───────────────────────────────────────────────────
 
-const SCHEDULE_PATH = '/home/admin/lab/projects/schedule.json'
+const SCHEDULE_PATH = process.env.PI_PULSE_CHILD_SCHEDULE_PATH || join(PROJECTS_DIR, 'schedule.json')
 let scheduleState = { enabled: false, intervalHours: 2, nextRunAt: null, lastScheduledRun: null, autoRunsSinceHuman: 0 }
 
 try {
@@ -1278,19 +1553,21 @@ function saveSchedule() {
 }
 
 // Check every 60s — fire the mounted project's run script if the schedule is due
-setInterval(() => {
-  if (!scheduleState.enabled || !scheduleState.nextRunAt) return
-  if (Date.now() < scheduleState.nextRunAt) return
-  if (activeChildRun) {
-    try { process.kill(activeChildRun.pid, 0); return } catch { activeChildRun = null }
-  }
-  if (!startChildRun()) return
-  console.log('[pi-pulse] schedule: firing child run')
-  scheduleState.lastScheduledRun = new Date().toISOString()
-  scheduleState.nextRunAt = Date.now() + scheduleState.intervalHours * 60 * 60 * 1000
-  scheduleState.autoRunsSinceHuman = (scheduleState.autoRunsSinceHuman || 0) + 1
-  saveSchedule()
-}, 60 * 1000)
+if (SCHEDULES_ENABLED) {
+  setInterval(() => {
+    if (!scheduleState.enabled || !scheduleState.nextRunAt) return
+    if (Date.now() < scheduleState.nextRunAt) return
+    if (activeChildRun) {
+      try { process.kill(activeChildRun.pid, 0); return } catch { activeChildRun = null }
+    }
+    if (!startChildRun()) return
+    console.log('[pi-pulse] schedule: firing child run')
+    scheduleState.lastScheduledRun = new Date().toISOString()
+    scheduleState.nextRunAt = Date.now() + scheduleState.intervalHours * 60 * 60 * 1000
+    scheduleState.autoRunsSinceHuman = (scheduleState.autoRunsSinceHuman || 0) + 1
+    saveSchedule()
+  }, 60 * 1000)
+}
 
 app.get('/api/child/config', (req, res) => {
   res.json({
@@ -1330,11 +1607,16 @@ app.get('/api/incubators/:id/runs', (req, res) => {
   const slot = readIncubators().slots.find(s => s.id === req.params.id)
   if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
   try {
-    const cfg = readStatusAt(slot.statusPath)
+    const { status: cfg } = normalizeIncubatorStatus(slot.statusPath)
     const content = fs.readFileSync(cfg.runLog, 'utf8')
-    res.json({ ok: true, runs: parseChildRuns(content).slice(-10) })
+    res.json({ ok: true, runs: runsWithPinnedLatestFailure(parseChildRuns(content), 10) })
   } catch (err) {
-    res.json({ ok: true, runs: [], error: err.message })
+    res.status(500).json({
+      ok: false,
+      runs: [],
+      error: err.message,
+      statusPath: slot.statusPath,
+    })
   }
 })
 
@@ -1352,20 +1634,30 @@ app.get('/api/incubators/:id/preflight', (req, res) => {
   }
 })
 
-app.post('/api/incubators/:id/run', (req, res) => {
+app.post('/api/incubators/:id/run', requireFreshSource, (req, res) => {
   const data = readIncubators()
   const slot = data.slots.find(s => s.id === req.params.id)
   if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
   const result = startIncubatorRun(slot, req.body?.runType ?? null)
   if (!result) return res.status(404).json({ ok: false, error: 'run script not found' })
-  if (result.ok === false) return res.status(422).json(result)
+  if (result.ok === false) {
+    let runLogPath = null
+    try { runLogPath = readStatusAt(slot.statusPath).runLog } catch {}
+    appendManualPreflightFailure({
+      slot,
+      runLogPath,
+      preflight: result.preflight,
+    })
+    notifyIncubatorClients()
+    return res.status(422).json(result)
+  }
   slot.autoRunsSinceHuman = 0
   writeIncubators(data)
   notifyIncubatorClients()
   res.json({ ok: true, ...result })
 })
 
-app.post('/api/incubators/:id/schedule', (req, res) => {
+app.post('/api/incubators/:id/schedule', requireFreshSource, (req, res) => {
   const data = readIncubators()
   const slot = data.slots.find(s => s.id === req.params.id)
   if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
@@ -1386,7 +1678,7 @@ app.post('/api/incubators/:id/schedule', (req, res) => {
   res.json({ ok: true, slot: hydrateIncubator(slot) })
 })
 
-app.post('/api/incubators/:id/runner', (req, res) => {
+app.post('/api/incubators/:id/runner', requireFreshSource, (req, res) => {
   const data = readIncubators()
   const slot = data.slots.find(s => s.id === req.params.id)
   if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
@@ -1395,10 +1687,34 @@ app.post('/api/incubators/:id/runner', (req, res) => {
   if (!result.ok) return res.status(400).json(result)
   writeIncubators(data)
   notifyIncubatorClients()
-  res.json({ ok: true, slot: hydrateIncubator(slot) })
+  const preflight = preflightIncubatorRun(slot)
+  const launchBlocked = runner === 'claude' && preflight && !preflight.ok
+  let historyRecorded = false
+  if (launchBlocked) {
+    appendRunnerSwitchPreflightFailure({
+      slot,
+      runLogPath: result.status?.runLog,
+      preflight,
+    })
+    historyRecorded = true
+    notifyIncubatorClients()
+  }
+  const hydratedSlot = hydrateIncubator(slot)
+  const warning = launchBlocked
+    ? `Claude relay selected but launch preflight blocked: ${preflightFailureDetail(preflight) || preflight.error || 'runner preflight failed'}`
+    : result.warning ?? null
+  res.json({
+    ok: true,
+    slot: hydratedSlot,
+    warning,
+    repaired: result.repaired ?? false,
+    setup: result.setup ?? hydratedSlot.runnerSetups?.[runner] ?? null,
+    preflight,
+    historyRecorded,
+  })
 })
 
-app.post('/api/incubators/create', (req, res) => {
+app.post('/api/incubators/create', requireFreshSource, (req, res) => {
   const result = createIncubatorProjectFromIdea(req.body?.idea)
   if (!result.ok) return res.status(result.status || 400).json(result)
   const data = readIncubators()
@@ -1420,7 +1736,7 @@ app.post('/api/incubators/create', (req, res) => {
   res.json({ ok: true, slot: hydrateIncubator(slot) })
 })
 
-app.post('/api/incubators/:id/feedback', (req, res) => {
+app.post('/api/incubators/:id/feedback', requireFreshSource, (req, res) => {
   const data = readIncubators()
   const slot = data.slots.find(s => s.id === req.params.id)
   if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
@@ -1451,12 +1767,12 @@ app.post('/api/incubators/:id/feedback', (req, res) => {
     res.status(500).json({ ok: false, error: err.message })
   }
 })
-app.post('/api/incubators', (req, res) => {
+app.post('/api/incubators', requireFreshSource, (req, res) => {
   const { project, intervalHours = 0.5, enabled = false } = req.body ?? {}
   if (!project || typeof project !== 'string' || project.includes('..') || project === 'pi-pulse') {
     return res.status(400).json({ ok: false, error: 'invalid project' })
   }
-  const statusPath = join('/home/admin/lab/projects', project, 'status.json')
+  const statusPath = join(PROJECTS_DIR, project, 'status.json')
   if (!fs.existsSync(statusPath)) return res.status(404).json({ ok: false, error: 'project status not found' })
   const data = readIncubators()
   if (data.slots.some(s => s.id === project)) return res.status(409).json({ ok: false, error: 'incubator already exists' })
@@ -1480,7 +1796,7 @@ app.post('/api/incubators', (req, res) => {
   res.json({ ok: true, slot: hydrateIncubator(slot) })
 })
 
-app.delete('/api/incubators/:id', (req, res) => {
+app.delete('/api/incubators/:id', requireFreshSource, (req, res) => {
   const data = readIncubators()
   const next = data.slots.filter(s => s.id !== req.params.id)
   if (next.length === data.slots.length) return res.status(404).json({ ok: false, error: 'incubator not found' })
@@ -1491,33 +1807,47 @@ app.delete('/api/incubators/:id', (req, res) => {
   res.json({ ok: true })
 })
 
-setInterval(() => {
-  const data = readIncubators()
-  let changed = false
-  for (const slot of data.slots) {
-    if (!slot.enabled || !slot.nextRunAt || Date.now() < slot.nextRunAt) continue
-    if (getIncubatorRun(slot.id).running) continue
-    const result = startIncubatorRun(slot)
-    if (!result) continue
-    if (result.ok === false) {
-      console.warn(`[pi-pulse] incubator: ${slot.id} preflight blocked run: ${result.preflight?.error || result.error}`)
-      continue
+if (SCHEDULES_ENABLED) {
+  setInterval(() => {
+    const data = readIncubators()
+    let changed = false
+    for (const slot of data.slots) {
+      if (!slot.enabled || !slot.nextRunAt || Date.now() < slot.nextRunAt) continue
+      if (getIncubatorRun(slot.id).running) continue
+      const result = startIncubatorRun(slot)
+      if (!result) continue
+      if (result.ok === false) {
+        let runLogPath = null
+        try { runLogPath = readStatusAt(slot.statusPath).runLog } catch {}
+        appendIncubatorPreflightFailure({
+          slot,
+          runLogPath,
+          preflight: result.preflight,
+          source: 'scheduled-preflight',
+          label: 'scheduled preflight',
+        })
+        console.warn(`[pi-pulse] incubator: ${slot.id} preflight blocked run: ${result.preflight?.error || result.error}`)
+        slot.lastScheduleBlockedAt = new Date().toISOString()
+        slot.nextRunAt = Date.now() + (slot.intervalHours || 0.5) * 60 * 60 * 1000
+        changed = true
+        continue
+      }
+      console.log(`[pi-pulse] incubator: firing ${slot.id}`)
+      slot.lastScheduledRun = new Date().toISOString()
+      slot.nextRunAt = Date.now() + (slot.intervalHours || 0.5) * 60 * 60 * 1000
+      slot.autoRunsSinceHuman = (slot.autoRunsSinceHuman || 0) + 1
+      if (typeof slot.charges === 'number') {
+        slot.charges = Math.max(0, slot.charges - 1)
+        if (slot.charges === 0) slot.enabled = false
+      }
+      changed = true
     }
-    console.log(`[pi-pulse] incubator: firing ${slot.id}`)
-    slot.lastScheduledRun = new Date().toISOString()
-    slot.nextRunAt = Date.now() + (slot.intervalHours || 0.5) * 60 * 60 * 1000
-    slot.autoRunsSinceHuman = (slot.autoRunsSinceHuman || 0) + 1
-    if (typeof slot.charges === 'number') {
-      slot.charges = Math.max(0, slot.charges - 1)
-      if (slot.charges === 0) slot.enabled = false
+    if (changed) {
+      writeIncubators(data)
+      notifyIncubatorClients()
     }
-    changed = true
-  }
-  if (changed) {
-    writeIncubators(data)
-    notifyIncubatorClients()
-  }
-}, 60 * 1000)
+  }, 60 * 1000)
+}
 
 app.get('/api/child/status', (req, res) => {
   let projectStatus = {}
@@ -1532,13 +1862,13 @@ app.get('/api/child/status', (req, res) => {
 app.get('/api/child/runs', (req, res) => {
   try {
     const content = fs.readFileSync(CHILD_LOG_PATH, 'utf8')
-    res.json(parseChildRuns(content).slice(-10))
+    res.json(runsWithPinnedLatestFailure(parseChildRuns(content), 10))
   } catch {
     res.json([])
   }
 })
 
-app.post('/api/child/run', (req, res) => {
+app.post('/api/child/run', requireFreshSource, (req, res) => {
   const child = startChildRun()
   if (!child) {
     return res.status(404).json({ ok: false, error: 'run script not found' })
@@ -1562,7 +1892,7 @@ app.get('/api/child/schedule', (req, res) => {
   res.json({ ok: true, ...scheduleState })
 })
 
-app.post('/api/child/schedule', (req, res) => {
+app.post('/api/child/schedule', requireFreshSource, (req, res) => {
   const { enabled, intervalHours } = req.body ?? {}
   if (typeof enabled === 'boolean') scheduleState.enabled = enabled
   if (typeof intervalHours === 'number' && intervalHours > 0) scheduleState.intervalHours = intervalHours
@@ -1607,7 +1937,7 @@ try {
 const CHILD_FEEDBACK_JSON = join(CHILD_DIR, 'memory', 'DRIFT_FEEDBACK.json')
 const CHILD_FEEDBACK_MD   = join(CHILD_DIR, 'memory', 'DRIFT_FEEDBACK.md')
 
-app.post('/api/child/ai/analyze', async (req, res) => {
+app.post('/api/child/ai/analyze', requireFreshSource, async (req, res) => {
   try {
     // Use MemPalace semantic search for compact context
     const palaceCtx = queryMemPalace(`${mountedProject.name} seed direction active threads`, { wing: 'lab', results: 3, maxChars: 600 })
@@ -1638,13 +1968,20 @@ NEXT: <the single most useful next action>`
     if (!r.ok) return res.status(502).json({ ok: false, error: await r.text() })
 
     const data = await r.json()
+    const payload = aiFeedbackPayload({
+      response: data.response,
+      model: AI_MODEL,
+      incubatorId: mountedProject.name,
+      project: mountedProject.name,
+    })
     try {
       const ts = new Date().toISOString().slice(0, 16).replace('T', ' ')
-      fs.writeFileSync(CHILD_FEEDBACK_MD, `# Drift Feedback — ${ts}\n\n${data.response.trim()}\n`)
-      fs.writeFileSync(CHILD_FEEDBACK_JSON, JSON.stringify({ ok: true, response: data.response, model: AI_MODEL, ts: Date.now() }))
+      fs.mkdirSync(dirname(CHILD_FEEDBACK_JSON), { recursive: true })
+      fs.writeFileSync(CHILD_FEEDBACK_MD, `# Local Ollama/Qwen Feedback - ${ts}\n\n${data.response.trim()}\n`)
+      fs.writeFileSync(CHILD_FEEDBACK_JSON, JSON.stringify(payload, null, 2) + '\n')
     } catch { /* non-fatal */ }
 
-    res.json({ ok: true, response: data.response, model: AI_MODEL })
+    res.json(payload)
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message })
   }
@@ -1652,7 +1989,11 @@ NEXT: <the single most useful next action>`
 
 app.get('/api/child/ai/latest', (req, res) => {
   try {
-    res.json(JSON.parse(fs.readFileSync(CHILD_FEEDBACK_JSON, 'utf8')))
+    res.json(readCachedAiFeedback({
+      id: mountedProject.name,
+      project: mountedProject.name,
+      paths: { json: CHILD_FEEDBACK_JSON, md: CHILD_FEEDBACK_MD },
+    }))
   } catch {
     res.json({ ok: false })
   }
@@ -1673,8 +2014,8 @@ app.get('/api/child/ai/status', async (req, res) => {
 function feedbackPathsForIncubator(cfg) {
   if (cfg.project === 'pi-pulse') {
     return {
-      json: '/home/admin/lab/DRIFT_FEEDBACK.json',
-      md: '/home/admin/lab/DRIFT_FEEDBACK.md',
+      json: CORE_FEEDBACK_JSON,
+      md: CORE_FEEDBACK_MD,
     }
   }
   const memoryDir = join(cfg.repo, 'memory')
@@ -1714,18 +2055,22 @@ function aiTargetForIncubator(id) {
   }
 }
 
+function readCachedAiFeedback(target) {
+  const data = JSON.parse(fs.readFileSync(target.paths.json, 'utf8'))
+  return hydrateAiFeedback(data, target)
+}
+
 app.get('/api/incubators/:id/ai/latest', (req, res) => {
   const target = aiTargetForIncubator(req.params.id)
   if (!target) return res.status(404).json({ ok: false, error: 'incubator not found' })
   try {
-    const data = JSON.parse(fs.readFileSync(target.paths.json, 'utf8'))
-    res.json(hydrateAiFeedback(data, target))
+    res.json(readCachedAiFeedback(target))
   } catch {
     res.json({ ok: false })
   }
 })
 
-app.post('/api/incubators/:id/ai/analyze', async (req, res) => {
+app.post('/api/incubators/:id/ai/analyze', requireFreshSource, async (req, res) => {
   const target = aiTargetForIncubator(req.params.id)
   if (!target) return res.status(404).json({ ok: false, error: 'incubator not found' })
   try {
@@ -1818,12 +2163,12 @@ app.get('/api/ai/status', async (req, res) => {
   }
 })
 
-app.post('/api/ai/analyze', async (req, res) => {
+app.post('/api/ai/analyze', requireFreshSource, async (req, res) => {
   try {
     // Use MemPalace semantic search for compact context instead of raw file dumps
     const palaceCtx = queryMemPalace('pi-pulse seed direction current state active threads', { wing: 'lab', results: 3, maxChars: 600 })
     let recentLog = ''
-    try { recentLog = fs.readFileSync('/home/admin/lab/RUN_LOG.md', 'utf8').slice(-400) } catch {}
+    try { recentLog = fs.readFileSync(RUN_LOG_PATH, 'utf8').slice(-400) } catch {}
 
     const prompt = `You are an AI critic analyzing an evolving creative/design project.
 
@@ -1861,9 +2206,9 @@ NEXT: <the single most useful next mutation>`
     // Write parsed feedback to DRIFT_FEEDBACK.md so the lab agent reads it next run
     try {
       const ts = new Date(payload.ts).toISOString().slice(0, 16).replace('T', ' ')
-      fs.writeFileSync('/home/admin/lab/DRIFT_FEEDBACK.md',
+      fs.writeFileSync(CORE_FEEDBACK_MD,
         `# Drift Feedback — ${ts}\n\n${data.response.trim()}\n`)
-      fs.writeFileSync('/home/admin/lab/DRIFT_FEEDBACK.json',
+      fs.writeFileSync(CORE_FEEDBACK_JSON,
         JSON.stringify(payload, null, 2) + '\n')
     } catch { /* non-fatal */ }
 
@@ -1875,8 +2220,11 @@ NEXT: <the single most useful next mutation>`
 
 app.get('/api/ai/latest', (req, res) => {
   try {
-    const data = JSON.parse(fs.readFileSync('/home/admin/lab/DRIFT_FEEDBACK.json', 'utf8'))
-    res.json(hydrateAiFeedback(data, { id: 'core', project: 'pi-pulse' }))
+    res.json(readCachedAiFeedback({
+      id: 'core',
+      project: 'pi-pulse',
+      paths: { json: CORE_FEEDBACK_JSON, md: CORE_FEEDBACK_MD },
+    }))
   } catch {
     res.json({ ok: false })
   }
@@ -1941,8 +2289,6 @@ app.get('/api/ghost/diary', (req, res) => {
 
 // ─── Incubator project management ─────────────────────────────────────────────
 
-const PROJECTS_DIR = '/home/admin/lab/projects'
-
 // List all available projects (any subdirectory with a status.json)
 // pi-pulse is the host/incubator — excluded from its own switcher
 app.get('/api/projects/list', (req, res) => {
@@ -1974,7 +2320,7 @@ app.get('/api/projects/list', (req, res) => {
 
 // Switch mounted project — writes mounted.json then restarts via process.exit(0)
 // Systemd Restart=on-failure / Restart=always picks it back up in ~1s
-app.post('/api/projects/mount', express.json(), (req, res) => {
+app.post('/api/projects/mount', express.json(), requireFreshSource, (req, res) => {
   const { dir } = req.body ?? {}
   if (!dir || typeof dir !== 'string' || dir.includes('..')) {
     return res.status(400).json({ ok: false, error: 'invalid dir' })
@@ -2005,6 +2351,12 @@ app.post('/api/reboot', (req, res) => {
   setTimeout(() => {
     spawn('sudo', ['reboot'], { detached: true, stdio: 'ignore' }).unref()
   }, 1500)
+})
+
+// Restart only Pi Pulse so stale-source write gates can be cleared without a full host reboot.
+app.post('/api/restart', (req, res) => {
+  res.json({ ok: true, restarting: true })
+  setTimeout(() => process.exit(0), 500)
 })
 
 // SSE — push 'update' to all connected clients whenever RUN_LOG.md changes
@@ -2038,6 +2390,17 @@ app.get('/api/runs/stream', (req, res) => {
 })
 
 
+app.use('/api', (err, req, res, next) => {
+  console.error('[pi-pulse] api error:', err?.stack || err?.message || err)
+  if (res.headersSent) return next(err)
+  const status = Number.isInteger(err?.status) ? err.status : 500
+  res.status(status).json({
+    ok: false,
+    error: err?.message || 'api route failed',
+    path: req.originalUrl,
+  })
+})
+
 app.use('/api', (req, res) => {
   res.status(404).json({ ok: false, error: 'api route not found', path: req.originalUrl })
 })
@@ -2052,28 +2415,18 @@ app.get('*', (req, res) => {
   }
 })
 
-function startServer(retries = 10) {
-  const server = app.listen(PORT, () => {
-    console.log(`Pi Pulse API → http://localhost:${PORT}/api/stats`)
+function startServer(port = PORT) {
+  const server = app.listen(port, () => {
+    const address = server.address()
+    const actualPort = typeof address === 'object' && address ? address.port : port
+    console.log('Pi Pulse API -> http://localhost:' + actualPort + '/api/stats')
   })
   server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE' && retries > 0) {
-      console.log(`[pi-pulse] port ${PORT} busy, retrying in 1s... (${retries} left)`)
-      setTimeout(() => startServer(retries - 1), 1000)
-    } else {
-      console.error('[pi-pulse] fatal listen error:', err.message)
-      process.exit(1)
-    }
+    console.error('[pi-pulse] fatal listen error:', err.message)
+    process.exit(1)
   })
+  return server
 }
-startServer()
+if (process.env.PI_PULSE_NO_LISTEN !== '1') startServer()
 
-// Watch dist/ for new builds and exit cleanly so the wrapper restarts us
-let reloadDebounce = null
-fs.watch(join(__dirname, 'dist'), () => {
-  clearTimeout(reloadDebounce)
-  reloadDebounce = setTimeout(() => {
-    console.log('[pi-pulse] dist changed — reloading')
-    process.exit(0)
-  }, 800)
-})
+export { app, startServer }

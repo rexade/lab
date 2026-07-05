@@ -1,0 +1,31 @@
+{
+  "project": "kan-du-be-den-skapa-en-unik-dikt-be-den-at",
+  "status": "seeded",
+  "phase": "idea-seed",
+  "runner": "codex",
+  "repo": "/home/admin/kan-du-be-den-skapa-en-unik-dikt-be-den-at",
+  "runLog": "/home/admin/kan-du-be-den-skapa-en-unik-dikt-be-den-at/reports/RUN_LOG.md",
+  "recentRuns": "/home/admin/kan-du-be-den-skapa-en-unik-dikt-be-den-at/reports/RECENT_RUNS.md",
+  "runScript": "/home/admin/lab/projects/kan-du-be-den-skapa-en-unik-dikt-be-den-at/run-kan-du-be-den-skapa-en-unik-dikt-be-den-at.sh",
+  "claudeRunScript": "/home/admin/lab/src/pi-pulse/scripts/run-claude-incubator.sh",
+  "promptDir": "/home/admin/kan-du-be-den-skapa-en-unik-dikt-be-den-at/prompts",
+  "feedbackPath": "/home/admin/kan-du-be-den-skapa-en-unik-dikt-be-den-at/reports/USER_FEEDBACK.md",
+  "runTypes": [
+    "create",
+    "mutate",
+    "research",
+    "mutate"
+  ],
+  "runCount": 30,
+  "lastRun": "2026-07-05",
+  "lastRunType": "MUTATE",
+  "current_focus": "Kan du be den skapa en unik dikt. Be den att skapa dikten så att den förmedlar känslan av ren och vacker natur. Insikt av människans förmåga att förnimma dofter från ungdomen. Be den att åstadkomma en lyckorus för läsaren av dikten.",
+  "next_run_goal": "Use latest user feedback: RESEARCH\n#7 2026-07-04\nCodex completed but did not append a run summary.\nMUTATE\n#6 2026-07-04\nCodex completed but did not append a run summary.\nCREATE\n#5 2026-07-04\nCodex completed",
+  "notes": "Created from Pi Pulse Add Incubator idea box.",
+  "codexBypass": true,
+  "claudeBypass": true,
+  "lastRunStatus": "ok",
+  "latestUserFeedback": "RESEARCH\n#7 2026-07-04\nCodex completed but did not append a run summary.\nMUTATE\n#6 2026-07-04\nCodex completed but did not append a run summary.\nCREATE\n#5 2026-07-04\nCodex completed but did not append a run summary.\nMUTATE\n#4 2026-07-04\nCodex completed but did not append a run summary.\nRESEARCH\n#3 2026-07-04\nCodex completed but did not append a run summary.",
+  "feedbackUpdatedAt": "2026-07-04T21:05:07.995Z",
+  "launcher": "/home/admin/lab/projects/kan-du-be-den-skapa-en-unik-dikt-be-den-at/run-kan-du-be-den-skapa-en-unik-dikt-be-den-at.sh"
+}

@@ -157,6 +157,7 @@ function CollapsiblePulse({ stats, history, tempHistory, netRxHistory, netTxHist
 export default function App() {
   const { stats, history, tempHistory, netRxHistory, netTxHistory, connected } = useSystemStats()
   const [runCount, setRunCount] = useState(null)
+  const [serviceHealth, setServiceHealth] = useState(null)
   const [activeTab, setActiveTab] = useState('pulse')
   const circadian = useCircadian()
 
@@ -171,6 +172,18 @@ export default function App() {
     const es = new EventSource('/api/runs/stream')
     es.onmessage = fetchCount
     return () => es.close()
+  }, [])
+
+  useEffect(() => {
+    const fetchHealth = () =>
+      fetch('/api/health')
+        .then(r => r.json())
+        .then(d => setServiceHealth(d))
+        .catch(() => setServiceHealth(null))
+
+    fetchHealth()
+    const id = setInterval(fetchHealth, 30_000)
+    return () => clearInterval(id)
   }, [])
 
   // Ambient color mode — whole UI heats up with CPU/temp
@@ -217,6 +230,7 @@ export default function App() {
           connected={connected}
           uptime={stats?.uptimeFormatted}
           runCount={runCount}
+          serviceHealth={serviceHealth}
           activeTab={activeTab}
           onTabChange={setActiveTab}
         />

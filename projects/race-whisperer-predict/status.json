@@ -7,7 +7,7 @@
   "runLog": "/home/admin/race-whisperer-predict/reports/RUN_LOG.md",
   "activeThreads": "/home/admin/race-whisperer-predict/memory/ACTIVE_THREADS.md",
   "feedback": "/home/admin/race-whisperer-predict/memory/FEEDBACK.md",
-  "runScript": "/home/admin/run-race-whisperer.sh",
+  "runScript": "/home/admin/lab/projects/race-whisperer-predict/run-race-whisperer-predict.sh",
   "runCount": 70,
   "lastRun": "2026-05-07",
   "lastRunType": "INTEGRATE",
@@ -64,5 +64,18 @@
       "savedReport": "/home/admin/race-whisperer-predict/reports/model-evaluation-latest.json"
     },
     "note": "Historical V3 status was deprecated. Pi Pulse now points at the cleaned race-whisperer-predict repo and its controlled experimental-model workflow."
-  }
+  },
+  "runner": "codex",
+  "promptDir": "/home/admin/race-whisperer-predict/prompts",
+  "runTypes": [
+    "mutate",
+    "research",
+    "mutate"
+  ],
+  "codexBypass": true,
+  "recentRuns": "/home/admin/race-whisperer-predict/reports/RECENT_RUNS.md",
+  "claudeBypass": true,
+  "feedbackPath": "/home/admin/race-whisperer-predict/reports/USER_FEEDBACK.md",
+  "launcher": "/home/admin/lab/projects/race-whisperer-predict/run-race-whisperer-predict.sh",
+  "claudeRunScript": "/home/admin/lab/src/pi-pulse/scripts/run-claude-incubator.sh"
 }

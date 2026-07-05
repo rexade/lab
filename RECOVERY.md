@@ -43,7 +43,7 @@ ln -s /home/admin/lab/run-lab.sh /home/admin/run-lab.sh
 # 3. Install pi-pulse dependencies + build the frontend
 cd /home/admin/lab/src/pi-pulse
 npm install
-npm run build   # emits dist/; start.sh watches this and reloads
+npm run build   # emits dist/; server serves the new build on next request
 
 # 4. Install Claude Code CLI (used by run-lab.sh)
 #    See https://docs.claude.com/en/docs/claude-code — auth via OAuth
@@ -77,7 +77,7 @@ After=network.target
 Type=simple
 User=admin
 WorkingDirectory=/home/admin/lab/src/pi-pulse
-ExecStart=/bin/bash /home/admin/lab/src/pi-pulse/start.sh
+ExecStart=/usr/bin/env node /home/admin/lab/src/pi-pulse/server.js
 Restart=always
 RestartSec=3
 StandardOutput=journal
