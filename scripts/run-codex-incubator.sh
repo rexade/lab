@@ -36,6 +36,89 @@ FEEDBACK_FILE=$(node -e "const fs=require('fs'); const path=require('path'); con
 CODEX_MODEL=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.codexModel || process.env.CODEX_MODEL || '')" "$STATUS_PATH")
 CODEX_BYPASS=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.codexBypass || process.env.CODEX_BYPASS === '1' ? '1' : '')" "$STATUS_PATH")
 
+GODOT_AI_ENABLED=$(node -e "const fs=require(\"fs\"); const o=JSON.parse(fs.readFileSync(process.argv[1], \"utf8\")); console.log(o.godotAi?.enabled ? \"1\" : \"\")" "$STATUS_PATH")
+GODOT_AI_MCP_URL=$(node -e "const fs=require(\"fs\"); const o=JSON.parse(fs.readFileSync(process.argv[1], \"utf8\")); console.log(o.godotAi?.mcpUrl || \"\")" "$STATUS_PATH")
+GODOT_AI_STATUS_URL=$(node -e "const fs=require(\"fs\"); const o=JSON.parse(fs.readFileSync(process.argv[1], \"utf8\")); console.log(o.godotAi?.statusUrl || \"http://127.0.0.1:8020/godot-ai/status\")" "$STATUS_PATH")
+GODOT_AI_VERSION=$(node -e "const fs=require(\"fs\"); const o=JSON.parse(fs.readFileSync(process.argv[1], \"utf8\")); console.log(o.godotAi?.serverVersion || \"\")" "$STATUS_PATH")
+GODOT_AI_LOG=$(node -e "const fs=require(\"fs\"); const o=JSON.parse(fs.readFileSync(process.argv[1], \"utf8\")); console.log(o.godotAi?.log || ((o.repo || \"/home/admin/lab\") + \"/reports/godot-ai/editor.log\"))" "$STATUS_PATH")
+
+godot_ai_mcp_ready() {
+  local status
+  status=$(curl -s "$GODOT_AI_STATUS_URL" || true)
+  if [ -n "$GODOT_AI_VERSION" ] && ! printf '%s' "$status" | grep -q "\"server_version\":\"$GODOT_AI_VERSION\""; then
+    return 1
+  fi
+  if [ -z "$GODOT_AI_VERSION" ] && ! printf '%s' "$status" | grep -q "server_version"; then
+    return 1
+  fi
+
+  curl -s -X POST "$GODOT_AI_MCP_URL" \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex-incubator-smoke","version":"0"}}}' \
+    | grep -q '"result"'
+}
+
+start_godot_ai_editor() {
+  local godot_bin="/home/admin/godot/Godot_v4.6.1-stable_linux.arm64"
+  local log_dir
+  log_dir=$(dirname "$GODOT_AI_LOG")
+  mkdir -p "$log_dir"
+  setsid env \
+    GODOT_AI_ALLOW_HEADLESS=1 \
+    GODOT_AI_DISABLE_TELEMETRY=true \
+    DISABLE_TELEMETRY=true \
+    PATH="/home/admin/.local/bin:$PATH" \
+    "$godot_bin" --headless --editor --path "$PROJECT_DIR" \
+    > "$GODOT_AI_LOG" 2>&1 < /dev/null &
+}
+
+ensure_godot_ai_bridge() {
+  if [ -z "$GODOT_AI_ENABLED" ]; then
+    return 0
+  fi
+
+  local godot_bin="/home/admin/godot/Godot_v4.6.1-stable_linux.arm64"
+  local uvx_bin="/home/admin/.local/bin/uvx"
+  local editor_pattern="$godot_bin --headless --editor --path $PROJECT_DIR"
+
+  if [ ! -x "$godot_bin" ] || [ ! -x "$uvx_bin" ]; then
+    echo "[codex-incubator] godot-ai bridge skipped: missing godot or uvx" >&2
+    return 0
+  fi
+
+  if ! pgrep -f "$editor_pattern" >/dev/null 2>/dev/null; then
+    start_godot_ai_editor
+  fi
+
+  for _ in $(seq 1 15); do
+    if godot_ai_mcp_ready; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "[codex-incubator] godot-ai bridge stale; restarting editor/server" >&2
+  pkill -TERM -f "$editor_pattern" >/dev/null 2>/dev/null || true
+  if [ -f "/home/admin/.local/share/godot/app_userdata/Tidebound Harbor Godot/godot_ai_server.pid" ]; then
+    kill -TERM "$(cat "/home/admin/.local/share/godot/app_userdata/Tidebound Harbor Godot/godot_ai_server.pid")" >/dev/null 2>/dev/null || true
+  fi
+  sleep 2
+  start_godot_ai_editor
+
+  for _ in $(seq 1 30); do
+    if godot_ai_mcp_ready; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "[codex-incubator] godot-ai bridge did not become MCP-ready at $GODOT_AI_MCP_URL" >&2
+}
+
+
+ensure_godot_ai_bridge
+
 RUN_TYPES_RAW=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log((o.runTypes || ['mutate','research','mutate']).join(' '))" "$STATUS_PATH")
 read -r -a RUN_TYPES <<< "$RUN_TYPES_RAW"
 
@@ -133,6 +216,25 @@ elif ! grep -qE "^## Run $RUN_NUMBER[[:space:]]+[—-]" "$LOG_FILE"; then
     echo "**Next move:** Ask the next run to append a concise summary to reports/RUN_LOG.md."
   } >> "$LOG_FILE"
 fi
+
+python3 - "$LOG_FILE" "$RECENT_FILE" << 'PYEOF'
+import sys, re
+
+log_path, recent_path = sys.argv[1], sys.argv[2]
+try:
+    text = open(log_path).read()
+except FileNotFoundError:
+    text = ""
+
+sections = re.split(r"(?=^## Run \d)", text, flags=re.MULTILINE)
+runs = [s.strip() for s in sections if s.strip().startswith("## Run")]
+recent = runs[-4:] if len(runs) >= 4 else runs
+
+with open(recent_path, "w") as f:
+    f.write("# Recent Runs\n\n")
+    f.write("*Auto-generated. Last 4 runs. Full history in RUN_LOG.md.*\n\n---\n\n")
+    f.write("\n\n---\n\n".join(recent) if recent else "*(no runs yet)*\n")
+PYEOF
 
 node - "$STATUS_PATH" "$RUN_TYPE" "$TODAY" "$CODEX_EXIT" "$RUN_NUMBER" << 'NODEEOF'
 const fs = require('fs')

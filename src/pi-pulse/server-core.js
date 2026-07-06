@@ -168,7 +168,7 @@ export function preflightRunConfig({ id, project, runner, runScript, relayScript
   }
 }
 
-const FAILURE_SIGNAL_RE = /api error|command not found|not found|enoent|permission denied|exit status|exit \d+|exited \d+|error|failed/i
+const FAILURE_SIGNAL_RE = /api error|command not found|not found|enoent|permission denied|exit status|exit \d+|exited \d+|(?:^|[\s:[({-])(?:error|failed|failure)(?:$|[\s:\])},.!-])/i
 
 function firstFailureSignalLine(lines) {
   return lines.find(line => FAILURE_SIGNAL_RE.test(line)) || ''
@@ -261,8 +261,15 @@ function runSignature(run) {
   ].join('|')
 }
 
+function isStdoutInventoryLine(line) {
+  return /^\.?\/?node_modules\/\S+$/.test(line)
+}
+
 function meaningfulStdoutLines(body) {
-  return body.split('\n').map(l => l.trim()).filter(Boolean)
+  return body.split('\n')
+    .map(l => l.trim())
+    .filter(Boolean)
+    .filter(l => !isStdoutInventoryLine(l))
 }
 
 function stdoutFailureDetail(lines) {

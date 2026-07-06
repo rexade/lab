@@ -1154,6 +1154,34 @@ function testStaleSourceMutationsAreWriteGated() {
   assertIncludes(server, 'process.exit(0)', 'service restart should exit the Pi Pulse process for supervisor restart')
 }
 
+function testDependencyErrorPackageNamesDoNotCreateFailedRows() {
+  const dir = tempDir('dependency-error-names')
+  const stdoutPath = join(dir, 'codex-run-15.log')
+  fs.writeFileSync(stdoutPath, [
+    'node_modules/express/index.js',
+    'node_modules/es-errors/type.d.ts',
+    'node_modules/http-errors/index.js',
+    '',
+    'Implemented Run 15 mutation: generation now fails closed before publishing weak artifacts.',
+    'Verification passed:',
+    'npm test',
+  ].join('\n'))
+
+  const log = [
+    '## Run 15 - 2026-07-05 - MUTATE',
+    '',
+    '**Done:** Codex completed but did not append a run summary.',
+    '**Output:** Full stdout saved to ' + stdoutPath,
+    '**Next move:** Ask the next run to append a concise summary to reports/RUN_LOG.md.',
+  ].join('\n')
+
+  const runs = parseRunsFromLog(log)
+  assert.equal(runs.length, 1)
+  assert.equal(runs[0].type, 'MUTATE')
+  assert.ok(!runs[0].Failure, 'dependency package names must not become failure summaries')
+  assertIncludes(runs[0]['Output excerpt'], 'Implemented Run 15 mutation', 'stdout excerpt should prefer useful transcript lines over dependency inventory')
+}
+
 const tests = [
   testStdoutFailedRunsShowCommandError,
   testCapturedFailureDetailIsReusableForStatusReceipts,
@@ -1188,6 +1216,7 @@ const tests = [
   testFormalRowsHydrateSavedStdoutFile,
   testFormalRowsHydrateStdoutPathFromExcerpt,
   testFormalRowsFailFromSavedStdoutFile,
+  testDependencyErrorPackageNamesDoNotCreateFailedRows,
   testProjectSummaryBeatsSyntheticNoSummaryDuplicate,
   testFormalFailedRowsExposeAllDiagnostics,
   testClaudeRunnerSwitchWarnsFromLaunchPreflight,

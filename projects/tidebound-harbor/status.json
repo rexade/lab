@@ -1,7 +1,7 @@
 {
   "project": "tidebound-harbor",
   "status": "active",
-  "phase": "m0-feel-spike",
+  "phase": "m1b-combat-kit",
   "runner": "codex",
   "repo": "/home/admin/tidebound-harbor",
   "runLog": "/home/admin/tidebound-harbor/reports/RUN_LOG.md",
@@ -16,15 +16,27 @@
     "research",
     "mutate"
   ],
-  "runCount": 4,
-  "lastRun": "2026-07-05",
+  "runCount": 40,
+  "lastRun": "2026-07-06",
   "lastRunType": "MUTATE",
   "lastRunStatus": "ok",
-  "current_focus": "M0 feel spike is code complete and verified: Deckcurse's Sinking Deck combat (player + Cutlass slash/hitstop + one Bilge Rat) rendered through Tidebound's 2.5D iso projection, all 14 headless contract checks green, four acceptance shots captured. GO/NO-GO feel verdict pending Henrik's browser playtest at pirates.rexthedog.space.",
-  "next_run_goal": "If the M0 verdict is recorded in reports/M0_DOD.md: on GO write the M1 ability-kit plan (docs/plans/) and execute its first task; on NO-GO tune move_speed/heading lerp per the verdict notes and re-export the web build. While the verdict is pending, do only the safe TODO.md items that do not change feel constants.",
+  "current_focus": "M1b combat kit is active after M2a acceptance. Completed through Run 40: Black Mark hook swap, Powder Keg, Ghost Cannon, Pistol Corsair, Anchor Guard, Black Tide raid pressure, and Treasure + Escape Rope Polish are implemented with green spike checks and refreshed Web exports.",
+  "next_run_goal": "Run an M1b acceptance pass and handoff before starting M2b. Verify ./scripts/spike_check.sh, review current screenshots/run reports, decide whether M1b is GO, update the M1b DoD/reporting, and account for any dirty working-tree state before completion.",
   "notes": "Successor to then-make-it-pirates-but-do-not-make-it-a- (Deckcurse), which is retired. Plan-driven milestones with headless contract tests; see CLAUDE.md in the repo.",
   "codexBypass": true,
   "claudeBypass": true,
   "claudeModel": "sonnet",
-  "launcher": "/home/admin/lab/projects/tidebound-harbor/run-tidebound-harbor.sh"
+  "launcher": "/home/admin/lab/projects/tidebound-harbor/run-tidebound-harbor.sh",
+  "latestUserFeedback": "Operational feedback: the repo was left dirty after recent incubator runs. Before the next run claims completion, inspect git status --short and handle uncommitted state deliberately. Do not revert user/incubator work blindly and do not bundle unrelated generated artifacts into gameplay commits; either commit the intended run artifacts, ignore/delete true local noise, or report exactly what remains dirty and why.",
+  "feedbackUpdatedAt": "2026-07-06T09:20:00+02:00",
+  "godotAi": {
+    "enabled": true,
+    "mcpUrl": "http://127.0.0.1:8020/mcp",
+    "httpPort": 8020,
+    "wsPort": 9520,
+    "editorPid": 2018456,
+    "log": "/home/admin/tidebound-harbor/reports/godot-ai/editor.log",
+    "statusUrl": "http://127.0.0.1:8020/godot-ai/status",
+    "serverVersion": "2.3.2"
+  }
 }

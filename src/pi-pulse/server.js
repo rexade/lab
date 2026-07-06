@@ -1685,6 +1685,7 @@ app.post('/api/incubators/:id/runner', requireFreshSource, (req, res) => {
   const { runner } = req.body ?? {}
   const result = updateProjectRunner(slot.statusPath, runner)
   if (!result.ok) return res.status(400).json(result)
+  slot.runner = runner
   writeIncubators(data)
   notifyIncubatorClients()
   const preflight = preflightIncubatorRun(slot)

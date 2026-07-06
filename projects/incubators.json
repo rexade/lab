@@ -6,9 +6,9 @@
       "statusPath": "/home/admin/lab/projects/taste-trainer/status.json",
       "enabled": true,
       "intervalHours": 0.5,
-      "nextRunAt": 1783274717515,
-      "lastScheduledRun": "2026-07-05T17:35:17.515Z",
-      "autoRunsSinceHuman": 41,
+      "nextRunAt": 1783323358697,
+      "lastScheduledRun": "2026-07-06T07:05:58.697Z",
+      "autoRunsSinceHuman": 68,
       "charges": null,
       "runner": "codex"
     },
@@ -29,20 +29,20 @@
       "statusPath": "/home/admin/lab/projects/tidebound-harbor/status.json",
       "enabled": true,
       "intervalHours": 0.5,
-      "nextRunAt": 1783276268754,
-      "lastScheduledRun": null,
+      "nextRunAt": 1783323358717,
+      "lastScheduledRun": "2026-07-06T07:05:58.717Z",
       "autoRunsSinceHuman": 0,
       "charges": null,
-      "runner": "claude"
+      "runner": "codex"
     },
     {
       "id": "hatchery",
       "type": "project",
       "statusPath": "/home/admin/lab/projects/hatchery/status.json",
-      "enabled": true,
+      "enabled": false,
       "intervalHours": 0.5,
-      "nextRunAt": 1783274691920,
-      "lastScheduledRun": null,
+      "nextRunAt": null,
+      "lastScheduledRun": "2026-07-05T22:36:58.101Z",
       "autoRunsSinceHuman": 0,
       "charges": null
     }
