@@ -47,17 +47,23 @@ export function outputSignal(detail = '') {
   return lines.find(line => !/^Output(?: excerpt)?|Stdout tail|Next move/i.test(line)) || lines[0] || 'captured stdout'
 }
 
+function isStdoutPathOnly(value = '') {
+  return /^Full stdout saved to\s+\S+\s*$/i.test(String(value || '').trim())
+}
+
 export function runHistorySummary(run = {}) {
-  if (/^(Claude|Codex) completed but did not append a run summary\.$/.test(run.Done || '') && run['Output excerpt']) {
+  const syntheticDone = /^(Claude|Codex) completed but did not append a run summary\.$/.test(run.Done || '')
+  if (syntheticDone && run['Output excerpt'] && !isStdoutPathOnly(run['Output excerpt'])) {
     return run['Output excerpt']
   }
-  const skipSyntheticDone = /^(Claude|Codex) completed but did not append a run summary\.$/.test(run.Done || '')
   for (const field of SUMMARY_FIELDS) {
-    if (field === 'Done' && skipSyntheticDone) continue
+    if (field === 'Done' && syntheticDone) continue
+    if ((field === 'Output excerpt' || field === 'Output') && isStdoutPathOnly(run[field])) continue
     if (run[field]) return run[field]
   }
   if (run['Stdout tail']) return run['Stdout tail']
-  if (run.Output) return run.Output
+  if (run.Output && !isStdoutPathOnly(run.Output)) return run.Output
+  if (run.Done) return run.Done
   if (run['Next move']) return run['Next move']
   return 'stdout captured with no summary'
 }

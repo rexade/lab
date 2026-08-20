@@ -4,7 +4,7 @@ import os from 'os'
 import { createHash } from 'crypto'
 import { spawn, execFile, execSync } from 'child_process'
 import { fileURLToPath } from 'url'
-import { basename, dirname, join, resolve } from 'path'
+import { basename, dirname, join, resolve, relative, isAbsolute } from 'path'
 import {
   appendFailedPreflightEntry,
   appendFailedRunEntry,
@@ -26,6 +26,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
+const mountedPlayRoutes = new Set()
 const PORT = Number(process.env.PORT || 8089)
 const HOST = process.env.PI_PULSE_HOST || process.env.HOST || '127.0.0.1'
 const SERVER_STARTED_AT = Date.now()
@@ -37,12 +38,15 @@ const REQUIRE_WRITE_AUTH = process.env.PI_PULSE_REQUIRE_WRITE_AUTH === '1' || !!
 const MIN_SCHEDULE_INTERVAL_HOURS = Number(process.env.PI_PULSE_MIN_SCHEDULE_INTERVAL_HOURS || 0.25)
 const MAX_SCHEDULE_INTERVAL_HOURS = Number(process.env.PI_PULSE_MAX_SCHEDULE_INTERVAL_HOURS || 24)
 const MAX_CONSECUTIVE_AUTONOMOUS_FAILS = Number(process.env.PI_PULSE_MAX_CONSECUTIVE_AUTONOMOUS_FAILS || 5)
+const GENERATED_APP_CSP = "default-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'"
 const LAB_ROOT = process.env.PI_PULSE_LAB_ROOT || '/home/admin/lab'
+const INCUBATOR_REPO_ROOT = process.env.PI_PULSE_INCUBATOR_REPO_ROOT || '/home/admin'
 const PROJECTS_DIR = process.env.PI_PULSE_PROJECTS_DIR || join(LAB_ROOT, 'projects')
 const RUN_LOG_PATH = process.env.PI_PULSE_RUN_LOG_PATH || join(LAB_ROOT, 'RUN_LOG.md')
 const PROJECT_STATUS_PATH = process.env.PI_PULSE_PROJECT_STATUS_PATH || join(PROJECTS_DIR, 'pi-pulse', 'status.json')
 const LAB_SCHEDULE_PATH = process.env.PI_PULSE_LAB_SCHEDULE_PATH || join(PROJECTS_DIR, 'pi-pulse', 'schedule.json')
 const RUN_CAPTURE_DIR = process.env.PI_PULSE_RUN_CAPTURE_DIR || join(PROJECTS_DIR, '.run-capture')
+const RUN_LOCK_DIR = process.env.PI_PULSE_RUN_LOCK_DIR || join(PROJECTS_DIR, '.run-locks')
 const DAILY_SEED_PATH = process.env.PI_PULSE_DAILY_SEED_PATH || join(LAB_ROOT, 'DAILY_SEED.md')
 const CORE_SEED_PATH = process.env.PI_PULSE_CORE_SEED_PATH || join(PROJECTS_DIR, 'pi-pulse', 'seed.md')
 const CORE_FEEDBACK_JSON = process.env.PI_PULSE_CORE_FEEDBACK_JSON || join(LAB_ROOT, 'DRIFT_FEEDBACK.json')
@@ -158,6 +162,90 @@ function clampScheduleInterval(value, fallback = 0.5) {
   return Math.min(MAX_SCHEDULE_INTERVAL_HOURS, Math.max(MIN_SCHEDULE_INTERVAL_HOURS, numeric))
 }
 
+function pathInside(targetPath, rootPath) {
+  if (!targetPath || !rootPath) return false
+  const target = resolve(String(targetPath))
+  const root = resolve(String(rootPath))
+  const rel = relative(root, target)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+function pathInsideAny(targetPath, roots = []) {
+  return roots.some(root => pathInside(targetPath, root))
+}
+
+function safePathSegment(value, fallback = 'project') {
+  return String(value || fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || fallback
+}
+
+
+function trustedIncubatorRepo(repoPath) {
+  if (!pathInside(repoPath, INCUBATOR_REPO_ROOT)) return false
+  if (resolve(INCUBATOR_REPO_ROOT) === resolve(LAB_ROOT)) return true
+  return !pathInside(repoPath, LAB_ROOT)
+}
+
+function assertTrustedStatusPath(statusPath) {
+  const resolved = resolve(String(statusPath || ''))
+  if (!pathInside(resolved, PROJECTS_DIR)) throw new Error('status path outside trusted project root')
+  const st = fs.lstatSync(resolved)
+  if (!st.isFile() || st.isSymbolicLink()) throw new Error('status path is not a regular trusted file')
+  return resolved
+}
+
+function writeJsonAtomic(filePath, value) {
+  fs.mkdirSync(dirname(filePath), { recursive: true })
+  const tmp = join(dirname(filePath), `.${basename(filePath)}.${process.pid}.${Date.now()}.tmp`)
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n')
+  fs.renameSync(tmp, filePath)
+}
+
+function generatedAppSecurityHeaders(req, res, next) {
+  res.setHeader('Content-Security-Policy', GENERATED_APP_CSP)
+  res.setHeader('X-Pi-Pulse-App-Isolation', 'restricted-csp')
+  next()
+}
+
+function requestPathFromHeader(value, req) {
+  if (!value) return ''
+  try {
+    return new URL(String(value), `http://${req.get('host') || '127.0.0.1'}`).pathname
+  } catch {
+    return ''
+  }
+}
+
+function requestFromMountedAppRoute(req) {
+  const refPath = requestPathFromHeader(req.get('referer'), req)
+  if (!refPath) return false
+  for (const route of mountedPlayRoutes) {
+    if (refPath === route || refPath.startsWith(`${route}/`)) return true
+  }
+  for (const slot of readIncubators().slots || []) {
+    try {
+      const cfg = readStatusAt(slot.statusPath)
+      const route = `/${cfg.project.replace(/[^a-z0-9_-]/gi, '-').toLowerCase()}`
+      if ((refPath === route || refPath.startsWith(`${route}/`)) && fs.existsSync(join(cfg.repo, 'index.html'))) return true
+    } catch {
+      // Keep checking other incubators; auth still applies after this guard.
+    }
+  }
+  return false
+}
+
+function rejectGeneratedAppControlWrite(req, res, next) {
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next()
+  if (!requestFromMountedAppRoute(req)) return next()
+  return res.status(403).json({
+    ok: false,
+    code: 'APP_CONTROL_API_FORBIDDEN',
+    error: 'generated app routes cannot call Pi Pulse control-plane writes',
+  })
+}
+
 // CPU usage calculation (requires two samples)
 let prevCpuTimes = null
 
@@ -175,7 +263,7 @@ let activeRun = null // { pid, startTime }
 
 const LAB_RUNNERS = {
   claude: {
-    script: '/home/admin/run-lab.sh',
+    script: join(LAB_ROOT, 'run-lab.sh'),
     args: [],
   },
   codex: {
@@ -200,15 +288,77 @@ function saveLabSchedule() {
   try { fs.writeFileSync(LAB_SCHEDULE_PATH, JSON.stringify(labScheduleState, null, 2) + '\n') } catch {}
 }
 
-function activeRunAlive() {
-  if (!activeRun) return false
+function pidAlive(pid) {
+  const n = Number(pid)
+  if (!Number.isInteger(n) || n <= 1) return false
   try {
-    process.kill(activeRun.pid, 0)
+    process.kill(n, 0)
     return true
   } catch {
-    activeRun = null
     return false
   }
+}
+
+function activeRunAlive() {
+  if (!activeRun) return false
+  if (pidAlive(activeRun.pid)) return true
+  activeRun = null
+  return false
+}
+
+function runLockPath() {
+  return join(RUN_LOCK_DIR, 'global')
+}
+
+function readRunLock() {
+  try { return JSON.parse(fs.readFileSync(join(runLockPath(), 'owner.json'), 'utf8')) } catch { return null }
+}
+
+function clearRunLock() {
+  try { fs.rmSync(runLockPath(), { recursive: true, force: true }) } catch {}
+}
+
+function currentRunLock() {
+  const lock = readRunLock()
+  if (!lock?.pid) { clearRunLock(); return null }
+  if (pidAlive(lock.pid)) return lock
+  clearRunLock()
+  return null
+}
+
+function acquireRunLock(owner = {}) {
+  fs.mkdirSync(RUN_LOCK_DIR, { recursive: true })
+  const lockDir = runLockPath()
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  try {
+    fs.mkdirSync(lockDir)
+  } catch (err) {
+    if (err?.code === 'EEXIST') {
+      const existing = currentRunLock()
+      if (existing) return { ok: false, code: 'GLOBAL_RUN_LOCK_ACTIVE', ...existing }
+      fs.mkdirSync(lockDir)
+    } else {
+      throw err
+    }
+  }
+  const lock = { ok: true, token, pid: null, startedAt: new Date().toISOString(), ...owner }
+  writeJsonAtomic(join(lockDir, 'owner.json'), lock)
+  return lock
+}
+
+function activateRunLock(lock, pid) {
+  if (!lock?.ok) return
+  writeJsonAtomic(join(runLockPath(), 'owner.json'), { ...lock, pid })
+}
+
+function releaseRunLock(lock) {
+  if (!lock?.ok) return
+  const current = readRunLock()
+  if (!current || current.token === lock.token) clearRunLock()
+}
+
+function globalRunBusy() {
+  return currentRunLock()
 }
 
 function normalizeLabRunner(runner) {
@@ -308,7 +458,7 @@ function markIncubatorPreflightAttempt({ statusPath, preflight, num, label }) {
     status.lastRunStatus = 'failed'
     status.lastRunFailure = preflightFailureDetail(preflight) || preflight?.error || 'runner preflight failed'
     status.lastRunFailureSource = label
-    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
+    writeJsonAtomic(statusPath, status)
   } catch {}
 }
 
@@ -325,7 +475,7 @@ function markIncubatorProcessFailure({ statusPath, capturePath, code, signal, nu
     status.lastRunFailure = capturedFailureDetail(capturePath) || `runner process failed with ${reason}`
     status.lastRunFailureSource = 'process exit'
     status.lastRunExit = reason
-    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
+    writeJsonAtomic(statusPath, status)
   } catch {}
 }
 
@@ -371,7 +521,7 @@ function appendRunnerSwitchPreflightFailure({ slot, runLogPath, preflight }) {
 // spawnTrackedRun keeps the child detached but routes its output to a capture
 // file; on non-zero exit it appends a FAILED stdout block — with the actual
 // command error — to the target run log so the parser surfaces it.
-function spawnTrackedRun({ script, args = [], cwd, captureName, runLogPath, nextRunNum, onExit }) {
+function spawnTrackedRun({ script, args = [], cwd, captureName, runLogPath, nextRunNum, onExit, env = {}, lock = null }) {
   let stdio = 'ignore'
   const capturePath = join(RUN_CAPTURE_DIR, `${captureName}.log`)
   try {
@@ -379,10 +529,12 @@ function spawnTrackedRun({ script, args = [], cwd, captureName, runLogPath, next
     const fd = fs.openSync(capturePath, 'w')
     stdio = ['ignore', fd, fd]
   } catch { /* capture unavailable — run blind as before */ }
-  const child = spawn('bash', [script, ...args], { cwd, detached: true, stdio })
+  const child = spawn('bash', [script, ...args], { cwd, detached: true, stdio, env: { ...process.env, ...env } })
+  activateRunLock(lock, child.pid)
   if (Array.isArray(stdio)) { try { fs.closeSync(stdio[1]) } catch {} }
   child.unref()
   child.on('exit', (code, signal) => {
+    releaseRunLock(lock)
     if (code || signal) {
       const failedRunNum = nextRunNum?.() ?? 0
       appendFailedRunEntry({ runLogPath, capturePath, code, signal, num: failedRunNum })
@@ -394,11 +546,22 @@ function spawnTrackedRun({ script, args = [], cwd, captureName, runLogPath, next
   return child
 }
 
-function startLabRun(runner = labScheduleState.runner) {
+function startLabRun(runner = labScheduleState.runner, options = {}) {
   const selected = normalizeLabRunner(runner)
   const preflight = preflightLabRun(selected)
   if (!preflight.ok) return null
+  const existing = globalRunBusy()
+  if (existing) return null
+  const lock = acquireRunLock({ kind: 'core', id: 'pi-pulse', runner: selected })
+  if (!lock.ok) return null
   const cfg = LAB_RUNNERS[selected]
+  const runEnv = options.scheduled ? { PI_PULSE_SCHEDULED_RUN: '1' } : {}
+  if (selected === 'claude') {
+    let status = {}
+    try { status = JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8')) } catch {}
+    const model = firstRunnableClaudeModel(status.claudeModel, process.env.CLAUDE_MODEL, process.env.DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_MODEL, SAFE_CLAUDE_MODEL)
+    if (model) runEnv.CLAUDE_MODEL = model
+  }
   const child = spawnTrackedRun({
     script: cfg.script,
     args: cfg.args,
@@ -406,6 +569,8 @@ function startLabRun(runner = labScheduleState.runner) {
     captureName: `core-${selected}`,
     runLogPath: RUN_LOG_PATH,
     nextRunNum: nextCoreRunNum,
+    env: runEnv,
+    lock,
   })
   activeRun = { pid: child.pid, startTime: Date.now(), runner: selected }
   return child
@@ -566,12 +731,16 @@ function getDiskInfo() {
 
 const parsedRunLogCache = new Map()
 
+function stdoutRootsForLog(filePath) {
+  return [join(dirname(filePath), 'stdout'), RUN_CAPTURE_DIR]
+}
+
 function parsedRunsForLog(filePath) {
   const stat = fs.statSync(filePath)
   const cached = parsedRunLogCache.get(filePath)
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.runs
   const content = fs.readFileSync(filePath, 'utf8')
-  const runs = parseRunsFromLog(content)
+  const runs = parseRunsFromLog(content, { stdoutRoots: stdoutRootsForLog(filePath) })
   parsedRunLogCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, runs })
   return runs
 }
@@ -667,7 +836,7 @@ readCpuTimes()
 syncProjectStatus()
 
 app.use(express.json({ limit: '1mb' }))
-app.use('/api', requireTrustedWrite)
+app.use('/api', rejectGeneratedAppControlWrite, requireTrustedWrite)
 
 // Serve built frontend in production
 app.use(express.static(join(__dirname, 'dist')))
@@ -797,6 +966,8 @@ app.post('/api/run', requireFreshSource, (req, res) => {
   if (activeRunAlive()) {
     return res.status(409).json({ ok: false, error: 'lab run already active', pid: activeRun.pid, runner: activeRun.runner })
   }
+  const busy = globalRunBusy()
+  if (busy) return res.status(409).json({ ok: false, code: 'GLOBAL_RUN_LOCK_ACTIVE', error: 'another run is already active', owner: busy })
   const runner = normalizeLabRunner(req.body?.runner || labScheduleState.runner)
   const preflight = preflightLabRun(runner)
   if (!preflight.ok) {
@@ -842,9 +1013,9 @@ if (SCHEDULES_ENABLED) {
   setInterval(() => {
     if (!labScheduleState.enabled || !labScheduleState.nextRunAt) return
     if (Date.now() < labScheduleState.nextRunAt) return
-    if (activeRunAlive()) return
+    if (activeRunAlive() || globalRunBusy()) return
     const runner = normalizeLabRunner(labScheduleState.runner)
-    const child = startLabRun(runner)
+    const child = startLabRun(runner, { scheduled: true })
     if (!child) {
       const preflight = preflightLabRun(runner)
       appendFailedPreflightEntry({
@@ -976,15 +1147,20 @@ const CHILD_RUN_SCRIPT      = mountedProject.runScript
 const CHILD_PLAY_ROUTE      = `/${mountedProject.name.replace(/[^a-z0-9_-]/gi, '-').toLowerCase()}`
 
 if (fs.existsSync(join(CHILD_DIR, 'index.html'))) {
-  app.use(CHILD_PLAY_ROUTE, express.static(CHILD_DIR))
+  app.use(CHILD_PLAY_ROUTE, generatedAppSecurityHeaders, express.static(CHILD_DIR))
+  mountedPlayRoutes.add(CHILD_PLAY_ROUTE)
 }
 
 let activeChildRun = null
 const childRunClients = new Set()
 const incubatorRunClients = new Set()
 
-function startChildRun() {
+function startChildRun(options = {}) {
   if (!fs.existsSync(CHILD_RUN_SCRIPT)) return null
+  const existing = globalRunBusy()
+  if (existing) return null
+  const lock = acquireRunLock({ kind: 'child', id: mountedProject.name, runner: 'script' })
+  if (!lock.ok) return null
   const child = spawnTrackedRun({
     script: CHILD_RUN_SCRIPT,
     captureName: `child-${mountedProject.name}`,
@@ -992,6 +1168,8 @@ function startChildRun() {
     nextRunNum: () => {
       try { return (JSON.parse(fs.readFileSync(CHILD_LAB_STATUS_PATH, 'utf8')).runCount ?? 0) + 1 } catch { return 1 }
     },
+    env: options.scheduled ? { PI_PULSE_SCHEDULED_RUN: '1' } : {},
+    lock,
   })
   activeChildRun = { pid: child.pid, startTime: Date.now() }
   return child
@@ -1009,7 +1187,7 @@ function defaultIncubators() {
         id: 'rat-deposit',
         type: 'project',
         statusPath: '/home/admin/lab/projects/rat-deposit/status.json',
-        enabled: true,
+        enabled: false,
         intervalHours: 0.5,
         nextRunAt: Date.now() + 30 * 60 * 1000,
         lastScheduledRun: null,
@@ -1023,19 +1201,73 @@ function defaultIncubators() {
 function readIncubators() {
   try {
     const data = JSON.parse(fs.readFileSync(INCUBATORS_PATH, 'utf8'))
-    if (Array.isArray(data.slots)) return data
+    if (Array.isArray(data.slots)) return reconcileIncubatorScheduleState(data)
   } catch {}
-  const data = defaultIncubators()
+  const data = reconcileIncubatorScheduleState(defaultIncubators())
   writeIncubators(data)
   return data
 }
 
 function writeIncubators(data) {
-  try { fs.writeFileSync(INCUBATORS_PATH, JSON.stringify(data, null, 2) + '\n') } catch {}
+  try { writeJsonAtomic(INCUBATORS_PATH, data) } catch {}
+}
+
+function pauseIncubatorSchedule(slot, reason, code) {
+  const ts = new Date().toISOString()
+  slot.enabled = false
+  slot.nextRunAt = null
+  slot.schedulePausedAt = ts
+  slot.schedulePauseReason = reason
+  slot.lastScheduleBlockedAt = ts
+  slot.lastScheduleBlockedReason = reason
+  slot.lastScheduleBlockedCode = code
+}
+
+function reconcileIncubatorScheduleState(data) {
+  let changed = false
+  const now = Date.now()
+  for (const slot of data.slots || []) {
+    const interval = clampScheduleInterval(slot.intervalHours, 0.5)
+    if (slot.intervalHours !== interval) { slot.intervalHours = interval; changed = true }
+    if (!pathInside(slot.statusPath, PROJECTS_DIR)) {
+      if (slot.enabled) {
+        pauseIncubatorSchedule(slot, 'schedule paused: status path is outside trusted project root', 'UNTRUSTED_STATUS_PATH')
+        changed = true
+      }
+      continue
+    }
+    try {
+      const status = JSON.parse(fs.readFileSync(slot.statusPath, 'utf8'))
+      if (status.codexBypass === true || status.claudeBypass === true) {
+        status.codexBypass = false
+        status.claudeBypass = false
+        writeJsonAtomic(slot.statusPath, status)
+        if (slot.enabled) {
+          pauseIncubatorSchedule(slot, 'schedule paused: persisted bypass flags are not allowed for autonomous runs', 'PERSISTED_BYPASS_DISABLED')
+        }
+        changed = true
+      }
+    } catch {
+      if (slot.enabled) {
+        pauseIncubatorSchedule(slot, 'schedule paused: status file could not be read', 'STATUS_READ_FAILED')
+        changed = true
+      }
+    }
+    if (slot.enabled && (!slot.nextRunAt || Number(slot.nextRunAt) < now)) {
+      slot.nextRunAt = now + slot.intervalHours * 60 * 60 * 1000
+      slot.lastScheduleBlockedAt = new Date().toISOString()
+      slot.lastScheduleBlockedReason = 'stale schedule reconciled from service startup/read'
+      slot.lastScheduleBlockedCode = 'STALE_SCHEDULE_RECONCILED'
+      changed = true
+    }
+  }
+  if (changed) writeIncubators(data)
+  return data
 }
 
 function readStatusAt(statusPath) {
-  return JSON.parse(fs.readFileSync(statusPath, 'utf8'))
+  const safeStatusPath = assertTrustedStatusPath(statusPath)
+  return JSON.parse(fs.readFileSync(safeStatusPath, 'utf8'))
 }
 
 
@@ -1132,8 +1364,10 @@ function claudeRunScriptForProject(project, cfg = {}) {
 }
 
 function runnableLauncherForStatus(cfg = {}) {
-  if (!cfg.launcher) return null
+  if (!cfg.launcher || !pathInside(cfg.launcher, PROJECTS_DIR)) return null
   try {
+    const st = fs.lstatSync(cfg.launcher)
+    if (!st.isFile() || st.isSymbolicLink()) return null
     fs.accessSync(cfg.launcher, fs.constants.X_OK)
     return cfg.launcher
   } catch {
@@ -1174,6 +1408,7 @@ function hydrateIncubator(slot) {
   let repoStatus = {}
   try { repoStatus = JSON.parse(fs.readFileSync(repoStatusPath, 'utf8')) } catch {}
   const running = getIncubatorRun(slot.id)
+  const playRoute = fs.existsSync(join(cfg.repo, 'index.html')) ? mountPlayRoute(cfg) : null
   const claudeSetup = claudeRunnerSetupForStatus(cfg)
   const claudeRelayScript = claudeSetup.script || claudeSetup.expectedScript || cfg.claudeRunScript || null
   return {
@@ -1190,9 +1425,7 @@ function hydrateIncubator(slot) {
     launcher: cfg.launcher ?? null,
     claudeRelayScript,
     relayScript: cfg.runner === 'claude' ? claudeRelayScript : null,
-    playUrl: fs.existsSync(join(cfg.repo, 'index.html'))
-      ? `/${cfg.project.replace(/[^a-z0-9_-]/gi, '-').toLowerCase()}/`
-      : null,
+    playUrl: playRoute ? `${playRoute}/` : null,
     runCount: cfg.runCount ?? repoStatus.runCount ?? 0,
     lastRun: cfg.lastRun ?? repoStatus.lastRun ?? null,
     lastRunType: cfg.lastRunType ?? repoStatus.lastRunType ?? null,
@@ -1240,7 +1473,13 @@ function hydrateIncubator(slot) {
 
 function getIncubatorRun(id) {
   const run = activeIncubatorRuns.get(id)
-  if (!run) return { running: false, pid: null, elapsed: 0, startTime: null }
+  if (!run) {
+    const lock = currentRunLock()
+    if (lock?.kind === 'incubator' && lock.id === id) {
+      return { running: true, pid: lock.pid, elapsed: 0, startTime: Date.parse(lock.startedAt) || null, runner: lock.runner, lockRecovered: true }
+    }
+    return { running: false, pid: null, elapsed: 0, startTime: null }
+  }
   try {
     process.kill(run.pid, 0)
     return {
@@ -1285,13 +1524,17 @@ function incubatorLaunchCommand(cfg, statusPath, runType = null) {
     .join(' ')
 }
 
-function startIncubatorRun(slot, runType = null) {
+function startIncubatorRun(slot, runType = null, options = {}) {
+  const existing = globalRunBusy()
+  if (existing) return { ok: false, error: 'global run already active', code: 'GLOBAL_RUN_LOCK_ACTIVE', pid: existing.pid, owner: existing }
   const alive = getIncubatorRun(slot.id)
-  if (alive.running) return { alreadyRunning: true, ...alive }
+  if (alive.running) return { ok: false, error: 'incubator run already active', code: 'GLOBAL_RUN_LOCK_ACTIVE', pid: alive.pid, owner: { kind: 'incubator', id: slot.id, pid: alive.pid, runner: alive.runner } }
   const { status: cfg } = repairClaudeRunnerStatusIfNeeded(slot.statusPath)
   const preflight = preflightIncubatorRun(slot, runType)
   if (!preflight.ok) return { ok: false, error: 'runner preflight failed', preflight }
   const args = incubatorRunArgs(cfg, slot.statusPath, runType)
+  const lock = acquireRunLock({ kind: 'incubator', id: slot.id, runner: cfg.runner ?? 'script' })
+  if (!lock.ok) return { ok: false, error: 'global run already active', code: 'GLOBAL_RUN_LOCK_ACTIVE', pid: lock.pid, owner: lock }
   const child = spawnTrackedRun({
     script: cfg.runScript,
     args,
@@ -1299,6 +1542,8 @@ function startIncubatorRun(slot, runType = null) {
     captureName: `incubator-${slot.id}`,
     runLogPath: cfg.runLog,
     nextRunNum: () => nextIncubatorRunNum(slot),
+    env: options.scheduled ? { PI_PULSE_SCHEDULED_RUN: '1', CODEX_BYPASS: '', CLAUDE_BYPASS: '' } : {},
+    lock,
     onExit: (code, signal, exitMeta = {}) => {
       if (code || signal) {
         markIncubatorProcessFailure({
@@ -1326,7 +1571,7 @@ function updateProjectRunner(statusPath, runner) {
     status.runScript = runnableLauncherForStatus(status) || '/home/admin/lab/scripts/run-codex-incubator.sh'
     status.promptDir = status.promptDir || join(status.repo, 'prompts')
     status.runTypes = status.runTypes || ['mutate', 'research', 'mutate']
-    status.codexBypass = status.codexBypass ?? false
+    status.codexBypass = false
   } else if (runner === 'claude') {
     const setup = claudeRunnerSetupForStatus(status)
     const relayScript = setup.script || setup.expectedScript || GENERIC_CLAUDE_INCUBATOR_SCRIPT
@@ -1335,10 +1580,10 @@ function updateProjectRunner(statusPath, runner) {
     if (setup.model) status.claudeModel = setup.model
     else delete status.claudeModel
     status.claudeRunScript = relayScript
-    status.claudeBypass = status.claudeBypass ?? false
+    status.claudeBypass = false
     status.promptDir = status.promptDir || join(status.repo, 'prompts')
     status.runTypes = status.runTypes || ['mutate', 'research', 'mutate']
-    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
+    writeJsonAtomic(statusPath, status)
     const selectedDetail = `${setup.model || 'Claude CLI default'} via ${status.runScript}${status.runScript === relayScript ? '' : ` -> ${relayScript}`}`
     return {
       ok: true,
@@ -1350,7 +1595,7 @@ function updateProjectRunner(statusPath, runner) {
   } else {
     return { ok: false, error: 'unsupported runner' }
   }
-  fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
+  writeJsonAtomic(statusPath, status)
   return { ok: true, status, repaired: normalized.repaired }
 }
 
@@ -1386,13 +1631,13 @@ function repairClaudeRunnerStatusIfNeeded(statusPath) {
     next.runTypes = ['mutate', 'research', 'mutate']
     repaired = true
   }
-  if (next.claudeBypass == null) {
+  if (next.claudeBypass !== false) {
     next.claudeBypass = false
     repaired = true
   }
 
   if (repaired) {
-    fs.writeFileSync(statusPath, JSON.stringify(next, null, 2) + '\n')
+    writeJsonAtomic(statusPath, next)
   }
   return { status: next, repaired }
 }
@@ -1489,7 +1734,7 @@ function uniqueIncubatorSlug(seed) {
   for (let i = 0; i < 50; i += 1) {
     const slug = i === 0 ? base : `${base}-${i + 1}`
     if (used.has(slug)) continue
-    if (fs.existsSync(join('/home/admin', slug))) continue
+    if (fs.existsSync(join(INCUBATOR_REPO_ROOT, slug))) continue
     if (fs.existsSync(join(PROJECTS_DIR, slug))) continue
     return slug
   }
@@ -1497,7 +1742,8 @@ function uniqueIncubatorSlug(seed) {
 }
 
 function projectFeedbackPath(cfg) {
-  return cfg.feedbackPath || join(cfg.repo, 'reports', 'USER_FEEDBACK.md')
+  const fallback = join(cfg.repo || '/home/admin/lab', 'reports', 'USER_FEEDBACK.md')
+  return pathInside(cfg.feedbackPath, cfg.repo || '') ? cfg.feedbackPath : fallback
 }
 
 function readLatestProjectFeedback(filePath, maxChars = 900) {
@@ -1662,49 +1908,53 @@ exec /home/admin/lab/scripts/run-codex-incubator.sh "$STATUS_PATH" "$RUN_TYPE"
 }
 
 function normalizeIncubatorStatus(statusPath) {
-  const status = readStatusAt(statusPath)
+  const safeStatusPath = assertTrustedStatusPath(statusPath)
+  const status = readStatusAt(safeStatusPath)
   const next = { ...status }
   let changed = false
-  const project = next.project || basename(dirname(statusPath))
+  const project = safePathSegment(next.project || basename(dirname(safeStatusPath)), 'incubator')
+  const fallbackProjectRoot = join(INCUBATOR_REPO_ROOT, project)
+  const projectRoot = trustedIncubatorRepo(next.repo) ? resolve(next.repo) : fallbackProjectRoot
+  const reportsRoot = join(projectRoot, 'reports')
 
-  if (!next.project) {
+  if (next.project !== project) {
     next.project = project
     changed = true
   }
-  if (!next.repo) {
-    next.repo = join('/home/admin', project)
+  if (!pathInside(next.repo, projectRoot)) {
+    next.repo = projectRoot
     changed = true
   }
-  if (!next.runLog && next.repo) {
-    next.runLog = join(next.repo, 'reports', 'RUN_LOG.md')
+  if (!pathInside(next.runLog, reportsRoot)) {
+    next.runLog = join(reportsRoot, 'RUN_LOG.md')
     changed = true
   }
-  if (!next.recentRuns && next.runLog) {
-    next.recentRuns = join(dirname(next.runLog), 'RECENT_RUNS.md')
+  if (!pathInside(next.recentRuns, reportsRoot)) {
+    next.recentRuns = join(reportsRoot, 'RECENT_RUNS.md')
     changed = true
   }
-  if (!next.promptDir && next.repo) {
-    next.promptDir = join(next.repo, 'prompts')
+  if (!pathInside(next.promptDir, projectRoot)) {
+    next.promptDir = join(projectRoot, 'prompts')
     changed = true
   }
   if (!next.runTypes) {
     next.runTypes = ['mutate', 'research', 'mutate']
     changed = true
   }
-  if (next.codexBypass == null) {
+  if (next.codexBypass !== false) {
     next.codexBypass = false
     changed = true
   }
-  if (next.claudeBypass == null) {
+  if (next.claudeBypass !== false) {
     next.claudeBypass = false
     changed = true
   }
-  if (!next.feedbackPath && next.repo) {
-    next.feedbackPath = join(next.repo, 'reports', 'USER_FEEDBACK.md')
+  if (!pathInside(next.feedbackPath, reportsRoot)) {
+    next.feedbackPath = join(reportsRoot, 'USER_FEEDBACK.md')
     changed = true
   }
 
-  const launcherInfo = writeIncubatorLauncher({ slug: project, statusPath })
+  const launcherInfo = writeIncubatorLauncher({ slug: project, statusPath: safeStatusPath })
   const launcher = launcherInfo.path
   if (launcherInfo.repaired) changed = true
   if (next.launcher !== launcher) {
@@ -1724,14 +1974,15 @@ function normalizeIncubatorStatus(statusPath) {
     '/home/admin/lab/scripts/run-codex-incubator.sh',
     GENERIC_CLAUDE_INCUBATOR_SCRIPT,
   ])
-  if (!next.runScript || genericEntrypoints.has(next.runScript)) {
+  const allowedRunScriptRoots = [PROJECTS_DIR, join(LAB_ROOT, 'scripts'), join(__dirname, 'scripts')]
+  if (!next.runScript || genericEntrypoints.has(next.runScript) || !pathInsideAny(next.runScript, allowedRunScriptRoots)) {
     next.runScript = next.launcher
     changed = true
   }
 
   ensureIncubatorProjectScaffold(next)
 
-  if (changed) fs.writeFileSync(statusPath, JSON.stringify(next, null, 2) + '\n')
+  if (changed) writeJsonAtomic(safeStatusPath, next)
   return { status: next, repaired: changed }
 }
 
@@ -1743,7 +1994,7 @@ function createIncubatorProjectFromIdea(idea, requestedTitle = '') {
   const title = normalizedIncubatorTitle(requestedTitle) || suggestedIncubatorTitle(cleanIdea)
   const slug = uniqueIncubatorSlug(title)
   const incubatorRole = inferIncubatorRole({ id: slug, displayName: title, current_focus: cleanIdea })
-  const repo = join('/home/admin', slug)
+  const repo = join(INCUBATOR_REPO_ROOT, slug)
   const labProjectDir = join(PROJECTS_DIR, slug)
   const promptDir = join(repo, 'prompts')
   const reportsDir = join(repo, 'reports')
@@ -1815,13 +2066,11 @@ function notifyIncubatorClients() {
   }
 }
 
-const mountedPlayRoutes = new Set()
-
 function mountPlayRoute(cfg) {
   const route = `/${cfg.project.replace(/[^a-z0-9_-]/gi, '-').toLowerCase()}`
   if (mountedPlayRoutes.has(route)) return route
   if (!fs.existsSync(join(cfg.repo, 'index.html'))) return null
-  app.use(route, express.static(cfg.repo))
+  app.use(route, generatedAppSecurityHeaders, express.static(cfg.repo))
   mountedPlayRoutes.add(route)
   return route
 }
@@ -1889,7 +2138,8 @@ if (SCHEDULES_ENABLED) {
     if (activeChildRun) {
       try { process.kill(activeChildRun.pid, 0); return } catch { activeChildRun = null }
     }
-    if (!startChildRun()) return
+    if (globalRunBusy()) return
+    if (!startChildRun({ scheduled: true })) return
     console.log('[pi-pulse] schedule: firing child run')
     scheduleState.lastScheduledRun = new Date().toISOString()
     scheduleState.nextRunAt = Date.now() + scheduleState.intervalHours * 60 * 60 * 1000
@@ -1970,6 +2220,9 @@ app.post('/api/incubators/:id/run', requireFreshSource, (req, res) => {
   const result = startIncubatorRun(slot, req.body?.runType ?? null)
   if (!result) return res.status(404).json({ ok: false, error: 'run script not found' })
   if (result.ok === false) {
+    if (result.code === 'GLOBAL_RUN_LOCK_ACTIVE') {
+      return res.status(409).json(result)
+    }
     let runLogPath = null
     try { runLogPath = readStatusAt(slot.statusPath).runLog } catch {}
     appendManualPreflightFailure({
@@ -2117,7 +2370,7 @@ app.post('/api/incubators/:id/feedback', requireFreshSource, (req, res) => {
     if (slot.enabled && (!slot.nextRunAt || slot.nextRunAt < Date.now())) {
       slot.nextRunAt = Date.now() + (slot.intervalHours || 0.5) * 60 * 60 * 1000
     }
-    fs.writeFileSync(slot.statusPath, JSON.stringify(cfg, null, 2) + '\n')
+    writeJsonAtomic(slot.statusPath, cfg)
     writeIncubators(data)
     notifyIncubatorClients()
     res.json({ ok: true, slot: hydrateIncubator(slot) })
@@ -2193,9 +2446,14 @@ if (SCHEDULES_ENABLED) {
         console.warn(`[pi-pulse] incubator: ${slot.id} ${autoStrategy.reason}`)
         changed = true
       }
-      const result = startIncubatorRun(slot, autoStrategy?.runType || null)
+      const result = startIncubatorRun(slot, autoStrategy?.runType || null, { scheduled: true })
       if (!result) continue
       if (result.ok === false) {
+        if (result.code === 'GLOBAL_RUN_LOCK_ACTIVE') {
+          slot.nextRunAt = Date.now() + (slot.intervalHours || 0.5) * 60 * 60 * 1000
+          changed = true
+          continue
+        }
         let runLogPath = null
         try { runLogPath = readStatusAt(slot.statusPath).runLog } catch {}
         appendIncubatorPreflightFailure({
@@ -2248,6 +2506,8 @@ app.get('/api/child/runs', (req, res) => {
 })
 
 app.post('/api/child/run', requireFreshSource, (req, res) => {
+  const busy = globalRunBusy()
+  if (busy) return res.status(409).json({ ok: false, code: 'GLOBAL_RUN_LOCK_ACTIVE', error: 'another run is already active', owner: busy })
   const child = startChildRun()
   if (!child) {
     return res.status(404).json({ ok: false, error: 'run script not found' })
@@ -2838,6 +3098,7 @@ app.use('/api', (req, res) => {
 app.get('*', (req, res) => {
   const incubatorFile = incubatorPlayFileForRequest(req.path)
   if (incubatorFile) {
+    generatedAppSecurityHeaders(req, res, () => {})
     res.sendFile(incubatorFile)
     return
   }

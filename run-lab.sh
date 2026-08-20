@@ -26,7 +26,8 @@ FEEDBACK_FILE=${FEEDBACK_FILE:-$LAB_DIR/USER_FEEDBACK.md}
 SEED_FILE=$LAB_DIR/DAILY_SEED.md
 MEMPALACE=/home/admin/.local/bin/mempalace
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M')
-CLAUDE_MODEL=${CLAUDE_MODEL:-fable}
+CLAUDE_MODEL=${CLAUDE_MODEL:-sonnet}
+CLAUDE_TIMEOUT=${CLAUDE_TIMEOUT:-2400}
 
 # Rotation: create -> mutate -> research -> mutate -> repeat
 # Harvest is manual only: ./run-lab.sh harvest
@@ -138,7 +139,7 @@ else
 fi
 BUILD_MARKER=$(mktemp)
 CLAUDE_EXIT=0
-OUTPUT=$(claude \
+OUTPUT=$(timeout -k 60 "$CLAUDE_TIMEOUT" claude \
     --print \
     --allowedTools "Read Write Edit Bash(npm*) Bash(npx*) Bash(cd*) Bash(cat*) Bash(ls*)" \
     --add-dir "$LAB_DIR" \
@@ -146,8 +147,12 @@ OUTPUT=$(claude \
     --fallback-model sonnet \
     "$FULL_PROMPT" 2>&1) || CLAUDE_EXIT=$?
 
-if [ "$CLAUDE_EXIT" -ne 0 ]; then
-    OUTPUT="[run failed — claude exited $CLAUDE_EXIT]
+if [ "$CLAUDE_EXIT" -eq 124 ] || [ "$CLAUDE_EXIT" -eq 137 ]; then
+    OUTPUT="[run failed - claude killed after ${CLAUDE_TIMEOUT}s timeout]
+
+$OUTPUT"
+elif [ "$CLAUDE_EXIT" -ne 0 ]; then
+    OUTPUT="[run failed - claude exited $CLAUDE_EXIT]
 
 $OUTPUT"
 fi

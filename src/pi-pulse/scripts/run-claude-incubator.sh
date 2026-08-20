@@ -54,7 +54,7 @@ PROMPT_DIR=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync
 RECENT_FILE=$(node -e "const fs=require('fs'); const path=require('path'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.recentRuns || path.join(path.dirname(o.runLog), 'RECENT_RUNS.md'))" "$STATUS_PATH")
 FEEDBACK_FILE=$(node -e "const fs=require('fs'); const path=require('path'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.feedbackPath || path.join(o.repo, 'reports', 'USER_FEEDBACK.md'))" "$STATUS_PATH")
 CLAUDE_MODEL=$(node -e "const fs=require('fs'); const invalid=new Set(['fable','claude-sonnet-4-20250514']); const safe='sonnet'; const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); const clean=v => v && !invalid.has(v) ? v : ''; const saved=clean(o.claudeModel); const env=clean(process.env.CLAUDE_MODEL); const fallback=clean(process.env.PI_PULSE_DEFAULT_CLAUDE_MODEL); console.log(saved || env || fallback || safe)" "$STATUS_PATH")
-CLAUDE_BYPASS=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.claudeBypass || process.env.CLAUDE_BYPASS === '1' ? '1' : '')" "$STATUS_PATH")
+CLAUDE_BYPASS=$(node -e "if (process.env.PI_PULSE_SCHEDULED_RUN === '1') { console.log(''); process.exit(0) } console.log(process.env.CLAUDE_BYPASS === '1' ? '1' : '')")
 
 RUN_TYPES_RAW=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log((o.runTypes || ['mutate','research','mutate']).join(' '))" "$STATUS_PATH")
 read -r -a RUN_TYPES <<< "$RUN_TYPES_RAW"

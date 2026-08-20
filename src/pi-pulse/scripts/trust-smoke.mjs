@@ -206,6 +206,7 @@ echo fake codex launcher
     blockedStatusPath,
     env: {
       PI_PULSE_LAB_ROOT: labRoot,
+      PI_PULSE_INCUBATOR_REPO_ROOT: labRoot,
       PI_PULSE_PROJECTS_DIR: projectsDir,
       PI_PULSE_RUN_LOG_PATH: runLogPath,
       PI_PULSE_PROJECT_STATUS_PATH: statusPath,
@@ -445,8 +446,24 @@ async function main() {
     const text = await play.text()
     assert.equal(play.status, 200, 'fresh slot playUrl should serve the static incubator app')
     assert.match(play.headers.get('content-type') || '', /text\/html/)
+    assert.match(play.headers.get('content-security-policy') || '', /connect-src 'none'/, 'generated app routes should block browser fetch/XHR by CSP')
     assert.match(text, /Fresh Slot Play/, 'fresh slot playUrl should serve the project index.html')
     assert.ok(!text.includes('<title>Pi Pulse</title>'), 'fresh slot playUrl served the Pi Pulse SPA')
+
+    const appOriginWrite = await fetchJson(baseUrl, '/api/incubators/fresh-slot/run', {
+      method: 'POST',
+      headers: { ...writeHeaders, Referer: baseUrl + slotWithPlay.playUrl },
+    })
+    assert.equal(appOriginWrite.response.status, 403, 'generated app pages should not be able to call control-plane writes')
+    assert.equal(appOriginWrite.data.code, 'APP_CONTROL_API_FORBIDDEN')
+
+    const lockDir = join(fixture.projectsDir, '.run-locks', 'global')
+    fs.mkdirSync(lockDir, { recursive: true })
+    fs.writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({ pid: process.pid, kind: 'fixture', id: 'busy' }, null, 2))
+    const lockedRun = await fetchJson(baseUrl, '/api/incubators/fresh-slot/run', { method: 'POST', headers: writeHeaders })
+    assert.equal(lockedRun.response.status, 409, 'global run lock should block a second incubator run')
+    assert.equal(lockedRun.data.code, 'GLOBAL_RUN_LOCK_ACTIVE')
+    fs.rmSync(join(fixture.projectsDir, '.run-locks'), { recursive: true, force: true })
 
     fs.writeFileSync(fixture.sourceProbe, 'changed source probe\n')
     const staleHealth = await waitForJsonCondition(

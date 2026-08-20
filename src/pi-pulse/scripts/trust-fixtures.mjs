@@ -325,8 +325,8 @@ function testExistingIncubatorsNormalizeClaudeRelayState() {
   assertIncludes(server, 'function safeRunTypeName(runType)', 'scaffolded prompt filenames should be sanitized run type names')
   assertIncludes(server, "writeFileIfMissing(join(status.promptDir, `${runType}.md`), promptForIncubatorRunType(project, runType))", 'normalization should create missing prompts for configured run types')
   assertIncludes(server, "const { status: cfg } = normalizeIncubatorStatus(slot.statusPath)", 'history reads should repair missing scaffold before loading RUN_LOG.md')
-  assertIncludes(server, "const project = next.project || basename(dirname(statusPath))", 'normalization should recover a project id from the status path')
-  assertIncludes(server, 'const launcherInfo = writeIncubatorLauncher({ slug: project, statusPath })', 'normalization should reconcile the same launcher as idea-created incubators')
+  assertIncludes(server, "const project = safePathSegment(next.project || basename(dirname(safeStatusPath)), 'incubator')", 'normalization should recover and sanitize a project id from the trusted status path')
+  assertIncludes(server, 'const launcherInfo = writeIncubatorLauncher({ slug: project, statusPath: safeStatusPath })', 'normalization should reconcile launchers using the trusted status path')
   assertIncludes(server, 'if (launcherInfo.repaired) changed = true', 'normalization should report stale launcher repairs instead of hiding them')
   assertIncludes(server, 'next.claudeRunScript = GENERIC_CLAUDE_INCUBATOR_SCRIPT', 'normalization should force the generic status-driven Claude relay')
   assertIncludes(server, 'if (next.claudeModel && !firstRunnableClaudeModel(next.claudeModel))', 'normalization should quarantine stale Claude model pins before switching')
@@ -948,13 +948,13 @@ function testNoSummaryRowsPreferStdoutOverGenericDone() {
   assert.equal(runs.length, 1)
   assert.equal(
     runHistorySummary(runs[0]),
-    'Full stdout saved to /tmp/stdout/codex-run-21.log',
-    'no-summary rows should prefer stdout metadata over the generic completed-without-summary text'
+    'Codex completed but did not append a run summary.',
+    'path-only no-summary rows should not use raw stdout paths as the primary summary'
   )
   assertIncludes(
-    runs[0].signature,
+    runOutputDetail(runs[0]),
     'Full stdout saved to /tmp/stdout/codex-run-21.log',
-    'stdout fallback should feed run signatures instead of generic no-summary text'
+    'expanded output detail should still expose the saved stdout location'
   )
 }
 
@@ -1048,7 +1048,7 @@ function testFormalRowsHydrateSavedStdoutFile() {
     '',
   ].join('\n')
 
-  const runs = parseRunsFromLog(content)
+  const runs = parseRunsFromLog(content, { stdoutRoots: [join(dir, 'stdout')] })
   assert.equal(runs.length, 1)
   assert.equal(runs[0].type, 'MUTATE')
   assert.equal(
@@ -1078,7 +1078,7 @@ function testFormalRowsHydrateStdoutPathFromExcerpt() {
     '',
   ].join('\n')
 
-  const runs = parseRunsFromLog(content)
+  const runs = parseRunsFromLog(content, { stdoutRoots: [join(dir, 'stdout')] })
   assert.equal(runs.length, 1)
   assert.equal(runs[0].type, 'MUTATE')
   assert.equal(
@@ -1109,11 +1109,34 @@ function testFormalRowsFailFromSavedStdoutFile() {
     '',
   ].join('\n')
 
-  const runs = parseRunsFromLog(content)
+  const runs = parseRunsFromLog(content, { stdoutRoots: [join(dir, 'stdout')] })
   assert.equal(runs.length, 1)
   assert.equal(runs[0].type, 'FAILED')
   assertIncludes(runs[0].Failure, 'API Error: model fable not found', 'saved stdout failures should mark the formal row FAILED')
   assertIncludes(runFailureDetail(runs[0]), 'The process exited before writing a summary.', 'expanded failure detail should include saved stdout tail')
+}
+
+function testRunLogCannotHydrateArbitraryStdoutPath() {
+  const content = [
+    '# Child Project Run Log',
+    '',
+    '## Run 77 - 2026-07-04 - MUTATE',
+    '',
+    '**Done:** Codex completed but did not append a run summary.',
+    '**Output:** Full stdout saved to /etc/hostname',
+    '**Next move:** Keep stdout hydration inside trusted transcript roots.',
+    '',
+  ].join('\n')
+
+  const runs = parseRunsFromLog(content, { stdoutRoots: ['/tmp/pi-pulse-safe-stdout-only'] })
+  assert.equal(runs.length, 1)
+  assert.equal(runs[0].type, 'MUTATE')
+  assert.equal(runs[0]['Stdout tail'], undefined, 'untrusted stdout paths must not be read into run history')
+  assert.equal(
+    runHistorySummary(runs[0]),
+    'Codex completed but did not append a run summary.',
+    'untrusted stdout paths should not replace the run summary with local file contents'
+  )
 }
 
 function testProjectSummaryBeatsSyntheticNoSummaryDuplicate() {
@@ -1336,7 +1359,7 @@ function testPublicWriteSafetyAndLoopFusesAreWired() {
   const saveRun = fs.readFileSync(join(root, '..', '..', 'save-run.sh'), 'utf8')
 
   assertIncludes(server, "const HOST = process.env.PI_PULSE_HOST || process.env.HOST || '127.0.0.1'", 'Pi Pulse should bind loopback by default')
-  assertIncludes(server, "app.use('/api', requireTrustedWrite)", 'API writes should pass through a write guard')
+  assertIncludes(server, "app.use('/api', rejectGeneratedAppControlWrite, requireTrustedWrite)", 'API writes should reject generated app origins and pass through a write guard')
   assertIncludes(server, "code: 'WRITE_AUTH_REQUIRED'", 'write guard should return a machine-readable auth error')
   assertIncludes(server, 'PI_PULSE_ADMIN_TOKEN', 'write guard should support a shared admin token')
   assertIncludes(server, 'function isProxiedWrite', 'write guard should fail closed for Cloudflare/proxy writes without identity')
@@ -1357,8 +1380,14 @@ function testPublicWriteSafetyAndLoopFusesAreWired() {
   assertIncludes(saveRun, 'stdout from run {n}', 'stdout fallback should only use the requested run number')
   assert.ok(!saveRun.includes('mine "$LAB_DIR/memory/" 2>/dev/null || true'), 'MemPalace mining failures should not be suppressed with || true')
   assertIncludes(server, 'codexBypass: false', 'new incubators should not default to unsandboxed Codex bypass')
-  assertIncludes(server, 'status.codexBypass = status.codexBypass ?? false', 'runner switching should not re-enable Codex bypass by default')
+  assertIncludes(server, 'status.codexBypass = false', 'runner switching should not re-enable Codex bypass by default')
   assertIncludes(server, 'claudeBypass: false', 'new incubators should not default to Claude bypass')
+  assertIncludes(server, 'GLOBAL_RUN_LOCK_ACTIVE', 'runner launches should enforce a persistent global run lock')
+  assertIncludes(server, "script: join(LAB_ROOT, 'run-lab.sh')", 'core Claude runs should launch the repo-owned run-lab.sh')
+  assertIncludes(server, 'PERSISTED_BYPASS_DISABLED', 'persisted bypass flags should pause/clear autonomous schedules')
+  assertIncludes(server, 'generatedAppSecurityHeaders', 'generated app routes should receive restrictive security headers')
+  assertIncludes(server, 'APP_CONTROL_API_FORBIDDEN', 'generated app referers should not call control-plane writes')
+  assertIncludes(server, 'assertTrustedStatusPath', 'status files should be constrained to the trusted project root')
   assertIncludes(server, 'function clampScheduleInterval', 'schedule intervals should be clamped')
   assertIncludes(server, 'MAX_CONSECUTIVE_AUTONOMOUS_FAILS', 'scheduler should have a failure fuse')
   assertIncludes(server, 'AUTO_FAIL_FUSE', 'scheduler pause should be machine-readable')
@@ -1367,7 +1396,10 @@ function testPublicWriteSafetyAndLoopFusesAreWired() {
   assertIncludes(appEvidence, "summary.evidenceMode = 'unavailable'", 'browser infrastructure failures should be separated from product failures')
   assertIncludes(appEvidence, "summary.gate = 'NEEDS-EVIDENCE'", 'browser infrastructure failures should be needs-evidence, not fail')
   assertIncludes(codexRunner, "const evidenceUnavailable = mode === 'unavailable'", 'Codex runner should skip product repair prompts for unavailable evidence tooling')
+  assertIncludes(codexRunner, "process.env.PI_PULSE_SCHEDULED_RUN === '1'", 'scheduled Codex runs should ignore bypass mode')
+  assert.ok(!codexRunner.includes('find "$HOME/.codex/sessions"'), 'Codex runner should not delete global Codex session history')
   assertIncludes(claudeRunner, "const evidenceUnavailable = mode === 'unavailable'", 'Claude runner should skip product repair prompts for unavailable evidence tooling')
+  assertIncludes(claudeRunner, "process.env.PI_PULSE_SCHEDULED_RUN === '1'", 'scheduled Claude runs should ignore bypass mode')
   assertIncludes(viteConfig, "target: 'http://127.0.0.1:8089'", 'Vite dev proxy should point at the actual Pi Pulse server')
 }
 
@@ -1414,7 +1446,7 @@ function testDependencyErrorPackageNamesDoNotCreateFailedRows() {
     '**Next move:** Ask the next run to append a concise summary to reports/RUN_LOG.md.',
   ].join('\n')
 
-  const runs = parseRunsFromLog(log)
+  const runs = parseRunsFromLog(log, { stdoutRoots: [dir] })
   assert.equal(runs.length, 1)
   assert.equal(runs[0].type, 'MUTATE')
   assert.ok(!runs[0].Failure, 'dependency package names must not become failure summaries')
@@ -1456,6 +1488,7 @@ const tests = [
   testFormalRowsHydrateSavedStdoutFile,
   testFormalRowsHydrateStdoutPathFromExcerpt,
   testFormalRowsFailFromSavedStdoutFile,
+  testRunLogCannotHydrateArbitraryStdoutPath,
   testDependencyErrorPackageNamesDoNotCreateFailedRows,
   testProjectSummaryBeatsSyntheticNoSummaryDuplicate,
   testFormalFailedRowsExposeAllDiagnostics,

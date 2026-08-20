@@ -44,7 +44,7 @@ PROMPT_DIR=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync
 RECENT_FILE=$(node -e "const fs=require('fs'); const path=require('path'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.recentRuns || path.join(path.dirname(o.runLog), 'RECENT_RUNS.md'))" "$STATUS_PATH")
 FEEDBACK_FILE=$(node -e "const fs=require('fs'); const path=require('path'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.feedbackPath || path.join(o.repo, 'reports', 'USER_FEEDBACK.md'))" "$STATUS_PATH")
 CODEX_MODEL=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.codexModel || process.env.CODEX_MODEL || '')" "$STATUS_PATH")
-CODEX_BYPASS=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.codexBypass || process.env.CODEX_BYPASS === '1' ? '1' : '')" "$STATUS_PATH")
+CODEX_BYPASS=$(node -e "if (process.env.PI_PULSE_SCHEDULED_RUN === '1') { console.log(''); process.exit(0) } console.log(process.env.CODEX_BYPASS === '1' ? '1' : '')")
 INCUBATOR_ROLE=$(node -e "const fs=require('fs'); const o=JSON.parse(fs.readFileSync(process.argv[1], 'utf8')); console.log(o.incubatorRole || o.role || '')" "$STATUS_PATH")
 GLOBAL_LEARNING_LOG=${GLOBAL_LEARNING_LOG:-$LAB_DIR/INCUBATOR_LEARNINGS.md}
 BENCHMARK_SUITE_FILE=${BENCHMARK_SUITE_FILE:-$LAB_DIR/BENCHMARK_SUITE.md}
@@ -296,9 +296,8 @@ printf '%s\n' "$OUTPUT" > "$STDOUT_FILE"
 # card otherwise. Newest 10 stay readable, older ones gzip, cap at 200 files.
 ls -t "$STDOUT_DIR"/*-run-*.log 2>/dev/null | tail -n +11 | xargs -r gzip -f 2>/dev/null || true
 ls -t "$STDOUT_DIR" 2>/dev/null | tail -n +201 | while read -r old; do rm -f "$STDOUT_DIR/$old"; done
-# Codex CLI also writes a full session rollout per run under ~/.codex/sessions.
-find "$HOME/.codex/sessions" -type f -mtime +14 -delete 2>/dev/null || true
-find "$HOME/.codex/sessions" -type d -empty -delete 2>/dev/null || true
+# Do not prune ~/.codex/sessions here. That is global user-owned Codex history,
+# not a Pi Pulse project cache. Pi Pulse only manages transcripts under reports/stdout.
 
 if [ "$CODEX_EXIT" -ne 0 ]; then
   FAILURE_DETAIL=$(printf '%s\n' "$OUTPUT" | sed '/^[[:space:]]*$/d' | tail -n 3 | tr '\n' ' ' | cut -c1-260)

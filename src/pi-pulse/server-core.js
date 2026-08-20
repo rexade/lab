@@ -1,6 +1,6 @@
 import fs from 'fs'
 import { execSync } from 'child_process'
-import { dirname, join } from 'path'
+import { dirname, join, resolve, relative, isAbsolute } from 'path'
 
 export const INVALID_CLAUDE_MODELS = new Set(['fable', 'claude-sonnet-4-20250514'])
 export const SAFE_CLAUDE_MODEL = 'sonnet'
@@ -232,17 +232,21 @@ export function appendFailedPreflightEntry({ runLogPath, preflight, num, source 
   try { fs.appendFileSync(runLogPath, block) } catch { /* log dir may not exist */ }
 }
 
+function isStdoutPathOnly(value = '') {
+  return /^Full stdout saved to\s+\S+\s*$/i.test(String(value || '').trim())
+}
+
 export function summarizeRun(run) {
-  if (/^(Claude|Codex) completed but did not append a run summary\.$/.test(run.Done || '') && run['Output excerpt']) {
+  const syntheticDone = /^(Claude|Codex) completed but did not append a run summary\.$/.test(run.Done || '')
+  if (syntheticDone && run['Output excerpt'] && !isStdoutPathOnly(run['Output excerpt'])) {
     return run['Output excerpt']
   }
-  const skipSyntheticDone = /^(Claude|Codex) completed but did not append a run summary\.$/.test(run.Done || '')
-  const done = skipSyntheticDone ? '' : run.Done
+  const done = syntheticDone ? '' : run.Done
   return run['Failure'] || run['Error'] || run['Goal'] || done ||
     run['What I investigated'] || run['Investigated'] || run['What I built'] ||
     run['What I changed'] || run['What changed'] || run['What improved'] || run['What I found'] ||
-    run['Finding'] || run['Key finding'] || run['Output excerpt'] || run['Stdout tail'] ||
-    run.Output || run['Suggested next move'] || run['Next move'] || ''
+    run['Finding'] || run['Key finding'] || (!isStdoutPathOnly(run['Output excerpt']) ? run['Output excerpt'] : '') || run['Stdout tail'] ||
+    (!isStdoutPathOnly(run.Output) ? run.Output : '') || run['Suggested next move'] || run['Next move'] || run.Done || ''
 }
 
 export function normalizeQualityGate(value = '') {
@@ -413,7 +417,45 @@ function stdoutPathFromOutputField(value = '') {
   return filePath.startsWith('/') ? filePath : null
 }
 
-function hydrateFormalStdoutFields(fields) {
+function pathInside(targetPath, rootPath) {
+  if (!targetPath || !rootPath) return false
+  const target = resolve(String(targetPath))
+  const root = resolve(String(rootPath))
+  const rel = relative(root, target)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+}
+
+function safeStdoutRoots(roots = []) {
+  const out = []
+  for (const root of roots || []) {
+    if (!root) continue
+    try { out.push(fs.realpathSync(root)) } catch { out.push(resolve(String(root))) }
+  }
+  return out
+}
+
+function readTrustedStdoutTail(stdoutPath, { stdoutRoots = [], stdoutMaxBytes = 64 * 1024 } = {}) {
+  const roots = safeStdoutRoots(stdoutRoots)
+  if (!roots.length) return null
+  const lstat = fs.lstatSync(stdoutPath)
+  if (!lstat.isFile() || lstat.isSymbolicLink()) return null
+  const realPath = fs.realpathSync(stdoutPath)
+  if (!roots.some(root => pathInside(realPath, root))) return null
+  const stat = fs.statSync(realPath)
+  if (!stat.isFile()) return null
+  const maxBytes = Math.max(1024, Math.min(256 * 1024, Number(stdoutMaxBytes) || 64 * 1024))
+  if (stat.size <= maxBytes) return fs.readFileSync(realPath, 'utf8')
+  const fd = fs.openSync(realPath, 'r')
+  try {
+    const buffer = Buffer.alloc(maxBytes)
+    fs.readSync(fd, buffer, 0, maxBytes, stat.size - maxBytes)
+    return buffer.toString('utf8')
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+function hydrateFormalStdoutFields(fields, options = {}) {
   const stdoutPath = [
     fields.Output,
     fields['Output excerpt'],
@@ -423,7 +465,9 @@ function hydrateFormalStdoutFields(fields) {
   if (!stdoutPath) return fields
 
   try {
-    const lines = meaningfulStdoutLines(fs.readFileSync(stdoutPath, 'utf8'))
+    const stdoutText = readTrustedStdoutTail(stdoutPath, options)
+    if (!stdoutText) return fields
+    const lines = meaningfulStdoutLines(stdoutText)
     if (!lines.length) return fields
 
     const failureSignal = firstFailureSignalLine(lines)
@@ -500,7 +544,7 @@ function parseStdoutRunBlocks(content, runs, { legacyOffset = false } = {}) {
   }
 }
 
-function parseFormalRunBlocks(content) {
+function parseFormalRunBlocks(content, options = {}) {
   const runs = []
   const formalContent = content.replace(
     /^\s*<!--\s*stdout from [^>]*-->[\s\S]*?(?=^\s*<!--\s*stdout from |^\s*## Run \d|$(?![\s\S]))/gm,
@@ -523,7 +567,7 @@ function parseFormalRunBlocks(content) {
       const m = line.match(/^\*\*(.+?):\*\*\s*(.+)/)
       if (m) fields[m[1]] = m[2]
     }
-    hydrateFormalStdoutFields(fields)
+    hydrateFormalStdoutFields(fields, options)
     const failureSignal = type === 'FAILED'
       ? ''
       : firstFailureSignalLine([
@@ -597,7 +641,7 @@ function dedupeCopiedRuns(runs) {
 }
 
 export function parseRunsFromLog(content, options = {}) {
-  const runs = parseFormalRunBlocks(content)
+  const runs = parseFormalRunBlocks(content, options)
   parseStdoutRunBlocks(content, runs, options)
   const sortedRuns = runs.sort((a, b) => (a._order ?? 0) - (b._order ?? 0))
   return annotateRunAttempts(dedupeCopiedRuns(dropSyntheticNoSummaryDuplicates(sortedRuns))).map(publicRun)
