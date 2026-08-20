@@ -2,7 +2,7 @@ import express from 'express'
 import fs from 'fs'
 import os from 'os'
 import { createHash } from 'crypto'
-import { spawn, execSync } from 'child_process'
+import { spawn, execFile, execSync } from 'child_process'
 import { fileURLToPath } from 'url'
 import { basename, dirname, join, resolve } from 'path'
 import {
@@ -137,7 +137,7 @@ function hasTrustedWriteIdentity(req) {
     const supplied = req.get('x-pi-pulse-admin-token') || bearerToken(req)
     if (supplied === WRITE_AUTH_TOKEN) return true
   }
-  if (hasCloudflareAccessIdentity(req)) return true
+  if (TRUST_CLOUDFLARE_ACCESS && hasCloudflareAccessIdentity(req)) return true
   if (TRUST_CLOUDFLARE_ACCESS) return false
   return !REQUIRE_WRITE_AUTH && !isProxiedWrite(req)
 }
@@ -2320,7 +2320,7 @@ app.post('/api/child/ai/analyze', requireFreshSource, async (req, res) => {
   if (!LOCAL_LLM_ENABLED) return res.status(503).json(localLlmDisabledPayload('child'))
   try {
     // Use MemPalace semantic search for compact context
-    const palaceCtx = queryMemPalace(`${mountedProject.name} seed direction active threads`, { wing: 'lab', results: 3, maxChars: 600 })
+    const palaceCtx = await queryMemPalace(`${mountedProject.name} seed direction active threads`, { wing: 'lab', results: 3, maxChars: 600 })
     let recentLog = ''
     try { recentLog = fs.readFileSync(CHILD_LOG_PATH, 'utf8').slice(-400) } catch {}
 
@@ -2456,7 +2456,7 @@ app.post('/api/incubators/:id/ai/analyze', requireFreshSource, async (req, res) 
   if (!target) return res.status(404).json({ ok: false, error: 'incubator not found' })
   if (!LOCAL_LLM_ENABLED) return res.status(503).json(localLlmDisabledPayload('incubator'))
   try {
-    const palaceCtx = queryMemPalace(target.query, { wing: 'lab', results: 3, maxChars: 600 })
+    const palaceCtx = await queryMemPalace(target.query, { wing: 'lab', results: 3, maxChars: 600 })
     let recentLog = ''
     try { recentLog = fs.readFileSync(target.runLog, 'utf8').slice(-400) } catch {}
 
@@ -2531,29 +2531,46 @@ function localLlmStatusPayload() {
 }
 
 // MemPalace semantic search — returns relevant context snippets (~100-600 chars)
-// instead of dumping raw files into every prompt
-function queryMemPalace(query, { wing = '', results = 3, maxChars = 600 } = {}) {
+// instead of dumping raw files into every prompt. Keep it async and argument-array
+// based so project text cannot become shell syntax, and so a slow palace query
+// does not block the whole Pi Pulse event loop.
+function execFileText(command, args, options = {}) {
+  return new Promise((resolvePromise, reject) => {
+    execFile(command, args, { encoding: 'utf8', ...options }, (err, stdout, stderr) => {
+      if (err) {
+        err.stderr = stderr
+        reject(err)
+        return
+      }
+      resolvePromise(stdout)
+    })
+  })
+}
+
+async function queryMemPalace(query, { wing = '', results = 3, maxChars = 600 } = {}) {
   try {
-    const wingFlag = wing ? `--wing ${wing}` : ''
-    const raw = execSync(
-      `/home/admin/.local/bin/mempalace search ${JSON.stringify(query)} --results ${results} ${wingFlag} 2>/dev/null`,
-      { timeout: 10000, encoding: 'utf8', env: { ...process.env, HOME: '/home/admin' } }
-    )
+    const count = Math.max(1, Math.min(10, Number(results) || 3))
+    const args = ['search', String(query || ''), '--results', String(count)]
+    if (wing) args.push('--wing', String(wing))
+    const raw = await execFileText('/home/admin/.local/bin/mempalace', args, {
+      timeout: 10000,
+      env: { ...process.env, HOME: '/home/admin' },
+    })
     // Strip ANSI codes and extract only content lines (skip headers/metadata/separators)
     const clean = raw.replace(/\x1b\[[0-9;]*[mGKH]/g, '')
     const out = []
     let afterMatch = false
     for (const line of clean.split('\n')) {
       const t = line.trim()
-      if (/^={5,}/.test(t) || /^─{5,}/.test(t)) { afterMatch = false; continue }
+      if (/^={5,}/.test(t) || /^-{5,}/.test(t)) { afterMatch = false; continue }
       if (!t || /^Results for:/.test(t)) continue
       if (/^\[\d+\]\s+\w/.test(t) || /^Source:/.test(t)) { afterMatch = false; continue }
       if (/^Match:/.test(t)) { afterMatch = true; continue }
       if (afterMatch) out.push(line)
     }
     return out.join('\n').trim().slice(0, maxChars)
-  } catch {
-    return ''
+  } catch (err) {
+    return `[memory unavailable: ${String(err.message || err).slice(0, 160)}]`
   }
 }
 
@@ -2573,7 +2590,7 @@ app.post('/api/ai/analyze', requireFreshSource, async (req, res) => {
   if (!LOCAL_LLM_ENABLED) return res.status(503).json(localLlmDisabledPayload('core'))
   try {
     // Use MemPalace semantic search for compact context instead of raw file dumps
-    const palaceCtx = queryMemPalace('pi-pulse seed direction current state active threads', { wing: 'lab', results: 3, maxChars: 600 })
+    const palaceCtx = await queryMemPalace('pi-pulse seed direction current state active threads', { wing: 'lab', results: 3, maxChars: 600 })
     let recentLog = ''
     try { recentLog = fs.readFileSync(RUN_LOG_PATH, 'utf8').slice(-400) } catch {}
 

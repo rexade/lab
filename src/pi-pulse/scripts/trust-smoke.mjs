@@ -220,6 +220,7 @@ echo fake codex launcher
       PI_PULSE_INCUBATORS_PATH: join(projectsDir, 'incubators.json'),
       PI_PULSE_CHILD_SCHEDULE_PATH: join(projectsDir, 'schedule.json'),
       PI_PULSE_SOURCE_HEALTH_FILES: sourceProbe,
+      PI_PULSE_ADMIN_TOKEN: 'smoke-token',
       CLAUDE_BIN: join(binDir, 'claude'),
       PATH: `${binDir}:${process.env.PATH || ''}`,
     },
@@ -297,6 +298,7 @@ async function main() {
 
   try {
     await waitForHealth(baseUrl, child, output)
+    const writeHeaders = { 'Content-Type': 'application/json', 'X-Pi-Pulse-Admin-Token': 'smoke-token' }
 
     const health = await fetchJson(baseUrl, '/api/health')
     assert.equal(health.data.ok, true)
@@ -354,9 +356,21 @@ async function main() {
     const stalePreflight = await fetchJson(baseUrl, '/api/incubators/stale-claude-slot/preflight')
     assert.equal(stalePreflight.data.ok, true, 'repaired half-switched Claude slot should pass generic preflight with fake claude')
 
+    const fakeCfWrite = await fetchJson(baseUrl, '/api/incubators/fresh-slot/runner', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': '203.0.113.10',
+        'Cf-Access-Authenticated-User-Email': 'fake@example.com',
+      },
+      body: JSON.stringify({ runner: 'claude' }),
+    })
+    assert.equal(fakeCfWrite.response.status, 401, 'fake Cloudflare Access headers should not grant write access by default')
+    assert.equal(fakeCfWrite.data.code, 'WRITE_AUTH_REQUIRED')
+
     const switched = await fetchJson(baseUrl, '/api/incubators/fresh-slot/runner', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: writeHeaders,
       body: JSON.stringify({ runner: 'claude' }),
     })
     assert.equal(switched.response.status, 200)
@@ -390,7 +404,7 @@ async function main() {
 
     const blockedSwitch = await fetchJson(baseUrl, '/api/incubators/blocked-claude-slot/runner', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: writeHeaders,
       body: JSON.stringify({ runner: 'claude' }),
     })
     assert.equal(blockedSwitch.response.status, 200)
@@ -405,7 +419,7 @@ async function main() {
     assert.match(blockedRun.Failure || '', /runner switch preflight/, 'blocked switch history should identify the relay switch preflight')
     assert.match(blockedRun.detail || '', /prompt directory: not a dir/, 'blocked switch history should expose the invalid prompt detail')
 
-    const launched = await fetchJson(baseUrl, '/api/incubators/fresh-slot/run', { method: 'POST' })
+    const launched = await fetchJson(baseUrl, '/api/incubators/fresh-slot/run', { method: 'POST', headers: writeHeaders })
     assert.equal(launched.response.status, 200)
     assert.equal(launched.data.ok, true)
     assert.equal(launched.data.runner, 'claude')
@@ -447,7 +461,7 @@ async function main() {
 
     const blockedSchedule = await fetchJson(baseUrl, '/api/incubators/fresh-slot/schedule', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: writeHeaders,
       body: JSON.stringify({ enabled: true, intervalHours: 0.5 }),
     })
     assert.equal(blockedSchedule.response.status, 409, 'stale source should block incubator schedule writes')

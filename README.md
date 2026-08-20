@@ -184,6 +184,10 @@ mempalace mine memory/                 # re-mine structured notes into palace
 
 The pi-pulse server calls `mempalace search` from Node for AI-analysis context. Do not remove the CLI.
 
+MemPalace is a derived historical index, not the authority for current state. Runners should trust `status.json`, recent run records, seeds, feedback files, and test results first. `generate-brief.sh` writes an explicit `memory unavailable` brief when retrieval fails, and `save-run.sh` publishes `memory/index-health.json` so Pi Pulse can see the latest log run, latest saved memory run, mining exit code, and memory lag.
+
+Do not switch `.mcp.json` to `mempalace-mcp` until that executable exists on the Pi or MemPalace has been upgraded through the chosen installer. The current local CLI is `/home/admin/.local/bin/mempalace`.
+
 ---
 
 ## The project mount system

@@ -1,0 +1,16 @@
+{
+  "status": "healthy",
+  "latestRunLogRun": 191,
+  "latestMemoryRun": 191,
+  "lastIndexedRun": 191,
+  "lastAttemptedRun": 191,
+  "lastSavedRun": 191,
+  "lastMineExitCode": 0,
+  "memoryLag": 0,
+  "indexedAt": "2026-08-20T18:58:30Z",
+  "updatedAt": "2026-08-20T18:58:30.175296Z",
+  "mempalaceVersion": "unavailable: usage: mempalace [-h] [--palace PALACE]                  {init,mine,search,compress,wake-up,split,status} ... mempalace: error: unrecognized arguments: --version",
+  "source": "save-run.sh",
+  "lastMineOutput": "\u001b[0;93m2026-08-20 20:56:06.650275327 [W:onnxruntime:Default, device_discovery.cc:325 DiscoverDevicesForPlatform] GPU device discovery failed: device_discovery.cc:92 ReadFileContents Failed to open file: \"/sys/class/drm/card1/device/vendor\"\u001b[m\n\n=======================================================\n  MemPalace Mine\n=======================================================\n  Wing:    lab\n  Rooms:   identity, decisions, failures, runs\n  Files:   185\n  Palace:  /home/admin/.mempalace/palace\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+  "lastError": ""
+}
