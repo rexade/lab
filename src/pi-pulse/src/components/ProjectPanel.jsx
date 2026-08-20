@@ -55,6 +55,8 @@ function fmtScheduleTime(ts) {
 
 function latestScheduleBlock(schedule = {}) {
   if (!schedule) return null
+  const pausedAt = timeValue(schedule.schedulePausedAt)
+  if (pausedAt) return schedule.schedulePausedAt
   const blockedAt = timeValue(schedule.lastScheduleBlockedAt)
   if (!blockedAt) return null
   const lastSuccess = timeValue(schedule.lastScheduledRun)

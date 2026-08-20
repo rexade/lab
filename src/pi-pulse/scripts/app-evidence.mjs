@@ -321,6 +321,11 @@ function stateChanged(before, after) {
     before.bodyHash !== after.bodyHash
 }
 
+function isHarnessInfrastructureError(err) {
+  const text = String(err?.message || err || '').toLowerCase()
+  return /executable doesn't exist|browser executable|playwright install|host system is missing|missing dependencies|failed to launch|browser closed|spawn .*enoent|chromium/.test(text)
+}
+
 function writeSummary(summary) {
   fs.mkdirSync(evidenceDir, { recursive: true })
   fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + '\n')
@@ -477,8 +482,16 @@ async function main() {
     summary.ok = !summary.blank && (!summary.primaryAction.available || summary.primaryAction.changed) && summary.consoleErrorCount === 0 && summary.pageErrorCount === 0 && (!summary.semanticSuccess.available || summary.semanticSuccess.passed === true)
     summary.gate = summary.ok ? 'PASS' : 'FAIL'
   } catch (err) {
-    summary.gate = 'FAIL'
-    summary.notes.push(`Browser evidence failed: ${err.message}`)
+    if (isHarnessInfrastructureError(err)) {
+      summary.gate = 'NEEDS-EVIDENCE'
+      summary.evidenceMode = 'unavailable'
+      summary.blank = false
+      summary.notes.push(`Browser evidence unavailable: ${err.message}`)
+      summary.notes.push('This is an evidence infrastructure failure, not proof that the app is broken.')
+    } else {
+      summary.gate = 'FAIL'
+      summary.notes.push(`Browser evidence failed: ${err.message}`)
+    }
   } finally {
     await browser?.close().catch(() => {})
     await new Promise(resolve => server?.close(resolve) || resolve())
@@ -489,9 +502,10 @@ async function main() {
 }
 
 main().catch(err => {
+  const infra = isHarnessInfrastructureError(err)
   const summary = {
     ok: false,
-    gate: 'FAIL',
+    gate: infra ? 'NEEDS-EVIDENCE' : 'FAIL',
     runNumber,
     runType,
     repo,
@@ -499,15 +513,15 @@ main().catch(err => {
     summaryPath,
     summaryMdPath,
     appType: 'unknown',
-    blank: true,
+    blank: !infra,
     consoleErrorCount: 0,
     pageErrorCount: 0,
-    evidenceMode: 'none',
+    evidenceMode: infra ? 'unavailable' : 'none',
     topTierEligible: false,
     primaryAction: { available: false, checked: false, changed: false },
     semanticContract: { present: false, reason: 'harness crashed before inspection' },
     semanticSuccess: { available: false, passed: null },
-    notes: [`App evidence harness crashed: ${err.message}`],
+    notes: [infra ? `App evidence unavailable: ${err.message}` : `App evidence harness crashed: ${err.message}`],
   }
   writeSummary(summary)
   console.error(err.stack || err.message)

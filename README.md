@@ -16,7 +16,7 @@ A Raspberry Pi 5 (`testpi`) running a self-directed creative lab. **Its purpose 
 
 Two layers, don't conflate them:
 
-- **The workshop** — this repo. `src/pi-pulse/` (a Node+React dashboard at `localhost:8089`, public via Cloudflare Tunnel at `home.rexthedog.space` and `pipulse.rexthedog.space`) makes the loop visible and steerable. `run-lab.sh` is the loop. MemPalace + the markdown files (`DAILY_SEED.md`, `TASTE_PROFILE.md`, `RUN_LOG.md`, `ACTIVE_THREADS.md`, etc.) give the loop continuity across turns. Optimize this layer for **signal, not features** — every widget you add is scaffolding you'll have to maintain instead of ship.
+- **The workshop** — this repo. `src/pi-pulse/` (a Node+React dashboard bound to `127.0.0.1:8089` by default, reachable externally only through Cloudflare Tunnel hostnames `home.rexthedog.space` / `pipulse.rexthedog.space` when Cloudflare Access or an equivalent write guard is configured) makes the loop visible and steerable. `run-lab.sh` is the loop. MemPalace + the markdown files (`DAILY_SEED.md`, `TASTE_PROFILE.md`, `RUN_LOG.md`, `ACTIVE_THREADS.md`, etc.) give the loop continuity across turns. Optimize this layer for **signal, not features** — every widget you add is scaffolding you'll have to maintain instead of ship.
 - **The products** — whatever gets mounted as a child project. Today: `race-whisperer-predict` (V85 horse-race analysis). Historically the ghost/whisper/oracle quartet, the narrator, and pi-pulse's own visual identity have all been shaped by this loop. Products live in their own repos with their own `run-<name>.sh` scripts; the workshop hosts them and drives the AI turns against them. Optimize this layer for **shippable creative output**.
 
 The workshop is not itself a product. But its whole reason to exist is to produce them.
@@ -97,7 +97,7 @@ lab/
 ├── TASTE_PROFILE.md             ← human, edited rarely
 ├── ACTIVE_THREADS.md            ← Claude rewrites end of each run
 ├── BACKLOG.md                   ← ideas parked for later
-├── RUN_LOG.md                   ← every run appended; 2600+ lines and growing
+├── RUN_LOG.md                   ← every run appended; large and growing; API reads it through a cached parser
 ├── MEMORY_BRIEF.md              ← regenerated each run (gitignored)
 ├── RECENT_RUNS.md               ← regenerated each run (gitignored)
 ├── DRIFT_FEEDBACK.md / .json    ← qwen critique output
@@ -162,6 +162,15 @@ cd /home/admin/lab/src/pi-pulse
 npm install       # node_modules is gitignored — first clone needs this
 npm run build     # emits dist/, server serves the new build on next request
 ```
+
+
+### Pi Pulse exposure and write safety
+
+Pi Pulse has write routes that can start runners, create incubators, remove slots, restart the service, and reboot the Pi. Do not expose port 8089 directly to the internet.
+
+Default server binding is `127.0.0.1`. Public access must go through Cloudflare Tunnel with Cloudflare Access enabled for the hostname, or through a comparable trusted edge. Write requests that arrive with Cloudflare/proxy headers are rejected unless they include a Cloudflare Access identity header or the app-side admin token. Set `PI_PULSE_ADMIN_TOKEN` and send it as `X-Pi-Pulse-Admin-Token` or `Authorization: Bearer ...` for an explicit shared-secret guard. Keep the app bound to loopback.
+
+New incubators no longer default to Codex/Claude bypass mode. Only set `codexBypass` or `claudeBypass` deliberately for trusted local experiments.
 
 ### MemPalace CLI
 

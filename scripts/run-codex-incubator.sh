@@ -203,7 +203,8 @@ try {
   const success = status.lastAppEvidenceSemanticSuccess || {}
   const summary = status.lastAppEvidenceSummary || ''
   const path = status.lastAppEvidencePath || ''
-  const applies = gate && (gate !== 'PASS' || mode === 'degraded' || !topTier)
+  const evidenceUnavailable = mode === 'unavailable'
+  const applies = gate && !evidenceUnavailable && (gate !== 'PASS' || mode === 'degraded' || !topTier)
   if (!applies) process.exit(0)
 
   const lines = [

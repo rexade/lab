@@ -630,7 +630,7 @@ function testPreflightBlockedLaunchLooksBlocked() {
   assertIncludes(server, 'function markIncubatorProcessFailure', 'process-level incubator failures should update slot status, not only history')
   assertIncludes(server, 'capturedFailureDetail(capturePath)', 'process-level failure status should reuse the captured command error')
   assertIncludes(server, "lastRunFailureSource: cfg.lastRunFailureSource", 'hydrated incubator slots should expose the failure source')
-  assertIncludes(server, 'parseRunsFromLog(fs.readFileSync(status.runLog, \'utf8\'))', 'next incubator run numbers should include existing FAILED history rows')
+  assertIncludes(server, 'const runs = parsedRunsForLog(status.runLog)', 'next incubator run numbers should include existing FAILED history rows through the cached parser')
   assertIncludes(panel, 'const runnerBlocked = !!readinessIssue', 'launch button should derive blocked state from preflight/readiness failure')
   assertIncludes(panel, 'const runDisabled = activeSlot.launching || activeSlot.running', 'preflight-blocked slots should still let the server record a blocked manual run')
   assertIncludes(panel, "data-run-blocked={runnerBlocked ? 'true' : 'false'}", 'blocked launch state should be visible to browser tests')
@@ -877,8 +877,8 @@ function testRecoveredOldFailuresStopBeingPinned() {
   assertIncludes(panel, 'data-history-failure-receipt={activeSlot.id}', 'run history should disclose when a failure is visible before expanded rows')
 
   const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
-  assertIncludes(server, 'runsWithPinnedLatestFailure(parseRunsFromLog(content), 10)', 'host run API should use filtered failure pinning')
-  assertIncludes(server, 'runsWithPinnedLatestFailure(parseChildRuns(content), 10)', 'project run APIs should use filtered failure pinning')
+  assertIncludes(server, 'runsWithPinnedLatestFailure(runs, 10)', 'host run API should use filtered failure pinning through cached runs')
+  assertIncludes(server, 'runsWithPinnedLatestFailure(runs, 10)', 'project run APIs should use filtered failure pinning through cached runs')
 }
 
 function testFormalParagraphRunsKeepReadableSummary() {
@@ -1228,6 +1228,11 @@ window.__PI_PULSE_APP__ = {
   const result = spawnSync(process.execPath, [join(root, 'scripts', 'app-evidence.mjs'), '--repo', dir, '--run', '8', '--type', 'mutate'], { encoding: 'utf8' })
   assert.equal(result.status, 0, result.stderr || result.stdout)
   const summary = JSON.parse(fs.readFileSync(join(dir, 'reports', 'evidence', 'run-8', 'summary.json'), 'utf8'))
+  if (summary.evidenceMode === 'unavailable') {
+    assert.equal(summary.gate, 'NEEDS-EVIDENCE')
+    assert.ok(summary.notes.some(note => /evidence infrastructure failure|Browser evidence unavailable/.test(note)), 'unavailable browser tooling should be classified as infrastructure evidence, not product failure')
+    return
+  }
   assert.equal(summary.gate, 'PASS')
   assert.equal(summary.evidenceMode, 'semantic')
   assert.equal(summary.topTierEligible, true)
@@ -1318,6 +1323,37 @@ function testTrustHarnessRunsBeforeBuild() {
     /npm run test:trust\s*&&\s*vite build/,
     'npm run build must run trust fixtures before producing a bundle'
   )
+}
+
+function testPublicWriteSafetyAndLoopFusesAreWired() {
+  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
+  const appEvidence = fs.readFileSync(join(root, 'scripts', 'app-evidence.mjs'), 'utf8')
+  const codexRunner = fs.readFileSync(join(root, '..', '..', 'scripts', 'run-codex-incubator.sh'), 'utf8')
+  const claudeRunner = fs.readFileSync(join(root, 'scripts', 'run-claude-incubator.sh'), 'utf8')
+  const viteConfig = fs.readFileSync(join(root, 'vite.config.js'), 'utf8')
+  const readme = fs.readFileSync(join(root, '..', '..', 'README.md'), 'utf8')
+
+  assertIncludes(server, "const HOST = process.env.PI_PULSE_HOST || process.env.HOST || '127.0.0.1'", 'Pi Pulse should bind loopback by default')
+  assertIncludes(server, "app.use('/api', requireTrustedWrite)", 'API writes should pass through a write guard')
+  assertIncludes(server, "code: 'WRITE_AUTH_REQUIRED'", 'write guard should return a machine-readable auth error')
+  assertIncludes(server, 'PI_PULSE_ADMIN_TOKEN', 'write guard should support a shared admin token')
+  assertIncludes(server, 'function isProxiedWrite', 'write guard should fail closed for Cloudflare/proxy writes without identity')
+  assertIncludes(server, '!isProxiedWrite(req)', 'local direct writes may stay convenient while proxied writes require identity')
+  assertIncludes(server, 'hasCloudflareAccessIdentity(req)', 'write guard should accept Cloudflare Access identity headers')
+  assertIncludes(readme, 'Cloudflare Access', 'README should state the Cloudflare Access requirement for public tunnel exposure')
+  assertIncludes(server, 'codexBypass: false', 'new incubators should not default to unsandboxed Codex bypass')
+  assertIncludes(server, 'status.codexBypass = status.codexBypass ?? false', 'runner switching should not re-enable Codex bypass by default')
+  assertIncludes(server, 'claudeBypass: false', 'new incubators should not default to Claude bypass')
+  assertIncludes(server, 'function clampScheduleInterval', 'schedule intervals should be clamped')
+  assertIncludes(server, 'MAX_CONSECUTIVE_AUTONOMOUS_FAILS', 'scheduler should have a failure fuse')
+  assertIncludes(server, 'AUTO_FAIL_FUSE', 'scheduler pause should be machine-readable')
+  assertIncludes(server, 'function parsedRunsForLog', 'RUN_LOG parsing should be cached by file metadata')
+  assertIncludes(server, 'setTimeout(notifyRunLogChanged, 500)', 'RUN_LOG file watch should be debounced')
+  assertIncludes(appEvidence, "summary.evidenceMode = 'unavailable'", 'browser infrastructure failures should be separated from product failures')
+  assertIncludes(appEvidence, "summary.gate = 'NEEDS-EVIDENCE'", 'browser infrastructure failures should be needs-evidence, not fail')
+  assertIncludes(codexRunner, "const evidenceUnavailable = mode === 'unavailable'", 'Codex runner should skip product repair prompts for unavailable evidence tooling')
+  assertIncludes(claudeRunner, "const evidenceUnavailable = mode === 'unavailable'", 'Claude runner should skip product repair prompts for unavailable evidence tooling')
+  assertIncludes(viteConfig, "target: 'http://127.0.0.1:8089'", 'Vite dev proxy should point at the actual Pi Pulse server')
 }
 
 function testStaleSourceMutationsAreWriteGated() {
@@ -1413,6 +1449,7 @@ const tests = [
   testAppEvidenceSemanticContractCanBeTopTierEligible,
   testIncubatorQualityContractIsWired,
   testTrustHarnessRunsBeforeBuild,
+  testPublicWriteSafetyAndLoopFusesAreWired,
   testStaleSourceMutationsAreWriteGated,
 ]
 

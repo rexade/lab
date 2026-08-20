@@ -27,8 +27,16 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
 const PORT = Number(process.env.PORT || 8089)
+const HOST = process.env.PI_PULSE_HOST || process.env.HOST || '127.0.0.1'
 const SERVER_STARTED_AT = Date.now()
 const SCHEDULES_ENABLED = process.env.PI_PULSE_DISABLE_SCHEDULES !== '1'
+const WRITE_AUTH_TOKEN = process.env.PI_PULSE_ADMIN_TOKEN || ''
+const TRUST_CLOUDFLARE_ACCESS = process.env.PI_PULSE_TRUST_CF_ACCESS === '1'
+const PROXY_WRITE_HEADER_NAMES = ['cf-connecting-ip', 'x-forwarded-for', 'cf-ray']
+const REQUIRE_WRITE_AUTH = process.env.PI_PULSE_REQUIRE_WRITE_AUTH === '1' || !!WRITE_AUTH_TOKEN || TRUST_CLOUDFLARE_ACCESS
+const MIN_SCHEDULE_INTERVAL_HOURS = Number(process.env.PI_PULSE_MIN_SCHEDULE_INTERVAL_HOURS || 0.25)
+const MAX_SCHEDULE_INTERVAL_HOURS = Number(process.env.PI_PULSE_MAX_SCHEDULE_INTERVAL_HOURS || 24)
+const MAX_CONSECUTIVE_AUTONOMOUS_FAILS = Number(process.env.PI_PULSE_MAX_CONSECUTIVE_AUTONOMOUS_FAILS || 5)
 const LAB_ROOT = process.env.PI_PULSE_LAB_ROOT || '/home/admin/lab'
 const PROJECTS_DIR = process.env.PI_PULSE_PROJECTS_DIR || join(LAB_ROOT, 'projects')
 const RUN_LOG_PATH = process.env.PI_PULSE_RUN_LOG_PATH || join(LAB_ROOT, 'RUN_LOG.md')
@@ -110,6 +118,46 @@ function requireFreshSource(req, res, next) {
   })
 }
 
+function bearerToken(req) {
+  const auth = String(req.get('authorization') || '')
+  const match = auth.match(/^Bearer\s+(.+)$/i)
+  return match ? match[1].trim() : ''
+}
+
+function hasCloudflareAccessIdentity(req) {
+  return Boolean(req.get('cf-access-authenticated-user-email') || req.get('cf-access-jwt-assertion'))
+}
+
+function isProxiedWrite(req) {
+  return PROXY_WRITE_HEADER_NAMES.some(name => req.get(name))
+}
+
+function hasTrustedWriteIdentity(req) {
+  if (WRITE_AUTH_TOKEN) {
+    const supplied = req.get('x-pi-pulse-admin-token') || bearerToken(req)
+    if (supplied === WRITE_AUTH_TOKEN) return true
+  }
+  if (hasCloudflareAccessIdentity(req)) return true
+  if (TRUST_CLOUDFLARE_ACCESS) return false
+  return !REQUIRE_WRITE_AUTH && !isProxiedWrite(req)
+}
+
+function requireTrustedWrite(req, res, next) {
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next()
+  if (hasTrustedWriteIdentity(req)) return next()
+  return res.status(401).json({
+    ok: false,
+    code: 'WRITE_AUTH_REQUIRED',
+    error: 'write routes require Cloudflare Access identity or PI_PULSE_ADMIN_TOKEN',
+  })
+}
+
+function clampScheduleInterval(value, fallback = 0.5) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback
+  return Math.min(MAX_SCHEDULE_INTERVAL_HOURS, Math.max(MIN_SCHEDULE_INTERVAL_HOURS, numeric))
+}
+
 // CPU usage calculation (requires two samples)
 let prevCpuTimes = null
 
@@ -141,6 +189,7 @@ try {
   const raw = fs.readFileSync(LAB_SCHEDULE_PATH, 'utf8')
   const loaded = JSON.parse(raw)
   labScheduleState = { ...labScheduleState, ...loaded }
+  labScheduleState.intervalHours = clampScheduleInterval(labScheduleState.intervalHours, 2)
   labScheduleState.runner = normalizeLabRunner(labScheduleState.runner)
   if (labScheduleState.enabled && labScheduleState.nextRunAt && labScheduleState.nextRunAt < Date.now()) {
     labScheduleState.nextRunAt = Date.now() + labScheduleState.intervalHours * 60 * 60 * 1000
@@ -240,7 +289,7 @@ function nextIncubatorRunNum(slot) {
     let latest = Number(status.runCount || 0)
     if (status.runLog) {
       try {
-        const runs = parseRunsFromLog(fs.readFileSync(status.runLog, 'utf8'))
+        const runs = parsedRunsForLog(status.runLog)
         latest = Math.max(latest, ...runs.map(run => Number(run.num || 0)))
       } catch {}
     }
@@ -514,6 +563,34 @@ function getDiskInfo() {
   }
 }
 
+
+const parsedRunLogCache = new Map()
+
+function parsedRunsForLog(filePath) {
+  const stat = fs.statSync(filePath)
+  const cached = parsedRunLogCache.get(filePath)
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.runs
+  const content = fs.readFileSync(filePath, 'utf8')
+  const runs = parseRunsFromLog(content)
+  parsedRunLogCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, runs })
+  return runs
+}
+
+function readLogContent(filePath, { maxBytes = 512 * 1024, full = false } = {}) {
+  const stat = fs.statSync(filePath)
+  if (full || stat.size <= maxBytes) {
+    return { content: fs.readFileSync(filePath, 'utf8'), truncated: false, bytes: stat.size }
+  }
+  const fd = fs.openSync(filePath, 'r')
+  try {
+    const buffer = Buffer.alloc(maxBytes)
+    fs.readSync(fd, buffer, 0, maxBytes, stat.size - maxBytes)
+    return { content: buffer.toString('utf8'), truncated: true, bytes: stat.size, tailBytes: maxBytes }
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
 function getNetworkRate() {
   try {
     const raw = fs.readFileSync('/proc/net/dev', 'utf8')
@@ -555,8 +632,7 @@ function getNetworkRate() {
 
 function syncProjectStatus() {
   try {
-    const content = fs.readFileSync(RUN_LOG_PATH, 'utf8')
-    const runs = parseRunsFromLog(content)
+    const runs = parsedRunsForLog(RUN_LOG_PATH)
     const latest = runs[runs.length - 1] ?? null
 
     let current = {}
@@ -591,6 +667,7 @@ readCpuTimes()
 syncProjectStatus()
 
 app.use(express.json({ limit: '1mb' }))
+app.use('/api', requireTrustedWrite)
 
 // Serve built frontend in production
 app.use(express.static(join(__dirname, 'dist')))
@@ -696,8 +773,8 @@ app.get('/api/stats', (req, res) => {
 
 app.get('/api/runs', (req, res) => {
   try {
-    const content = fs.readFileSync(RUN_LOG_PATH, 'utf8')
-    res.json(runsWithPinnedLatestFailure(parseRunsFromLog(content), 10))
+    const runs = parsedRunsForLog(RUN_LOG_PATH)
+    res.json(runsWithPinnedLatestFailure(runs, 10))
   } catch {
     res.json([])
   }
@@ -709,8 +786,8 @@ app.get('/api/run/preflight', (req, res) => {
 
 app.get('/api/logs', (req, res) => {
   try {
-    const content = fs.readFileSync(RUN_LOG_PATH, 'utf8')
-    res.json({ content })
+    const log = readLogContent(RUN_LOG_PATH, { full: req.query.full === '1' })
+    res.json(log)
   } catch {
     res.json({ content: '*(no log file found)*' })
   }
@@ -806,7 +883,7 @@ app.post('/api/lab/schedule', requireFreshSource, (req, res) => {
     labScheduleState.runner = requestedRunner
   }
   if (typeof enabled === 'boolean') labScheduleState.enabled = enabled
-  if (typeof intervalHours === 'number' && intervalHours > 0) labScheduleState.intervalHours = intervalHours
+  if (intervalHours != null) labScheduleState.intervalHours = clampScheduleInterval(intervalHours, labScheduleState.intervalHours)
   if (labScheduleState.enabled) {
     if (!labScheduleState.nextRunAt || labScheduleState.nextRunAt < Date.now()) {
       labScheduleState.nextRunAt = Date.now() + labScheduleState.intervalHours * 60 * 60 * 1000
@@ -961,6 +1038,37 @@ function readStatusAt(statusPath) {
   return JSON.parse(fs.readFileSync(statusPath, 'utf8'))
 }
 
+
+function incubatorFailureFuseDecision(slot) {
+  let cfg = {}
+  try { cfg = readStatusAt(slot.statusPath) } catch { return null }
+  const gate = String(cfg.lastQualityGate || '').toUpperCase()
+  const status = String(cfg.lastRunStatus || '').toLowerCase()
+  const failing = gate === 'FAIL' || status === 'failed' || status === 'quality-failed'
+  if (!failing) {
+    if (slot.consecutiveFailGates) slot.consecutiveFailGates = 0
+    return null
+  }
+  const count = Number(slot.consecutiveFailGates || 0) + 1
+  slot.consecutiveFailGates = count
+  if (count < MAX_CONSECUTIVE_AUTONOMOUS_FAILS) return null
+  return {
+    count,
+    reason: `schedule paused: ${count} consecutive failed quality gates; needs deliberate steering or manual run`,
+    code: 'AUTO_FAIL_FUSE',
+  }
+}
+
+function applyIncubatorFailureFuse(slot, decision) {
+  const ts = new Date().toISOString()
+  slot.enabled = false
+  slot.nextRunAt = null
+  slot.schedulePausedAt = ts
+  slot.schedulePauseReason = decision.reason
+  slot.lastScheduleBlockedAt = ts
+  slot.lastScheduleBlockedReason = decision.reason
+  slot.lastScheduleBlockedCode = decision.code
+}
 
 function incubatorAutoStrategyDecision(slot) {
   let cfg = {}
@@ -1218,7 +1326,7 @@ function updateProjectRunner(statusPath, runner) {
     status.runScript = runnableLauncherForStatus(status) || '/home/admin/lab/scripts/run-codex-incubator.sh'
     status.promptDir = status.promptDir || join(status.repo, 'prompts')
     status.runTypes = status.runTypes || ['mutate', 'research', 'mutate']
-    status.codexBypass = status.codexBypass ?? true
+    status.codexBypass = status.codexBypass ?? false
   } else if (runner === 'claude') {
     const setup = claudeRunnerSetupForStatus(status)
     const relayScript = setup.script || setup.expectedScript || GENERIC_CLAUDE_INCUBATOR_SCRIPT
@@ -1227,7 +1335,7 @@ function updateProjectRunner(statusPath, runner) {
     if (setup.model) status.claudeModel = setup.model
     else delete status.claudeModel
     status.claudeRunScript = relayScript
-    status.claudeBypass = status.claudeBypass ?? true
+    status.claudeBypass = status.claudeBypass ?? false
     status.promptDir = status.promptDir || join(status.repo, 'prompts')
     status.runTypes = status.runTypes || ['mutate', 'research', 'mutate']
     fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
@@ -1279,7 +1387,7 @@ function repairClaudeRunnerStatusIfNeeded(statusPath) {
     repaired = true
   }
   if (next.claudeBypass == null) {
-    next.claudeBypass = true
+    next.claudeBypass = false
     repaired = true
   }
 
@@ -1584,11 +1692,11 @@ function normalizeIncubatorStatus(statusPath) {
     changed = true
   }
   if (next.codexBypass == null) {
-    next.codexBypass = true
+    next.codexBypass = false
     changed = true
   }
   if (next.claudeBypass == null) {
-    next.claudeBypass = true
+    next.claudeBypass = false
     changed = true
   }
   if (!next.feedbackPath && next.repo) {
@@ -1691,8 +1799,8 @@ ${cleanIdea}
     current_focus: cleanIdea.slice(0, 260),
     next_run_goal: 'Run CREATE to turn this idea into the first usable local prototype.',
     notes: 'Created from Pi Pulse Add Incubator idea box.',
-    codexBypass: true,
-    claudeBypass: true,
+    codexBypass: false,
+    claudeBypass: false,
     claudeModel: null,
   }
   const statusPath = join(labProjectDir, 'status.json')
@@ -1762,6 +1870,7 @@ try {
   const raw = fs.readFileSync(SCHEDULE_PATH, 'utf8')
   const loaded = JSON.parse(raw)
   scheduleState = { ...scheduleState, ...loaded }
+  scheduleState.intervalHours = clampScheduleInterval(scheduleState.intervalHours, 2)
   // If nextRunAt is in the past after a restart, reschedule from now
   if (scheduleState.enabled && scheduleState.nextRunAt && scheduleState.nextRunAt < Date.now()) {
     scheduleState.nextRunAt = Date.now() + scheduleState.intervalHours * 60 * 60 * 1000
@@ -1797,8 +1906,8 @@ app.get('/api/child/config', (req, res) => {
   })
 })
 
-function parseChildRuns(content) {
-  return parseRunsFromLog(content)
+function parseChildRuns(content, filePath = null) {
+  return filePath ? parsedRunsForLog(filePath) : parseRunsFromLog(content)
 }
 
 // Multi-project incubators. The legacy /api/child/* endpoints below continue
@@ -1828,8 +1937,8 @@ app.get('/api/incubators/:id/runs', (req, res) => {
   if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
   try {
     const { status: cfg } = normalizeIncubatorStatus(slot.statusPath)
-    const content = fs.readFileSync(cfg.runLog, 'utf8')
-    res.json({ ok: true, runs: runsWithPinnedLatestFailure(parseChildRuns(content), 10) })
+    const runs = parseChildRuns('', cfg.runLog)
+    res.json({ ok: true, runs: runsWithPinnedLatestFailure(runs, 10) })
   } catch (err) {
     res.status(500).json({
       ok: false,
@@ -1891,7 +2000,7 @@ app.post('/api/incubators/:id/schedule', requireFreshSource, (req, res) => {
   if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
   const { enabled, intervalHours, runner } = req.body ?? {}
   if (typeof enabled === 'boolean') slot.enabled = enabled
-  if (typeof intervalHours === 'number' && intervalHours > 0) slot.intervalHours = intervalHours
+  if (intervalHours != null) slot.intervalHours = clampScheduleInterval(intervalHours, slot.intervalHours || 0.5)
   if (typeof runner === 'string') slot.runner = runner
   if (slot.enabled) {
     if (!slot.nextRunAt || slot.nextRunAt < Date.now()) {
@@ -1960,7 +2069,7 @@ app.post('/api/incubators/create', requireFreshSource, (req, res) => {
     type: 'project',
     statusPath: result.statusPath,
     enabled: false,
-    intervalHours: 0.5,
+    intervalHours: clampScheduleInterval(0.5),
     nextRunAt: null,
     lastScheduledRun: null,
     autoRunsSinceHuman: 0,
@@ -2030,8 +2139,8 @@ app.post('/api/incubators', requireFreshSource, (req, res) => {
     type: 'project',
     statusPath,
     enabled: !!enabled,
-    intervalHours,
-    nextRunAt: enabled ? Date.now() + intervalHours * 60 * 60 * 1000 : null,
+    intervalHours: clampScheduleInterval(intervalHours),
+    nextRunAt: enabled ? Date.now() + clampScheduleInterval(intervalHours) * 60 * 60 * 1000 : null,
     lastScheduledRun: null,
     autoRunsSinceHuman: 0,
     charges: null,
@@ -2071,6 +2180,13 @@ if (SCHEDULES_ENABLED) {
     for (const slot of data.slots) {
       if (!slot.enabled || !slot.nextRunAt || Date.now() < slot.nextRunAt) continue
       if (getIncubatorRun(slot.id).running) continue
+      const failureFuse = incubatorFailureFuseDecision(slot)
+      if (failureFuse) {
+        applyIncubatorFailureFuse(slot, failureFuse)
+        console.warn(`[pi-pulse] incubator: ${slot.id} ${failureFuse.reason}`)
+        changed = true
+        continue
+      }
       const autoStrategy = incubatorAutoStrategyDecision(slot)
       if (autoStrategy) {
         applyIncubatorAutoStrategy(slot, autoStrategy)
@@ -2158,7 +2274,7 @@ app.get('/api/child/schedule', (req, res) => {
 app.post('/api/child/schedule', requireFreshSource, (req, res) => {
   const { enabled, intervalHours } = req.body ?? {}
   if (typeof enabled === 'boolean') scheduleState.enabled = enabled
-  if (typeof intervalHours === 'number' && intervalHours > 0) scheduleState.intervalHours = intervalHours
+  if (intervalHours != null) scheduleState.intervalHours = clampScheduleInterval(intervalHours, scheduleState.intervalHours)
   if (scheduleState.enabled) {
     if (!scheduleState.nextRunAt || scheduleState.nextRunAt < Date.now()) {
       scheduleState.nextRunAt = Date.now() + scheduleState.intervalHours * 60 * 60 * 1000
@@ -2652,16 +2768,21 @@ app.post('/api/restart', (req, res) => {
 
 // SSE — push 'update' to all connected clients whenever RUN_LOG.md changes
 const runClients = new Set()
+let runLogWatchTimer = null
+function notifyRunLogChanged() {
+  syncProjectStatus()
+  for (const client of runClients) {
+    try { client.write('data: update\n\n') } catch { runClients.delete(client) }
+  }
+}
 // Directory watch instead of file watch — survives rename-replace (new inode)
 // and a log that doesn't exist yet. Filter to RUN_LOG.md so the rest of the
-// lab dir's churn (MEMORY_BRIEF.md, ACTIVE_THREADS.md, …) doesn't spam clients.
+// lab dir's churn (MEMORY_BRIEF.md, ACTIVE_THREADS.md, ...) doesn't spam clients.
 try {
   fs.watch(dirname(RUN_LOG_PATH), { persistent: false }, (eventType, filename) => {
     if (filename && filename !== 'RUN_LOG.md') return
-    syncProjectStatus()
-    for (const client of runClients) {
-      try { client.write('data: update\n\n') } catch { runClients.delete(client) }
-    }
+    clearTimeout(runLogWatchTimer)
+    runLogWatchTimer = setTimeout(notifyRunLogChanged, 500)
   })
 } catch { /* lab dir missing would be fatal elsewhere anyway */ }
 
@@ -2712,11 +2833,12 @@ app.get('*', (req, res) => {
   }
 })
 
-function startServer(port = PORT) {
-  const server = app.listen(port, () => {
+function startServer(port = PORT, host = HOST) {
+  const server = app.listen(port, host, () => {
     const address = server.address()
     const actualPort = typeof address === 'object' && address ? address.port : port
-    console.log('Pi Pulse API -> http://localhost:' + actualPort + '/api/stats')
+    const actualHost = typeof address === 'object' && address ? address.address : host
+    console.log(`Pi Pulse API -> http://${actualHost}:${actualPort}/api/stats`)
   })
   server.on('error', (err) => {
     console.error('[pi-pulse] fatal listen error:', err.message)
