@@ -15,6 +15,7 @@ const HAILO_URL    = 'http://localhost:8000'
 const MODEL        = 'qwen2.5-instruct:1.5b'
 const PORT         = 3031
 const INTERVAL_MS  = 5 * 60 * 1000   // 5 minutes
+const LOCAL_LLM_ENABLED = process.env.NARRATOR_ENABLE_LOCAL_LLM === '1'
 const LOG_PATH     = path.join(__dirname, 'narrations.jsonl')
 const MAX_STORED   = 50
 
@@ -76,6 +77,7 @@ async function gatherStats() {
 // ─── LLM ─────────────────────────────────────────────────────────────────────
 
 async function narrate(stats) {
+  if (!LOCAL_LLM_ENABLED) return null
   const { cpu, temp, mem, disk, load } = stats
   const readings = [
     `CPU ${cpu}%`,

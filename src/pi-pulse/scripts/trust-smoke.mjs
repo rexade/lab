@@ -200,6 +200,7 @@ echo fake codex launcher
     statusPath,
     freshStatusPath,
     freshLauncher,
+    freshRepo,
     staleStatusPath,
     staleLauncher,
     blockedStatusPath,
@@ -422,14 +423,16 @@ async function main() {
     assert.match(freshRun['Output excerpt'] || freshRun['What I changed'] || '', /fake claude/, 'fresh Claude run history should expose useful captured stdout')
     assert.match(freshRun.Output || '', /Full stdout saved to .*claude-run-1\.log/, 'fresh Claude run history should point to the saved stdout file')
 
-    const slotWithPlay = incubators.data.slots.find(slot => slot.playUrl)
-    if (slotWithPlay) {
-      const play = await fetch(baseUrl + slotWithPlay.playUrl)
-      const text = await play.text()
-      assert.equal(play.status, 200, `${slotWithPlay.id} playUrl should be mounted`)
-      assert.match(play.headers.get('content-type') || '', /text\/html/)
-      assert.ok(!text.includes('<title>Pi Pulse</title>'), `${slotWithPlay.id} playUrl served the Pi Pulse SPA`)
-    }
+    fs.writeFileSync(join(fixture.freshRepo, 'index.html'), '<!doctype html><title>Fresh Slot Play</title><h1>fresh static app</h1>\n')
+    const incubatorsAfterStaticApp = await fetchJson(baseUrl, '/api/incubators')
+    const slotWithPlay = incubatorsAfterStaticApp.data.slots.find(slot => slot.id === 'fresh-slot')
+    assert.equal(slotWithPlay?.playUrl, '/fresh-slot/', 'fresh slot should expose playUrl after index.html appears')
+    const play = await fetch(baseUrl + slotWithPlay.playUrl)
+    const text = await play.text()
+    assert.equal(play.status, 200, 'fresh slot playUrl should serve the static incubator app')
+    assert.match(play.headers.get('content-type') || '', /text\/html/)
+    assert.match(text, /Fresh Slot Play/, 'fresh slot playUrl should serve the project index.html')
+    assert.ok(!text.includes('<title>Pi Pulse</title>'), 'fresh slot playUrl served the Pi Pulse SPA')
 
     fs.writeFileSync(fixture.sourceProbe, 'changed source probe\n')
     const staleHealth = await waitForJsonCondition(

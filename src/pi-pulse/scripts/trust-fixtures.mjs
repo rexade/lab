@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import { dirname, join } from 'node:path'
@@ -14,6 +15,7 @@ import {
   hydrateAiFeedback,
   parseRunsFromLog,
   preflightRunConfig,
+  qualityStateFromRun,
   runsWithPinnedLatestFailure,
 } from '../server-core.js'
 import {
@@ -653,7 +655,12 @@ function testPreflightBlockedLaunchLooksBlocked() {
   assertIncludes(panel, 'fetchSlotPreflight(slot.id)', 'incubator polling should hydrate preflight state for every project slot')
   assertIncludes(panel, "onRun={(e) => { e?.stopPropagation?.(); slot.onRun() }}", 'card run button should route blocked attempts through server preflight history')
   assertIncludes(panel, "title={runnerBlocked ? `Record blocked run: ${readinessIssue}` : `Run ${slot.name}`}", 'card run control should expose the blocking error in its title')
-  assertIncludes(panel, 'const lastRunFailed = slot.lastRunStatus === \'failed\'', 'incubator cards should detect failed last-run status')
+  assertIncludes(panel, "const lastRunFailed = lastRunStatus === 'failed'", 'incubator cards should detect failed last-run status')
+  assertIncludes(panel, 'function isQualityWeak(slot = {})', 'incubator cards should detect weak quality status separately from failed runner status')
+  assertIncludes(panel, 'data-card-quality-state={slot.id}', 'incubator cards should expose weak quality receipts to browser tests')
+  assertIncludes(panel, 'data-quality-state={activeSlot.id}', 'selected incubator should expose quality state in the detail panel')
+  assertIncludes(panel, 'function slotRecoveryRequired(slot = {})', 'incubator cards should treat negative-feedback recovery as a quality state')
+  assertIncludes(panel, "return 'recovery required'", 'quality label should make recovery-required state visible')
   assertIncludes(panel, 'lastRunFailed ? \'last failed\'', 'incubator cards should label failed last-run state')
   assertIncludes(panel, 'data-card-last-run-failure={lastRunFailed ? slot.id : undefined}', 'incubator cards should expose last-run failure receipts to browser tests')
   assertIncludes(server, "availableRunners: ['codex', 'claude']", 'Claude should stay visible as a relay option even when setup is incomplete')
@@ -711,6 +718,17 @@ function testPreflightBlockedLaunchLooksBlocked() {
   assertIncludes(server, 'if (current !== content)', 'generated incubator launchers should be rewritten when stale')
   assertIncludes(server, 'return { path: launcherPath, repaired }', 'launcher repair should be visible to normalization')
   assertIncludes(server, 'exec ${GENERIC_CLAUDE_INCUBATOR_SCRIPT} "$STATUS_PATH" "$RUN_TYPE"', 'the project launcher should delegate Claude runs to the generic Claude relay')
+  assertIncludes(server, 'function suggestedIncubatorTitle(idea)', 'idea-created incubators should derive a short display title instead of using the full request')
+  assertIncludes(server, "function createIncubatorProjectFromIdea(idea, requestedTitle = '')", 'idea-created incubators should accept an optional short title override')
+  assertIncludes(server, 'const title = normalizedIncubatorTitle(requestedTitle) || suggestedIncubatorTitle(cleanIdea)', 'new incubator creation should title the project before slugging it')
+  assertIncludes(server, 'const slug = uniqueIncubatorSlug(title)', 'new incubator slugs should be based on the short generated title')
+  assertIncludes(server, 'displayName: title', 'new incubator status should persist the generated display title')
+  assertIncludes(server, 'name: cfg.displayName ?? cfg.incubatorTitle', 'hydrated incubators should expose the display title to the UI')
+  assertIncludes(panel, 'name: slot.displayName || slot.name || slot.project || slot.id', 'project cards should render generated display names before filesystem ids')
+  assertIncludes(panel, "const [newTitle, setNewTitle] = useState('')", 'create incubator UI should expose an optional short-name field')
+  assertIncludes(panel, 'body: JSON.stringify({ idea, title })', 'create incubator UI should send the optional short name to the API')
+  assert.ok(!panel.includes('Existing projects'), 'add incubator menu should not invite re-adding old project directories')
+  assert.ok(!panel.includes('addableProjects'), 'add incubator menu should be create-only')
 }
 
 function testFailedRunsDoNotAutoRegenerateFeedback() {
@@ -826,36 +844,41 @@ function testNewestFailedRowStaysOpenBelowCompletedRun() {
   assert.equal(key, runHistoryKey('core', displayRuns[1], 1))
 }
 
-function testLatestFailureStaysPinnedAfterManyLaterRuns() {
-  const runs = [
+function testRecoveredOldFailuresStopBeingPinned() {
+  const unresolvedRuns = [
     { num: 1, date: '2026-07-04', type: 'FAILED', Failure: 'claude binary: claude not found in PATH', signature: 'failed-1' },
+  ]
+  const unresolvedPinned = runsWithPinnedLatestFailure(unresolvedRuns, 10)
+  assert.equal(unresolvedPinned.length, 1, 'a current unresolved failure should stay visible')
+  assert.equal(unresolvedPinned[0].type, 'FAILED')
+
+  const recoveredRuns = [
+    { num: 1, date: '2026-07-04', type: 'FAILED', Failure: 'old usage-limit failure', signature: 'failed-1' },
     ...Array.from({ length: 12 }, (_, i) => ({
       num: i + 2,
-      date: '2026-07-04',
+      date: '2026-08-19',
       type: 'MUTATE',
+      'Quality gate': i === 11 ? 'PASS' : 'NEEDS-EVIDENCE',
       'What I changed': `completed run ${i + 2}`,
       signature: `ok-${i + 2}`,
     })),
   ]
 
-  const pinned = runsWithPinnedLatestFailure(runs, 10)
-  assert.equal(pinned.length, 11, 'history payload should include the latest failure plus recent successful runs')
-  assert.equal(pinned[0].type, 'FAILED', 'latest failure should be pinned even when it is older than the recent limit')
-  assert.equal(pinned[0].Failure, 'claude binary: claude not found in PATH')
-  assert.equal(pinned.at(-1).num, 13)
+  const recovered = runsWithPinnedLatestFailure(recoveredRuns, 10)
+  assert.equal(recovered.length, 10, 'recovered old failures should not be pinned above recent history')
+  assert.ok(!recovered.some(run => run.type === 'FAILED'), 'old failure should drop out once later runs recovered')
+  assert.equal(recovered.at(-1).num, 13)
 
   const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
-  assertIncludes(panel, 'function selectedHistoryRuns(runs = [], limit = 5)', 'project panel should keep a local pinned-failure display helper')
-  assertIncludes(panel, "const latestFailure = [...runs].reverse().find(run => run?.type === 'FAILED')", 'selected history should search beyond the latest five rows')
-  assertIncludes(panel, 'return [...recent, latestFailure]', 'selected history should include the pinned failure in the visible rows')
-  assertIncludes(panel, 'selectedHistoryRuns(activeSlot.runs || []).reverse()', 'active run history should render the pinned failure with recent rows')
-  assertIncludes(panel, 'data-history-failure-receipt={activeSlot.id}', 'run history should disclose that a failure is visible before the expanded rows')
-  assertIncludes(panel, "run #{latestDisplayedFailure.num ?? '?'} is {latestDisplayedFailurePinned ? 'pinned with recent history' : 'inside recent history'}", 'history receipt should say whether the visible failure was pinned from outside recent rows')
-  assertIncludes(panel, 'expands below', 'history failure receipt should point to the expanded failure detail')
+  assertIncludes(panel, 'function recoveredAfterFailure(run)', 'project panel should know when later runs recovered an old failure')
+  assertIncludes(panel, 'const recovered = failureIndex >= 0 && runs.slice(failureIndex + 1).some(recoveredAfterFailure)', 'selected history should stop pinning failures after recovery')
+  assertIncludes(panel, 'return recovered ? recent : [...recent, latestFailure]', 'selected history should only pin unresolved failures')
+  assertIncludes(panel, 'selectedHistoryRuns(activeSlot.runs || []).reverse()', 'active run history should render selected recent rows')
+  assertIncludes(panel, 'data-history-failure-receipt={activeSlot.id}', 'run history should disclose when a failure is visible before expanded rows')
 
   const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
-  assertIncludes(server, 'runsWithPinnedLatestFailure(parseRunsFromLog(content), 10)', 'host run API should preserve the latest failure outside the recent window')
-  assertIncludes(server, 'runsWithPinnedLatestFailure(parseChildRuns(content), 10)', 'project run APIs should preserve the latest failure outside the recent window')
+  assertIncludes(server, 'runsWithPinnedLatestFailure(parseRunsFromLog(content), 10)', 'host run API should use filtered failure pinning')
+  assertIncludes(server, 'runsWithPinnedLatestFailure(parseChildRuns(content), 10)', 'project run APIs should use filtered failure pinning')
 }
 
 function testFormalParagraphRunsKeepReadableSummary() {
@@ -958,6 +981,49 @@ function testNoSummaryRowsExposeExpandableStdoutDetail() {
   assertIncludes(html, 'stdout: /tmp/stdout/claude-run-12.log', 'collapsed stdout detail should show the saved stdout file path')
   assertIncludes(html, 'Full stdout saved to /tmp/stdout/claude-run-12.log', 'expanded stdout detail should show the saved stdout path')
   assert.equal(outputSignal(runOutputDetail(run)), 'stdout: /tmp/stdout/claude-run-12.log')
+}
+
+
+function testQualityGateFieldsDriveStatusAndHistory() {
+  const content = [
+    '# Child Project Run Log',
+    '',
+    '## Run 22 - 2026-07-04 - MUTATE',
+    '',
+    '**Acceptance check:** Main launcher screen renders and feedback is visible.',
+    '**What I changed:** Added the quality state strip.',
+    '**Evidence:** npm test and manual check of /api/incubators.',
+    '**Quality gate:** NEEDS-EVIDENCE',
+    '**Quality rating:** 2.5/5',
+    '**Evidence confidence:** 3/5',
+    '**Risk / regression:** No browser screenshot attached.',
+    '**Next move:** Add screenshot smoke coverage.',
+    '',
+  ].join('\n')
+
+  const runs = parseRunsFromLog(content)
+  assert.equal(runs.length, 1)
+  assert.equal(runs[0]['Quality gate'], 'NEEDS-EVIDENCE')
+  const state = qualityStateFromRun(runs[0], true)
+  assert.equal(state.lastRunnerStatus, 'ok')
+  assert.equal(state.lastRunStatus, 'needs-evidence')
+  assert.equal(state.lastQualityGate, 'NEEDS-EVIDENCE')
+  assert.equal(state.lastQualityRating, 2.5)
+  assert.equal(state.lastEvidenceConfidence, 3)
+  assertIncludes(runOutputDetail(runs[0]), 'Acceptance check: Main launcher screen renders', 'quality rows should expose acceptance detail')
+  assertIncludes(runOutputDetail(runs[0]), 'Quality gate: NEEDS-EVIDENCE', 'quality rows should expose the gate')
+
+  const passState = qualityStateFromRun({ type: 'MUTATE', 'Quality gate': 'PASS', 'Quality rating': '4/5', 'Evidence confidence': '4/5' }, true)
+  assert.equal(passState.lastRunStatus, 'ok')
+  assert.equal(passState.lastQualityGate, 'PASS')
+
+  const missingState = qualityStateFromRun({ type: 'MUTATE', 'What I changed': 'changed without evidence' }, true)
+  assert.equal(missingState.lastRunStatus, 'needs-evidence')
+  assert.equal(missingState.lastQualityGate, 'NEEDS-EVIDENCE')
+
+  const failedState = qualityStateFromRun({ type: 'FAILED', Failure: 'runner exploded' }, false)
+  assert.equal(failedState.lastRunStatus, 'failed')
+  assert.equal(failedState.lastQualityGate, 'FAIL')
 }
 
 function testFormalRowsHydrateSavedStdoutFile() {
@@ -1118,6 +1184,128 @@ function testClaudeRunnerSwitchWarnsFromLaunchPreflight() {
   assertIncludes(panel, 'command: {shortCommand(runnerReceipt.command)}', 'runner switch receipts should show the exact launch command that preflight evaluated')
 }
 
+
+function testAppEvidenceHarnessWritesSummaryArtifact() {
+  const dir = tempDir('app-evidence')
+  fs.writeFileSync(join(dir, 'index.html'), '<!doctype html><main><h1>Hello app</h1><button>Start</button></main>')
+  const result = spawnSync(process.execPath, [join(root, 'scripts', 'app-evidence.mjs'), '--repo', dir, '--run', '7', '--type', 'mutate'], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  const summaryPath = join(dir, 'reports', 'evidence', 'run-7', 'summary.json')
+  const summaryMdPath = join(dir, 'reports', 'evidence', 'run-7', 'summary.md')
+  assert.ok(fs.existsSync(summaryPath), 'app evidence should write summary.json')
+  assert.ok(fs.existsSync(summaryMdPath), 'app evidence should write summary.md')
+  const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'))
+  assert.equal(summary.appType, 'static-web')
+  assert.ok(['PASS', 'NEEDS-EVIDENCE', 'FAIL'].includes(summary.gate), 'app evidence gate should be normalized')
+  assert.ok(summary.primaryAction && typeof summary.primaryAction.available === 'boolean', 'app evidence should include a primary-action receipt')
+  assertIncludes(fs.readFileSync(summaryMdPath, 'utf8'), '**App evidence gate:**', 'markdown summary should expose the app evidence gate')
+  assertIncludes(fs.readFileSync(summaryMdPath, 'utf8'), '**Primary action:**', 'markdown summary should expose the primary-action check')
+}
+
+
+function testAppEvidenceSemanticContractCanBeTopTierEligible() {
+  const dir = tempDir('semantic-app-evidence')
+  fs.writeFileSync(join(dir, 'index.html'), `<!doctype html>
+<main>
+  <h1>Semantic evidence app</h1>
+  <button data-primary-action onclick="document.querySelector('[data-app-state]').textContent = 'started'; document.querySelector('[data-app-state]').setAttribute('data-app-state', 'started'); localStorage.setItem('semantic-evidence-picks', JSON.stringify(['picked']))">Start</button>
+  <output data-app-state="idle">idle</output>
+</main>
+<script>
+window.__PI_PULSE_APP__ = {
+  version: 1,
+  name: 'Semantic Evidence App',
+  type: 'web-app',
+  primaryAction: {
+    selector: '[data-primary-action]',
+    label: 'Start',
+    expect: { selector: '[data-app-state]', textIncludes: 'started' }
+  },
+  reset() { document.querySelector('[data-app-state]').textContent = 'idle' },
+  snapshot() { return { state: document.querySelector('[data-app-state]').textContent } }
+}
+</script>`)
+  const result = spawnSync(process.execPath, [join(root, 'scripts', 'app-evidence.mjs'), '--repo', dir, '--run', '8', '--type', 'mutate'], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  const summary = JSON.parse(fs.readFileSync(join(dir, 'reports', 'evidence', 'run-8', 'summary.json'), 'utf8'))
+  assert.equal(summary.gate, 'PASS')
+  assert.equal(summary.evidenceMode, 'semantic')
+  assert.equal(summary.topTierEligible, true)
+  assert.equal(summary.semanticContract.present, true)
+  assert.equal(summary.primaryAction.source, 'semantic-selector')
+  assert.equal(summary.semanticSuccess.passed, true)
+  assert.equal(summary.semanticSuccess.source, 'successContract')
+  assert.ok(fs.existsSync(join(dir, 'reports', 'evidence', 'run-8', 'semantic-contract.json')), 'semantic contract artifact should be written')
+  assert.ok(fs.existsSync(join(dir, 'reports', 'evidence', 'run-8', 'semantic-snapshots.json')), 'semantic snapshots artifact should be written')
+}
+
+function testIncubatorQualityContractIsWired() {
+  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
+  const codexRunner = fs.readFileSync(join(root, '..', '..', 'scripts', 'run-codex-incubator.sh'), 'utf8')
+  const claudeRunner = fs.readFileSync(join(root, 'scripts', 'run-claude-incubator.sh'), 'utf8')
+  const mutatePrompt = fs.readFileSync(join(root, '..', '..', 'prompts', 'mutate.md'), 'utf8')
+
+  assertIncludes(mutatePrompt, 'INCUBATOR_QUALITY.md', 'core prompts should require the quality contract')
+  assertIncludes(mutatePrompt, '**Quality gate:** PASS | NEEDS-EVIDENCE | FAIL', 'core prompts should require an explicit quality gate')
+  assertIncludes(mutatePrompt, 'Negative feedback recovery', 'core prompts should force recovery mode after bad user feedback')
+  assertIncludes(mutatePrompt, '**App evidence:** [reports/evidence/run-[count]/summary.md, or not applicable]', 'core prompts should require an app evidence receipt')
+  assertIncludes(mutatePrompt, 'window.__PI_PULSE_APP__', 'core prompts should require semantic app contracts for 4.5+ evidence')
+  assertIncludes(server, 'qualityStateFromRun(latest', 'server sync should derive cached status from latest quality fields')
+  assertIncludes(server, 'lastQualityGate: cfg.lastQualityGate', 'hydrated incubators should expose cached quality gate')
+  assertIncludes(server, 'function incubatorQualityInstructions', 'new incubator prompt templates should include the quality contract')
+  assertIncludes(server, 'Negative feedback triggers recovery mode', 'new incubator prompt templates should inherit recovery-mode rules')
+  assertIncludes(server, 'lastRecoveryRequired: cfg.lastRecoveryRequired', 'hydrated incubators should expose recovery-required state')
+  assertIncludes(server, 'lastAppEvidenceGate: cfg.lastAppEvidenceGate', 'hydrated incubators should expose app evidence gate')
+  assertIncludes(server, 'lastAppEvidencePrimaryAction: cfg.lastAppEvidencePrimaryAction', 'hydrated incubators should expose primary-action evidence')
+  assertIncludes(server, 'lastAppEvidenceTopTier: cfg.lastAppEvidenceTopTier', 'hydrated incubators should expose top-tier app evidence eligibility')
+  assertIncludes(server, 'function incubatorAutoStrategyDecision', 'scheduler should guard against autonomous loop churn')
+  assertIncludes(server, 'AUTO_PLATEAU_RESEARCH', 'scheduler should force strategy research after repeated plateau runs')
+  assertIncludes(server, 'AUTO_NORTH_STAR_RESEARCH', 'scheduler should force north-star research after high-quality autonomous run churn')
+  assertIncludes(server, 'Manual/human validation requests are not a scheduler stop condition', 'manual validation wording should not hard-stop autonomous runs')
+  assertIncludes(server, 'Do not make manual/human validation the required next move', 'new incubator prompt templates should replace hard human-validation waits with proxy evidence')
+  assertIncludes(server, 'Research runs must infer a defensible north star themselves', 'new incubator prompt templates should require autonomous north-star selection')
+  assertIncludes(server, '**North star:** [the strongest inferred product/benchmark/taste target for this project]', 'new incubator prompt templates should require first-class north-star fields')
+  assertIncludes(codexRunner, "status.lastNorthStar = (fields['North star']", 'Codex runner should persist north-star fields')
+  assertIncludes(codexRunner, "status.lastPlateauRegressionVerdict = (fields['Plateau/regression verdict']", 'Codex runner should persist plateau/regression verdict')
+  assertIncludes(claudeRunner, "status.lastNorthStar = (fields['North star']", 'Claude runner should persist north-star fields')
+  assertIncludes(claudeRunner, "status.lastPlateauRegressionVerdict = (fields['Plateau/regression verdict']", 'Claude runner should persist plateau/regression verdict')
+  assertIncludes(server, 'window.__PI_PULSE_APP__', 'new incubator prompt templates should mention semantic app contracts')
+  assertIncludes(server, 'App evidence:** [reports/evidence/run-[number]/summary.md, or not applicable]', 'new incubator prompt templates should include app evidence receipts')
+  assertIncludes(codexRunner, "status.lastRunnerStatus = runnerOk ? 'ok' : 'failed'", 'Codex runner should separate process status from quality status')
+  assertIncludes(codexRunner, "status.lastRunStatus = runnerOk ? (qualityGate === 'PASS' ? 'ok'", 'Codex runner should only mark ok when quality gate passes')
+  assertIncludes(codexRunner, 'QUALITY RECOVERY MODE TRIGGERED', 'Codex runner should inject recovery mode when feedback is negative')
+  assertIncludes(codexRunner, 'Runner fallback - required quality fields were missing from this run summary.', 'Codex runner should append fallback quality fields when agents omit them')
+  assertIncludes(codexRunner, 'APP_EVIDENCE_SCRIPT', 'Codex runner should invoke the app evidence harness')
+  assertIncludes(codexRunner, 'APP EVIDENCE REPAIR REQUIRED:', 'Codex runner should feed previous app evidence failures into the next prompt')
+  assertIncludes(codexRunner, 'data-primary-action', 'Codex runner evidence repair prompt should tell apps to expose the real primary action')
+  assertIncludes(codexRunner, 'status.lastAppEvidenceGate = appEvidenceGate', 'Codex runner should persist app evidence gate')
+  assertIncludes(codexRunner, "Math.min(status.lastQualityRating, appEvidenceGate === 'FAIL' ? 2 : 3)", 'Codex runner should cap ratings when app evidence is not passing')
+  assertIncludes(codexRunner, 'status.lastAppEvidencePrimaryAction = appEvidence?.primaryAction', 'Codex runner should persist primary-action evidence')
+  assertIncludes(codexRunner, "appEvidence?.topTierEligible !== true", 'Codex runner should cap 4.5+ ratings without semantic top-tier evidence')
+  assertIncludes(codexRunner, 'status.lastAppEvidenceTopTier = appEvidence?.topTierEligible === true', 'Codex runner should persist top-tier evidence eligibility')
+  assertIncludes(codexRunner, "status.lastRecoveryRequired = recoveryRequired === '1'", 'Codex runner should persist recovery-required state')
+  assertIncludes(claudeRunner, "status.lastRunnerStatus = runnerOk ? 'ok' : 'failed'", 'Claude runner should separate process status from quality status')
+  assertIncludes(claudeRunner, '**Quality gate:** NEEDS-EVIDENCE', 'no-summary rows should be marked as needs-evidence')
+  assertIncludes(claudeRunner, 'QUALITY RECOVERY MODE TRIGGERED', 'Claude runner should inject recovery mode when feedback is negative')
+  assertIncludes(claudeRunner, 'Runner fallback - required quality fields were missing from this run summary.', 'Claude runner should append fallback quality fields when agents omit them')
+  assertIncludes(claudeRunner, 'APP_EVIDENCE_SCRIPT', 'Claude runner should invoke the app evidence harness')
+  assertIncludes(claudeRunner, 'APP EVIDENCE REPAIR REQUIRED:', 'Claude runner should feed previous app evidence failures into the next prompt')
+  assertIncludes(claudeRunner, 'data-primary-action', 'Claude runner evidence repair prompt should tell apps to expose the real primary action')
+  assertIncludes(claudeRunner, 'status.lastAppEvidenceGate = appEvidenceGate', 'Claude runner should persist app evidence gate')
+  assertIncludes(claudeRunner, "Math.min(status.lastQualityRating, appEvidenceGate === 'FAIL' ? 2 : 3)", 'Claude runner should cap ratings when app evidence is not passing')
+  assertIncludes(claudeRunner, 'status.lastAppEvidencePrimaryAction = appEvidence?.primaryAction', 'Claude runner should persist primary-action evidence')
+  assertIncludes(claudeRunner, "appEvidence?.topTierEligible !== true", 'Claude runner should cap 4.5+ ratings without semantic top-tier evidence')
+  assertIncludes(claudeRunner, 'status.lastAppEvidenceTopTier = appEvidence?.topTierEligible === true', 'Claude runner should persist top-tier evidence eligibility')
+  assertIncludes(claudeRunner, "status.lastRecoveryRequired = recoveryRequired === '1'", 'Claude runner should persist recovery-required state')
+  const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
+  assertIncludes(panel, 'data-app-evidence-primary', 'incubator UI should show primary-action evidence')
+  assertIncludes(panel, 'data-app-evidence-mode', 'incubator UI should show semantic/degraded evidence mode')
+  assertIncludes(panel, 'data-app-evidence-success', 'incubator UI should show semantic success contract result')
+  assertIncludes(panel, 'data-run-north-star', 'incubator UI should show first-class north-star field')
+  assertIncludes(panel, 'data-run-verdict', 'incubator UI should show plateau/regression verdict')
+  assertIncludes(panel, 'data-quality-delta', 'incubator UI should show expected/actual quality delta')
+}
+
 function testTrustHarnessRunsBeforeBuild() {
   const pkg = JSON.parse(fs.readFileSync(join(root, 'package.json'), 'utf8'))
   assert.match(
@@ -1208,11 +1396,12 @@ const tests = [
   testNoSummaryCompletedRowsTriggerFeedbackSignal,
   testFailedHistoryRowsExposeExpandableDetail,
   testNewestFailedRowStaysOpenBelowCompletedRun,
-  testLatestFailureStaysPinnedAfterManyLaterRuns,
+  testRecoveredOldFailuresStopBeingPinned,
   testFormalParagraphRunsKeepReadableSummary,
   testClaudeNoSummaryRowsShowOutputExcerpt,
   testNoSummaryRowsPreferStdoutOverGenericDone,
   testNoSummaryRowsExposeExpandableStdoutDetail,
+  testQualityGateFieldsDriveStatusAndHistory,
   testFormalRowsHydrateSavedStdoutFile,
   testFormalRowsHydrateStdoutPathFromExcerpt,
   testFormalRowsFailFromSavedStdoutFile,
@@ -1220,6 +1409,9 @@ const tests = [
   testProjectSummaryBeatsSyntheticNoSummaryDuplicate,
   testFormalFailedRowsExposeAllDiagnostics,
   testClaudeRunnerSwitchWarnsFromLaunchPreflight,
+  testAppEvidenceHarnessWritesSummaryArtifact,
+  testAppEvidenceSemanticContractCanBeTopTierEligible,
+  testIncubatorQualityContractIsWired,
   testTrustHarnessRunsBeforeBuild,
   testStaleSourceMutationsAreWriteGated,
 ]

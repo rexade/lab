@@ -4,7 +4,7 @@ import os from 'os'
 import { createHash } from 'crypto'
 import { spawn, execSync } from 'child_process'
 import { fileURLToPath } from 'url'
-import { basename, dirname, join } from 'path'
+import { basename, dirname, join, resolve } from 'path'
 import {
   appendFailedPreflightEntry,
   appendFailedRunEntry,
@@ -16,6 +16,7 @@ import {
   firstRunnableClaudeModel,
   hydrateAiFeedback,
   parseRunsFromLog,
+  qualityStateFromRun,
   preflightFailureDetail,
   preflightRunConfig,
   runsWithPinnedLatestFailure,
@@ -46,6 +47,7 @@ const SOURCE_HEALTH_FILES = [
   join(__dirname, 'server.js'),
   join(__dirname, 'server-core.js'),
   join(__dirname, 'scripts', 'run-claude-incubator.sh'),
+  join(__dirname, 'scripts', 'app-evidence.mjs'),
   ...String(process.env.PI_PULSE_SOURCE_HEALTH_FILES || '').split(':').filter(Boolean),
 ]
 
@@ -560,11 +562,13 @@ function syncProjectStatus() {
     let current = {}
     try { current = JSON.parse(fs.readFileSync(PROJECT_STATUS_PATH, 'utf8')) } catch {}
 
+    const qualityState = latest ? qualityStateFromRun(latest, latest.type !== 'FAILED') : {}
     const updated = {
       ...current,
       runCount: latest?.num ?? current.runCount ?? 0,
       lastRun: latest?.date ?? current.lastRun,
       lastRunType: latest?.type ?? current.lastRunType,
+      ...qualityState,
       syncedAt: new Date().toISOString(),
     }
 
@@ -957,6 +961,58 @@ function readStatusAt(statusPath) {
   return JSON.parse(fs.readFileSync(statusPath, 'utf8'))
 }
 
+
+function incubatorAutoStrategyDecision(slot) {
+  let cfg = {}
+  try { cfg = readStatusAt(slot.statusPath) } catch { return null }
+  const autoRuns = Number(slot.autoRunsSinceHuman || 0)
+  const qualityGate = String(cfg.lastQualityGate || '').toUpperCase()
+  const qualityRating = Number(cfg.lastQualityRating)
+  const evidenceConfidence = Number(cfg.lastEvidenceConfidence)
+  const role = cfg.incubatorRole || cfg.role || inferIncubatorRole({ ...cfg, id: slot.id })
+  const text = [
+    cfg.next_run_goal,
+    cfg.lastQualitySummary,
+    cfg.lastRecoveryMode,
+    cfg.current_focus,
+  ].filter(Boolean).join(' ').toLowerCase()
+
+  // Manual/human validation requests are not a scheduler stop condition.
+  // Future runs should create stronger automated proxy evidence unless the
+  // user explicitly pauses or provides new steering.
+  const verdict = String(cfg.lastPlateauRegressionVerdict || '').toUpperCase()
+  const plateau = verdict.startsWith('PLATEAU') || /(plateau|no measurable application improvement|score_delta:\s*0|score delta 0|algorithm-score plateau|unchanged hard metrics)/.test(text)
+  if (autoRuns >= 3 && plateau && qualityGate === 'PASS') {
+    return {
+      runType: 'research',
+      reason: 'strategy shift: plateau detected; choose a stronger north star or a different measurable tactic',
+      code: 'AUTO_PLATEAU_RESEARCH',
+    }
+  }
+
+  const highQuality = qualityGate === 'PASS'
+    && Number.isFinite(qualityRating)
+    && qualityRating >= 4.5
+    && (!Number.isFinite(evidenceConfidence) || evidenceConfidence >= 4)
+  const maxAutoRuns = role === 'signal-feeder' ? 12 : 8
+  if (autoRuns >= maxAutoRuns && highQuality) {
+    return {
+      runType: 'research',
+      reason: `strategy shift: ${autoRuns} autonomous high-quality runs; select the strongest north star and next measurable bet`,
+      code: 'AUTO_NORTH_STAR_RESEARCH',
+    }
+  }
+
+  return null
+}
+
+function applyIncubatorAutoStrategy(slot, decision) {
+  const ts = new Date().toISOString()
+  slot.lastAutonomyInterventionAt = ts
+  slot.lastAutonomyInterventionReason = decision.reason
+  slot.lastAutonomyInterventionCode = decision.code
+}
+
 function expectedClaudeRunScriptForProject(project, cfg = {}) {
   if (cfg.claudeRunScript === GENERIC_CLAUDE_INCUBATOR_SCRIPT && fs.existsSync(cfg.claudeRunScript)) return cfg.claudeRunScript
   return GENERIC_CLAUDE_INCUBATOR_SCRIPT
@@ -1015,6 +1071,9 @@ function hydrateIncubator(slot) {
   return {
     ...slot,
     project: cfg.project,
+    name: cfg.displayName ?? cfg.incubatorTitle ?? repoStatus.displayName ?? repoStatus.incubatorTitle ?? cfg.project,
+    displayName: cfg.displayName ?? cfg.incubatorTitle ?? repoStatus.displayName ?? repoStatus.incubatorTitle ?? cfg.project,
+    incubatorRole: cfg.incubatorRole ?? cfg.role ?? repoStatus.incubatorRole ?? repoStatus.role ?? inferIncubatorRole({ ...repoStatus, ...cfg, id: slot.id }),
     phase: cfg.phase ?? repoStatus.phase ?? null,
     runner: cfg.runner ?? 'script',
     repo: cfg.repo,
@@ -1030,6 +1089,26 @@ function hydrateIncubator(slot) {
     lastRun: cfg.lastRun ?? repoStatus.lastRun ?? null,
     lastRunType: cfg.lastRunType ?? repoStatus.lastRunType ?? null,
     lastRunStatus: cfg.lastRunStatus ?? repoStatus.lastRunStatus ?? null,
+    lastRunnerStatus: cfg.lastRunnerStatus ?? repoStatus.lastRunnerStatus ?? null,
+    lastQualityGate: cfg.lastQualityGate ?? repoStatus.lastQualityGate ?? null,
+    lastQualityRating: cfg.lastQualityRating ?? repoStatus.lastQualityRating ?? null,
+    lastEvidenceConfidence: cfg.lastEvidenceConfidence ?? repoStatus.lastEvidenceConfidence ?? null,
+    lastQualitySummary: cfg.lastQualitySummary ?? repoStatus.lastQualitySummary ?? null,
+    lastNorthStar: cfg.lastNorthStar ?? repoStatus.lastNorthStar ?? null,
+    lastRunStrategy: cfg.lastRunStrategy ?? repoStatus.lastRunStrategy ?? null,
+    lastWhyRunType: cfg.lastWhyRunType ?? repoStatus.lastWhyRunType ?? null,
+    lastExpectedQualityDelta: cfg.lastExpectedQualityDelta ?? repoStatus.lastExpectedQualityDelta ?? null,
+    lastActualQualityDelta: cfg.lastActualQualityDelta ?? repoStatus.lastActualQualityDelta ?? null,
+    lastPlateauRegressionVerdict: cfg.lastPlateauRegressionVerdict ?? repoStatus.lastPlateauRegressionVerdict ?? null,
+    lastRecoveryRequired: cfg.lastRecoveryRequired ?? repoStatus.lastRecoveryRequired ?? null,
+    lastRecoveryMode: cfg.lastRecoveryMode ?? repoStatus.lastRecoveryMode ?? null,
+    lastAppEvidencePath: cfg.lastAppEvidencePath ?? repoStatus.lastAppEvidencePath ?? null,
+    lastAppEvidenceGate: cfg.lastAppEvidenceGate ?? repoStatus.lastAppEvidenceGate ?? null,
+    lastAppEvidenceTopTier: cfg.lastAppEvidenceTopTier ?? repoStatus.lastAppEvidenceTopTier ?? null,
+    lastAppEvidenceMode: cfg.lastAppEvidenceMode ?? repoStatus.lastAppEvidenceMode ?? null,
+    lastAppEvidencePrimaryAction: cfg.lastAppEvidencePrimaryAction ?? repoStatus.lastAppEvidencePrimaryAction ?? null,
+    lastAppEvidenceSemanticSuccess: cfg.lastAppEvidenceSemanticSuccess ?? repoStatus.lastAppEvidenceSemanticSuccess ?? null,
+    lastAppEvidenceSummary: cfg.lastAppEvidenceSummary ?? repoStatus.lastAppEvidenceSummary ?? null,
     lastRunFailure: cfg.lastRunFailure ?? repoStatus.lastRunFailure ?? null,
     lastRunFailureSource: cfg.lastRunFailureSource ?? repoStatus.lastRunFailureSource ?? null,
     lastRunExit: cfg.lastRunExit ?? repoStatus.lastRunExit ?? null,
@@ -1044,6 +1123,9 @@ function hydrateIncubator(slot) {
     feedbackPath: projectFeedbackPath(cfg),
     latestUserFeedback: cfg.latestUserFeedback ?? readLatestProjectFeedback(projectFeedbackPath(cfg)),
     feedbackUpdatedAt: cfg.feedbackUpdatedAt ?? null,
+    lastAutonomyInterventionAt: slot.lastAutonomyInterventionAt ?? null,
+    lastAutonomyInterventionReason: slot.lastAutonomyInterventionReason ?? null,
+    lastAutonomyInterventionCode: slot.lastAutonomyInterventionCode ?? null,
     running,
   }
 }
@@ -1212,8 +1294,84 @@ function slugifyProjectName(text) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 42)
+    .slice(0, 34)
   return slug || 'incubator-' + new Date().toISOString().slice(0, 10)
+}
+
+const INCUBATOR_TITLE_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'app', 'application', 'be', 'build', 'can', 'create', 'demo', 'for',
+  'from', 'give', 'ha', 'i', 'in', 'install', 'it', 'make', 'me', 'my', 'of', 'one',
+  'please', 'show', 'showcase', 'small', 'that', 'the', 'this', 'to', 'tool', 'u', 'use',
+  'using', 'want', 'with', 'would',
+])
+
+function titleCaseWords(words) {
+  return words
+    .filter(Boolean)
+    .map(word => word.slice(0, 1).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+function normalizedIncubatorTitle(value) {
+  const words = String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 5)
+  return words.length ? titleCaseWords(words) : null
+}
+
+function explicitIncubatorTitle(text) {
+  const match = String(text || '').match(/\b(?:called|named|title(?:d)?|name it|kalla den|som heter)\s+["']?([a-z0-9][a-z0-9 _-]{1,48})/i)
+  if (!match) return null
+  return match[1].replace(/["'.:;!?].*$/, '').trim()
+}
+
+function suggestedIncubatorTitle(idea) {
+  const text = String(idea || '').trim()
+  const explicit = normalizedIncubatorTitle(explicitIncubatorTitle(text))
+  if (explicit) return explicit
+
+  const lower = text.toLowerCase()
+  if (/\btaste\b|\bpreference\b|\bpicker\b/.test(lower)) return 'Taste Trainer'
+  if (/\bpi[-\s]?pulse\b/.test(lower) && (/\breport\b|\binvestigat|\baudit\b/.test(lower))) return 'Pulse Audit'
+  if (/\blauncher\b/.test(lower) && /\b(tv|android|nvidia|shield)\b/.test(lower)) return 'Shield Launcher'
+  if (/\bcamera\b/.test(lower) && /\bwindow\b/.test(lower)) return 'Window Camera'
+  if (/\bpoem\b|\bpoetry\b|\bdikt\b/.test(lower)) return 'Poem Machine'
+  if (/\bartifact\b/.test(lower) && (/\binteractive\b|\bdigital\b/.test(lower))) return 'Interactive Artifact'
+
+  const words = lower
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/\b(?:i want to|i would like to|can you|could you|please|jag skulle vilja|kan du)\b/g, ' ')
+    .split(/[^a-z0-9]+/)
+    .filter(word => word.length > 2 && !INCUBATOR_TITLE_STOP_WORDS.has(word))
+
+  const typeWord = words.find(word => ['game', 'launcher', 'report', 'audit', 'trainer', 'camera', 'dashboard', 'tracker', 'editor', 'generator', 'simulator'].includes(word))
+  const subjectWords = words.filter(word => word !== typeWord).slice(0, typeWord ? 2 : 3)
+  const titleWords = typeWord ? [...subjectWords, typeWord] : subjectWords
+  return titleCaseWords(titleWords.length ? titleWords : ['New', 'Incubator'])
+}
+
+function inferIncubatorRole(value = {}) {
+  const text = [
+    value.id,
+    value.project,
+    value.displayName,
+    value.incubatorTitle,
+    value.phase,
+    value.current_focus,
+    value.notes,
+  ].filter(Boolean).join(' ').toLowerCase()
+  if (/\btaste\b|\bpreference\b|\bpicker\b|\btrain\b/.test(text)) return 'signal-feeder'
+  if (/\baudit\b|\breport\b|\binvestigat/.test(text) && /\bpi[-\s]?pulse\b|\bincubator\b/.test(text)) return 'signal-feeder'
+  if (/\bimpossible\b|\bbullshit\b|\bbenchmark\b|\bhard evidence\b|\bcompletion rate\b|\bcrashes\b|\bruntime\b|\bscheduler\b|\bpacking\b|\branking\b|\banomaly\b|\bcompression\b|\bocr\b|\bdatabase\b|\bquery engine\b/.test(text)) return 'signal-feeder'
+  return 'product'
+}
+
+function incubatorRoleLabel(role = 'product') {
+  return role === 'signal-feeder' ? 'Signal Incubator' : 'Project Incubator'
 }
 
 function uniqueIncubatorSlug(seed) {
@@ -1259,29 +1417,83 @@ function ensureDirectory(filePath) {
   }
 }
 
-function promptForIncubatorRunType(project, runType) {
+function incubatorQualityInstructions(seedIdea = '', incubatorRole = 'product') {
+  const seed = seedIdea ? `
+Seed idea:
+${seedIdea}
+` : ''
+  const signalFeeder = incubatorRole === 'signal-feeder'
+  const roleBlock = signalFeeder ? `
+Incubator role: signal feeder for Pi Pulse.
+- Treat the app as an instrument that should produce reusable learning for future incubators, not only as a standalone product.
+- Keep the user-facing workflow small enough to generate clear signal.
+- Prefer measurable outcomes, before/after comparisons, preference labels, or failure patterns over vague impressions.
+- Every run must add these extra fields to reports/RUN_LOG.md when there is a lesson:
+**Pi Pulse lesson:** [one portable lesson future incubators should reuse]
+**Learning evidence:** [metric, user observation, screenshot, test, or app-evidence result]
+**Applies to future apps:** yes/no - [scope]
+` : `
+Incubator role: product app.
+- Optimize for a real user's first-screen clarity, main workflow, and durable product quality.
+`
+  return `${seed}${roleBlock}
+Quality contract:
+- Read reports/USER_FEEDBACK.md if present and convert the latest note into one acceptance check.
+- Treat runner success as process health only; product quality needs its own gate.
+- Verify with command/test output, file inspection, screenshot/browser/manual UI check, or an explicit not-applicable reason.
+- For static, React, or web app projects, PASS requires app runtime evidence under reports/evidence/run-[number]/ or a clear not-applicable reason for non-UI work.
+- For 4.5+ UI quality, register window.__PI_PULSE_APP__ with a visible primaryAction.selector, a machine-checkable expect success contract, and preferably reset/snapshot hooks.
+- If app evidence is missing, blank, degraded, lacks a semantic success contract, or has runtime errors, write NEEDS-EVIDENCE or FAIL instead of PASS.
+- If evidence is thin, write NEEDS-EVIDENCE. If steering is missed or the app/main flow breaks, write FAIL.
+- Do not make manual/human validation the required next move unless the user explicitly asked for it. If a human-feel question remains, create a better automated proxy, A/B receipt, screenshot proof, replay, benchmark slice, or semantic contract in the next autonomous run.
+- Research runs must infer a defensible north star themselves from the current artifact, prior steering, market/common product taste, and evidence. Do not ask the user to define the north star; state it, explain the tradeoff, and choose the next measurable bet.
+- Every run must declare first-class strategy fields: North star, Strategy, Why this run type, Expected quality delta, Actual quality delta, and Plateau/regression verdict. These fields drive future loop policy, so do not bury them in prose.
+- Negative feedback triggers recovery mode: if the latest user note says the app is ugly, confusing, broken, crashed, insufficient, degraded, not working, or worse than an existing alternative, do not add features. Fix the smallest user-visible failure in the first screen or main workflow, simplify/delete weak material, and do not write PASS unless the complaint path is verified.
+
+Append these fields to reports/RUN_LOG.md every run:
+**North star:** [the strongest inferred product/benchmark/taste target for this project]
+**Strategy:** [one sentence: what this run is trying to prove or improve]
+**Why this run type:** [why CREATE/MUTATE/RESEARCH/HARVEST is the right move now]
+**Expected quality delta:** [what should improve, with metric/observable if possible]
+**Actual quality delta:** [what actually moved, or "none measured"]
+**Plateau/regression verdict:** IMPROVED | PLATEAU | REGRESSION | UNCLEAR - [short reason]
+**Recovery mode:** yes/no - [complaint addressed, or "not triggered"]
+**Acceptance check:** [one concrete criterion]
+**Evidence:** [commands, files, screenshots/manual checks, or explicit not-applicable reason]
+**App evidence:** [reports/evidence/run-[number]/summary.md, or not applicable]
+**Quality gate:** PASS | NEEDS-EVIDENCE | FAIL
+**Quality rating:** [0-5]/5
+**Evidence confidence:** [0-5]/5
+**Risk / regression:** [what got worse, is unverified, or could break]
+**Next move:** [one small follow-up]
+`
+}
+
+function promptForIncubatorRunType(project, runType, seedIdea = '', incubatorRole = 'product') {
   const normalized = String(runType || 'mutate').toLowerCase()
+  const quality = incubatorQualityInstructions(seedIdea, incubatorRole)
   if (normalized === 'create') {
     return `Create the first tiny local prototype for ${project}.
 
 Rules:
 - Build the smallest usable version first.
 - Keep it local and simple.
-- Append a concise summary to reports/RUN_LOG.md.
-`
+- Prefer plain files and clear state over backend complexity unless the idea truly needs it.
+- Append a concise summary plus the quality fields to reports/RUN_LOG.md.
+${quality}`
   }
   if (normalized === 'research') {
     return `Research the next best move for ${project}.
 
-Use the repo, reports/RUN_LOG.md, reports/RECENT_RUNS.md, and reports/USER_FEEDBACK.md if present. Identify what is unclear, what should be tested next, and what would make the project more useful. Append a concise summary to reports/RUN_LOG.md.
-`
+Use the repo, reports/RUN_LOG.md, reports/RECENT_RUNS.md, and reports/USER_FEEDBACK.md if present. Identify what is unclear, what should be tested next, and what would make the project more useful. Do not modify source files. Append a concise summary plus the quality fields to reports/RUN_LOG.md.
+${quality}`
   }
   return `Improve ${project} by one focused step.
 
 Before changing anything, read reports/USER_FEEDBACK.md if it exists and treat the latest notes as steering input.
 
-Choose one useful mutation that makes the project more real, testable, or personally aligned. Append a concise summary to reports/RUN_LOG.md.
-`
+Choose one useful mutation that makes the project more real, testable, or personally aligned. Append a concise summary plus the quality fields to reports/RUN_LOG.md.
+${quality}`
 }
 
 function safeRunTypeName(runType) {
@@ -1415,12 +1627,14 @@ function normalizeIncubatorStatus(statusPath) {
   return { status: next, repaired: changed }
 }
 
-function createIncubatorProjectFromIdea(idea) {
+function createIncubatorProjectFromIdea(idea, requestedTitle = '') {
   const cleanIdea = String(idea || '').trim()
   if (cleanIdea.length < 8) {
     return { ok: false, status: 400, error: 'project idea is too short' }
   }
-  const slug = uniqueIncubatorSlug(cleanIdea)
+  const title = normalizedIncubatorTitle(requestedTitle) || suggestedIncubatorTitle(cleanIdea)
+  const slug = uniqueIncubatorSlug(title)
+  const incubatorRole = inferIncubatorRole({ id: slug, displayName: title, current_focus: cleanIdea })
   const repo = join('/home/admin', slug)
   const labProjectDir = join(PROJECTS_DIR, slug)
   const promptDir = join(repo, 'prompts')
@@ -1433,7 +1647,6 @@ function createIncubatorProjectFromIdea(idea) {
   fs.mkdirSync(reportsDir, { recursive: true })
   fs.mkdirSync(labProjectDir, { recursive: true })
 
-  const title = slug.split('-').map(part => part ? part[0].toUpperCase() + part.slice(1) : '').join(' ')
   writeFileIfMissing(join(repo, 'README.md'), `# ${title}
 
 Seed idea:
@@ -1442,34 +1655,9 @@ ${cleanIdea}
 
 This project was created from the Pi Pulse Add Incubator idea box.
 `)
-  writeFileIfMissing(join(promptDir, 'create.md'), `Create the first tiny local prototype for this incubator project.
-
-Seed idea:
-${cleanIdea}
-
-Rules:
-- Build the smallest usable version first.
-- Keep it local and simple.
-- Prefer plain files and clear state over backend complexity unless the idea truly needs it.
-- Append a concise summary to reports/RUN_LOG.md.
-- Preserve and use USER_FEEDBACK.md when present.
-`)
-  writeFileIfMissing(join(promptDir, 'mutate.md'), `Improve this incubator project by one focused step.
-
-Seed idea:
-${cleanIdea}
-
-Before changing anything, read reports/USER_FEEDBACK.md if it exists and treat the latest notes as steering input.
-
-Choose one useful mutation that makes the project more real, testable, or personally aligned. Append a concise summary to reports/RUN_LOG.md.
-`)
-  writeFileIfMissing(join(promptDir, 'research.md'), `Research the next best move for this incubator project.
-
-Seed idea:
-${cleanIdea}
-
-Use the repo, reports/RUN_LOG.md, reports/RECENT_RUNS.md, and reports/USER_FEEDBACK.md if present. Identify what is unclear, what should be tested next, and what would make the project more useful. Append a concise summary to reports/RUN_LOG.md.
-`)
+  writeFileIfMissing(join(promptDir, 'create.md'), promptForIncubatorRunType('this incubator project', 'create', cleanIdea, incubatorRole))
+  writeFileIfMissing(join(promptDir, 'mutate.md'), promptForIncubatorRunType('this incubator project', 'mutate', cleanIdea, incubatorRole))
+  writeFileIfMissing(join(promptDir, 'research.md'), promptForIncubatorRunType('this incubator project', 'research', cleanIdea, incubatorRole))
   writeFileIfMissing(runLog, `# Run Log\n\n`)
   writeFileIfMissing(recentRuns, `# Recent Runs\n\n*(no runs yet)*\n`)
   writeFileIfMissing(feedbackPath, `# User Feedback / Steering Notes
@@ -1483,6 +1671,9 @@ ${cleanIdea}
 
   const status = {
     project: slug,
+    displayName: title,
+    incubatorTitle: title,
+    incubatorRole,
     status: 'seeded',
     phase: 'idea-seed',
     runner: 'codex',
@@ -1531,6 +1722,35 @@ for (const slot of readIncubators().slots) {
   try {
     mountPlayRoute(readStatusAt(slot.statusPath))
   } catch { /* skip malformed incubator slots */ }
+}
+
+function incubatorPlayFileForRequest(requestPath) {
+  const match = String(requestPath || '').match(/^\/([a-z0-9_-]+)(?:\/(.*))?$/i)
+  if (!match) return null
+  const slug = match[1].toLowerCase()
+  const requestFile = match[2] && match[2] !== '' ? match[2] : 'index.html'
+
+  for (const slot of readIncubators().slots) {
+    try {
+      const cfg = readStatusAt(slot.statusPath)
+      const routeSlug = cfg.project.replace(/[^a-z0-9_-]/gi, '-').toLowerCase()
+      if (routeSlug !== slug || !fs.existsSync(join(cfg.repo, 'index.html'))) continue
+
+      const repoRoot = resolve(cfg.repo)
+      const candidate = resolve(repoRoot, requestFile)
+      if (candidate !== repoRoot && !candidate.startsWith(repoRoot + '/')) return null
+
+      const stat = fs.statSync(candidate)
+      if (stat.isDirectory()) {
+        const indexPath = join(candidate, 'index.html')
+        return fs.existsSync(indexPath) ? indexPath : null
+      }
+      return stat.isFile() ? candidate : null
+    } catch {
+      // Keep scanning other slots; malformed slot state should not break SPA fallback.
+    }
+  }
+  return null
 }
 
 // ─── Incubator auto-schedule ───────────────────────────────────────────────────
@@ -1652,6 +1872,14 @@ app.post('/api/incubators/:id/run', requireFreshSource, (req, res) => {
     return res.status(422).json(result)
   }
   slot.autoRunsSinceHuman = 0
+  slot.lastScheduleBlockedAt = null
+  slot.lastScheduleBlockedReason = null
+  slot.lastScheduleBlockedCode = null
+  slot.schedulePausedAt = null
+  slot.schedulePauseReason = null
+  slot.lastAutonomyInterventionAt = null
+  slot.lastAutonomyInterventionReason = null
+  slot.lastAutonomyInterventionCode = null
   writeIncubators(data)
   notifyIncubatorClients()
   res.json({ ok: true, ...result })
@@ -1669,6 +1897,14 @@ app.post('/api/incubators/:id/schedule', requireFreshSource, (req, res) => {
     if (!slot.nextRunAt || slot.nextRunAt < Date.now()) {
       slot.nextRunAt = Date.now() + (slot.intervalHours || 0.5) * 60 * 60 * 1000
     }
+    slot.lastScheduleBlockedAt = null
+    slot.lastScheduleBlockedReason = null
+    slot.lastScheduleBlockedCode = null
+    slot.schedulePausedAt = null
+    slot.schedulePauseReason = null
+    slot.lastAutonomyInterventionAt = null
+    slot.lastAutonomyInterventionReason = null
+    slot.lastAutonomyInterventionCode = null
   } else {
     slot.nextRunAt = null
   }
@@ -1716,7 +1952,7 @@ app.post('/api/incubators/:id/runner', requireFreshSource, (req, res) => {
 })
 
 app.post('/api/incubators/create', requireFreshSource, (req, res) => {
-  const result = createIncubatorProjectFromIdea(req.body?.idea)
+  const result = createIncubatorProjectFromIdea(req.body?.idea, req.body?.title)
   if (!result.ok) return res.status(result.status || 400).json(result)
   const data = readIncubators()
   const slot = {
@@ -1760,6 +1996,18 @@ app.post('/api/incubators/:id/feedback', requireFreshSource, (req, res) => {
     cfg.latestUserFeedback = feedback.slice(0, 2000)
     cfg.feedbackUpdatedAt = stamp
     cfg.next_run_goal = `Use latest user feedback: ${feedback.slice(0, 180)}`
+    slot.autoRunsSinceHuman = 0
+    slot.lastScheduleBlockedAt = null
+    slot.lastScheduleBlockedReason = null
+    slot.lastScheduleBlockedCode = null
+    slot.schedulePausedAt = null
+    slot.schedulePauseReason = null
+    slot.lastAutonomyInterventionAt = null
+    slot.lastAutonomyInterventionReason = null
+    slot.lastAutonomyInterventionCode = null
+    if (slot.enabled && (!slot.nextRunAt || slot.nextRunAt < Date.now())) {
+      slot.nextRunAt = Date.now() + (slot.intervalHours || 0.5) * 60 * 60 * 1000
+    }
     fs.writeFileSync(slot.statusPath, JSON.stringify(cfg, null, 2) + '\n')
     writeIncubators(data)
     notifyIncubatorClients()
@@ -1803,9 +2051,17 @@ app.delete('/api/incubators/:id', requireFreshSource, (req, res) => {
   if (next.length === data.slots.length) return res.status(404).json({ ok: false, error: 'incubator not found' })
   data.slots = next
   writeIncubators(data)
+  const running = activeIncubatorRuns.get(req.params.id)
+  let stoppedPid = null
+  if (running?.pid && Number(running.pid) > 1) {
+    stoppedPid = running.pid
+    try { process.kill(-running.pid, 'SIGTERM') } catch {
+      try { process.kill(running.pid, 'SIGTERM') } catch {}
+    }
+  }
   activeIncubatorRuns.delete(req.params.id)
   notifyIncubatorClients()
-  res.json({ ok: true })
+  res.json({ ok: true, removed: req.params.id, stoppedPid })
 })
 
 if (SCHEDULES_ENABLED) {
@@ -1815,7 +2071,13 @@ if (SCHEDULES_ENABLED) {
     for (const slot of data.slots) {
       if (!slot.enabled || !slot.nextRunAt || Date.now() < slot.nextRunAt) continue
       if (getIncubatorRun(slot.id).running) continue
-      const result = startIncubatorRun(slot)
+      const autoStrategy = incubatorAutoStrategyDecision(slot)
+      if (autoStrategy) {
+        applyIncubatorAutoStrategy(slot, autoStrategy)
+        console.warn(`[pi-pulse] incubator: ${slot.id} ${autoStrategy.reason}`)
+        changed = true
+      }
+      const result = startIncubatorRun(slot, autoStrategy?.runType || null)
       if (!result) continue
       if (result.ok === false) {
         let runLogPath = null
@@ -1939,6 +2201,7 @@ const CHILD_FEEDBACK_JSON = join(CHILD_DIR, 'memory', 'DRIFT_FEEDBACK.json')
 const CHILD_FEEDBACK_MD   = join(CHILD_DIR, 'memory', 'DRIFT_FEEDBACK.md')
 
 app.post('/api/child/ai/analyze', requireFreshSource, async (req, res) => {
+  if (!LOCAL_LLM_ENABLED) return res.status(503).json(localLlmDisabledPayload('child'))
   try {
     // Use MemPalace semantic search for compact context
     const palaceCtx = queryMemPalace(`${mountedProject.name} seed direction active threads`, { wing: 'lab', results: 3, maxChars: 600 })
@@ -2002,6 +2265,7 @@ app.get('/api/child/ai/latest', (req, res) => {
 
 
 app.get('/api/child/ai/status', async (req, res) => {
+  if (!LOCAL_LLM_ENABLED) return res.json(localLlmStatusPayload())
   try {
     const r = await fetch(`${HAILO_URL}/api/tags`)
     const data = await r.json()
@@ -2074,6 +2338,7 @@ app.get('/api/incubators/:id/ai/latest', (req, res) => {
 app.post('/api/incubators/:id/ai/analyze', requireFreshSource, async (req, res) => {
   const target = aiTargetForIncubator(req.params.id)
   if (!target) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  if (!LOCAL_LLM_ENABLED) return res.status(503).json(localLlmDisabledPayload('incubator'))
   try {
     const palaceCtx = queryMemPalace(target.query, { wing: 'lab', results: 3, maxChars: 600 })
     let recentLog = ''
@@ -2122,9 +2387,32 @@ NEXT: <the single most useful next action>`
   }
 })
 
-// AI analysis via local Ollama/Qwen
+// AI analysis via local Ollama/Qwen. Disabled by default because CPU fallback
+// saturates the Pi; opt in only for deliberate local inference sessions.
+const LOCAL_LLM_ENABLED = process.env.PI_PULSE_ENABLE_LOCAL_LLM === '1'
 const HAILO_URL = 'http://localhost:11434'
 const AI_MODEL = 'qwen2.5-instruct:1.5b'
+
+function localLlmDisabledPayload(scope = 'core') {
+  return {
+    ok: false,
+    available: false,
+    disabled: true,
+    scope,
+    code: 'LOCAL_LLM_DISABLED',
+    error: 'Local Ollama/Qwen inference is disabled on this Pi. Set PI_PULSE_ENABLE_LOCAL_LLM=1 to enable it for a deliberate session.',
+  }
+}
+
+function localLlmStatusPayload() {
+  return {
+    available: false,
+    modelLoaded: false,
+    disabled: true,
+    models: [],
+    code: 'LOCAL_LLM_DISABLED',
+  }
+}
 
 // MemPalace semantic search — returns relevant context snippets (~100-600 chars)
 // instead of dumping raw files into every prompt
@@ -2154,6 +2442,7 @@ function queryMemPalace(query, { wing = '', results = 3, maxChars = 600 } = {}) 
 }
 
 app.get('/api/ai/status', async (req, res) => {
+  if (!LOCAL_LLM_ENABLED) return res.json(localLlmStatusPayload())
   try {
     const r = await fetch(`${HAILO_URL}/api/tags`)
     const data = await r.json()
@@ -2165,6 +2454,7 @@ app.get('/api/ai/status', async (req, res) => {
 })
 
 app.post('/api/ai/analyze', requireFreshSource, async (req, res) => {
+  if (!LOCAL_LLM_ENABLED) return res.status(503).json(localLlmDisabledPayload('core'))
   try {
     // Use MemPalace semantic search for compact context instead of raw file dumps
     const palaceCtx = queryMemPalace('pi-pulse seed direction current state active threads', { wing: 'lab', results: 3, maxChars: 600 })
@@ -2304,7 +2594,7 @@ app.get('/api/projects/list', (req, res) => {
       try {
         const cfg = JSON.parse(fs.readFileSync(statusPath, 'utf8'))
         projects.push({
-          name:     cfg.project ?? entry.name,
+          name:     cfg.displayName ?? cfg.incubatorTitle ?? cfg.project ?? entry.name,
           dir:      entry.name,
           phase:    cfg.phase ?? null,
           runCount: cfg.runCount ?? 0,
@@ -2408,6 +2698,12 @@ app.use('/api', (req, res) => {
 
 // SPA fallback
 app.get('*', (req, res) => {
+  const incubatorFile = incubatorPlayFileForRequest(req.path)
+  if (incubatorFile) {
+    res.sendFile(incubatorFile)
+    return
+  }
+
   const indexPath = join(__dirname, 'dist', 'index.html')
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath)

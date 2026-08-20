@@ -245,6 +245,47 @@ export function summarizeRun(run) {
     run.Output || run['Suggested next move'] || run['Next move'] || ''
 }
 
+export function normalizeQualityGate(value = '') {
+  const raw = String(value || '').trim().toUpperCase().replace(/[_.\s]+/g, '-')
+  if (!raw) return null
+  if (raw.startsWith('PASS')) return 'PASS'
+  if (raw.startsWith('FAIL')) return 'FAIL'
+  if (raw.includes('NEEDS-EVIDENCE') || raw.includes('NEED-EVIDENCE') || raw.includes('INSUFFICIENT-EVIDENCE')) return 'NEEDS-EVIDENCE'
+  return null
+}
+
+export function parseQualityScore(value = '') {
+  const match = String(value || '').match(/(\d+(?:\.\d+)?)\s*\/\s*5/)
+  if (!match) return null
+  const score = Number(match[1])
+  return Number.isFinite(score) ? Math.max(0, Math.min(5, score)) : null
+}
+
+export function qualityStateFromRun(run = {}, runnerOk = true) {
+  const failed = !runnerOk || run?.type === 'FAILED'
+  const explicitGate = normalizeQualityGate(run['Quality gate'] || run['Quality Gate'] || run.Gate)
+  const gate = failed ? 'FAIL' : explicitGate || 'NEEDS-EVIDENCE'
+  const qualityRating = parseQualityScore(run['Quality rating'] || run['State rating'] || run.Rating)
+  const evidenceConfidence = parseQualityScore(run['Evidence confidence'] || run['Evidence Confidence'] || run.Confidence)
+  const summary = run['Evidence'] || run['Acceptance check'] || run['Risk / regression'] || summarizeRun(run) || (explicitGate ? '' : 'Latest run did not report a quality gate.')
+  const lastRunStatus = failed
+    ? 'failed'
+    : gate === 'PASS'
+      ? 'ok'
+      : gate === 'FAIL'
+        ? 'quality-failed'
+        : 'needs-evidence'
+
+  return {
+    lastRunnerStatus: runnerOk ? 'ok' : 'failed',
+    lastRunStatus,
+    lastQualityGate: gate,
+    lastQualityRating: qualityRating,
+    lastEvidenceConfidence: evidenceConfidence,
+    lastQualitySummary: summary ? String(summary).slice(0, 360) : null,
+  }
+}
+
 function publicRun(run) {
   const { _order, _source, _attemptKey, ...rest } = run
   return rest
@@ -562,9 +603,22 @@ export function parseRunsFromLog(content, options = {}) {
   return annotateRunAttempts(dedupeCopiedRuns(dropSyntheticNoSummaryDuplicates(sortedRuns))).map(publicRun)
 }
 
+function isRecoveredAfterFailure(run) {
+  if (!run || run.type === 'FAILED') return false
+  const gate = String(run['Quality gate'] || '').toUpperCase()
+  return gate === 'PASS' || run.type === 'CREATE' || run.type === 'MUTATE' || run.type === 'RESEARCH' || run.type === 'HARVEST'
+}
+
+function shouldPinFailure(runs = [], failure, recent) {
+  if (!failure || recent.includes(failure)) return false
+  const failureIndex = runs.indexOf(failure)
+  if (failureIndex < 0) return false
+  return !runs.slice(failureIndex + 1).some(isRecoveredAfterFailure)
+}
+
 export function runsWithPinnedLatestFailure(runs = [], limit = 10) {
   const recent = runs.slice(-limit)
   const latestFailure = [...runs].reverse().find(run => run?.type === 'FAILED')
-  if (!latestFailure || recent.includes(latestFailure)) return recent
+  if (!shouldPinFailure(runs, latestFailure, recent)) return recent
   return [latestFailure, ...recent]
 }

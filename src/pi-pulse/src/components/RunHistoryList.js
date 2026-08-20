@@ -12,6 +12,7 @@ const SUMMARY_FIELDS = [
   'Failure',
   'Error',
   'Goal',
+  'Acceptance check',
   'Done',
   'What I investigated',
   'Investigated',
@@ -22,6 +23,8 @@ const SUMMARY_FIELDS = [
   'What I found',
   'Finding',
   'Key finding',
+  'Quality gate',
+  'Quality rating',
   'Output excerpt',
   'Suggested next move',
 ]
@@ -69,8 +72,20 @@ export function runFailureDetail(run = {}) {
 
 export function runOutputDetail(run = {}) {
   if (run.type === 'FAILED') return runFailureDetail(run)
-  if (!run['Stdout tail'] && !run.Output) return ''
-  return ['Output excerpt', 'Stdout tail', 'Output', 'Next move']
+  const detailFields = [
+    'Acceptance check',
+    'Evidence',
+    'Quality gate',
+    'Quality rating',
+    'Evidence confidence',
+    'Risk / regression',
+    'Output excerpt',
+    'Stdout tail',
+    'Output',
+    'Next move',
+  ]
+  if (!detailFields.some(field => run[field])) return ''
+  return detailFields
     .filter(field => run[field])
     .map(field => `${field}: ${run[field]}`)
     .join('\n')

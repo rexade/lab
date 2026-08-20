@@ -128,11 +128,131 @@ function preflightFailureRows(preflight) {
   return [preflight.error || 'runner preflight failed']
 }
 
+function recoveredAfterFailure(run) {
+  if (!run || run.type === 'FAILED') return false
+  const gate = String(run['Quality gate'] || '').toUpperCase()
+  return gate === 'PASS' || ['CREATE', 'MUTATE', 'RESEARCH', 'HARVEST'].includes(String(run.type || '').toUpperCase())
+}
+
 function selectedHistoryRuns(runs = [], limit = 5) {
   const recent = runs.slice(-limit)
   const latestFailure = [...runs].reverse().find(run => run?.type === 'FAILED')
   if (!latestFailure || recent.includes(latestFailure)) return recent
-  return [...recent, latestFailure]
+  const failureIndex = runs.indexOf(latestFailure)
+  const recovered = failureIndex >= 0 && runs.slice(failureIndex + 1).some(recoveredAfterFailure)
+  return recovered ? recent : [...recent, latestFailure]
+}
+
+
+function slotLastRunStatus(slot = {}) {
+  return slot.lastRunStatus || slot.status?.lastRunStatus || null
+}
+
+function slotQualityGate(slot = {}) {
+  return slot.lastQualityGate || slot.status?.lastQualityGate || null
+}
+
+function slotQualityRating(slot = {}) {
+  return slot.lastQualityRating ?? slot.status?.lastQualityRating ?? null
+}
+
+function slotEvidenceConfidence(slot = {}) {
+  return slot.lastEvidenceConfidence ?? slot.status?.lastEvidenceConfidence ?? null
+}
+
+function slotQualitySummary(slot = {}) {
+  return slot.lastQualitySummary || slot.status?.lastQualitySummary || ''
+}
+
+function slotNorthStar(slot = {}) {
+  return slot.lastNorthStar || slot.status?.lastNorthStar || ''
+}
+
+function slotRunStrategy(slot = {}) {
+  return slot.lastRunStrategy || slot.status?.lastRunStrategy || ''
+}
+
+function slotWhyRunType(slot = {}) {
+  return slot.lastWhyRunType || slot.status?.lastWhyRunType || ''
+}
+
+function slotExpectedQualityDelta(slot = {}) {
+  return slot.lastExpectedQualityDelta || slot.status?.lastExpectedQualityDelta || ''
+}
+
+function slotActualQualityDelta(slot = {}) {
+  return slot.lastActualQualityDelta || slot.status?.lastActualQualityDelta || ''
+}
+
+function slotPlateauRegressionVerdict(slot = {}) {
+  return slot.lastPlateauRegressionVerdict || slot.status?.lastPlateauRegressionVerdict || ''
+}
+
+function slotRecoveryRequired(slot = {}) {
+  return !!(slot.lastRecoveryRequired ?? slot.status?.lastRecoveryRequired)
+}
+
+function slotRecoveryMode(slot = {}) {
+  return slot.lastRecoveryMode || slot.status?.lastRecoveryMode || ''
+}
+
+function slotAppEvidenceGate(slot = {}) {
+  return slot.lastAppEvidenceGate || slot.status?.lastAppEvidenceGate || null
+}
+
+function slotAppEvidencePath(slot = {}) {
+  return slot.lastAppEvidencePath || slot.status?.lastAppEvidencePath || ''
+}
+
+function slotAppEvidenceSummary(slot = {}) {
+  return slot.lastAppEvidenceSummary || slot.status?.lastAppEvidenceSummary || ''
+}
+
+function slotAutonomyIntervention(slot = {}) {
+  return slot.lastAutonomyInterventionReason || slot.status?.lastAutonomyInterventionReason || ''
+}
+
+function slotAppEvidencePrimaryAction(slot = {}) {
+  return slot.lastAppEvidencePrimaryAction || slot.status?.lastAppEvidencePrimaryAction || null
+}
+
+function slotAppEvidenceMode(slot = {}) {
+  return slot.lastAppEvidenceMode || slot.status?.lastAppEvidenceMode || null
+}
+
+function slotAppEvidenceTopTier(slot = {}) {
+  return slot.lastAppEvidenceTopTier ?? slot.status?.lastAppEvidenceTopTier ?? null
+}
+
+function slotAppEvidenceSemanticSuccess(slot = {}) {
+  return slot.lastAppEvidenceSemanticSuccess || slot.status?.lastAppEvidenceSemanticSuccess || null
+}
+
+function isQualityWeak(slot = {}) {
+  const status = slotLastRunStatus(slot)
+  const gate = slotQualityGate(slot)
+  const appEvidenceGate = slotAppEvidenceGate(slot)
+  return slotRecoveryRequired(slot) || status === 'needs-evidence' || status === 'quality-failed' || (!!gate && gate !== 'PASS') || (!!appEvidenceGate && appEvidenceGate !== 'PASS')
+}
+
+function incubatorRoleLabel(slot = {}) {
+  const role = slot.incubatorRole || slot.role || slot.status?.incubatorRole || slot.status?.role || 'product'
+  if (role === 'signal-feeder') return 'Signal Incubator'
+  if (slot.project === 'race-whisperer-predict') return 'Analysis Incubator'
+  return 'Project Incubator'
+}
+
+function qualityLabel(slot = {}) {
+  const status = slotLastRunStatus(slot)
+  const gate = slotQualityGate(slot)
+  const appEvidenceGate = slotAppEvidenceGate(slot)
+  if (slotRecoveryRequired(slot)) return 'recovery required'
+  if (appEvidenceGate === 'FAIL') return 'app evidence failed'
+  if (appEvidenceGate === 'NEEDS-EVIDENCE') return 'needs app evidence'
+  if (status === 'quality-failed' || gate === 'FAIL') return 'quality failed'
+  if (status === 'needs-evidence' || gate === 'NEEDS-EVIDENCE') return 'needs evidence'
+  if (gate === 'PASS') return 'quality pass'
+  return 'quality unknown'
 }
 
 function IncubatorSlot({ slot, onToggle, onRun, readinessIssue = null, readinessDetails = [] }) {
@@ -143,13 +263,18 @@ function IncubatorSlot({ slot, onToggle, onRun, readinessIssue = null, readiness
   const ringColor = '#a78bfa'
   const blockedAt = latestScheduleBlock(slot.schedule)
   const runnerBlocked = !!readinessIssue
-  const lastRunFailed = slot.lastRunStatus === 'failed' || slot.status?.lastRunStatus === 'failed'
+  const lastRunStatus = slotLastRunStatus(slot)
+  const lastRunFailed = lastRunStatus === 'failed'
+  const lastQualityWeak = isQualityWeak(slot)
+  const lastQualityLabel = qualityLabel(slot)
   const lastFailureDetail = slot.lastRunFailure || slot.status?.lastRunFailure || ''
   const failureVisible = runnerBlocked || lastRunFailed
-  const statusColor = active ? ringColor : (runnerBlocked || blockedAt || lastRunFailed) ? '#f87171' : enabled ? '#22c55e' : 'rgba(71,85,105,0.45)'
+  const qualityVisible = !failureVisible && lastQualityWeak
+  const statusColor = active ? ringColor : (runnerBlocked || blockedAt || lastRunFailed) ? '#f87171' : lastQualityWeak ? '#f59e0b' : enabled ? '#22c55e' : 'rgba(71,85,105,0.45)'
   const level = Math.max(1, Math.floor((slot.runCount || 0) / 5) + 1)
   const xp = Math.min(100, ((slot.runCount || 0) % 5) * 20)
   const blockedDetail = readinessDetails[0] || readinessIssue || failureSignal(lastFailureDetail)
+  const autonomyIntervention = slotAutonomyIntervention(slot)
 
   return (
     <div
@@ -225,7 +350,7 @@ function IncubatorSlot({ slot, onToggle, onRun, readinessIssue = null, readiness
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}>
-            {active ? 'incubating' : runnerBlocked ? 'runner blocked' : blockedAt ? 'schedule blocked' : lastRunFailed ? 'last failed' : enabled ? `every ${fmtInterval(slot.schedule?.intervalHours)}` : 'paused'}
+            {active ? 'incubating' : runnerBlocked ? 'runner blocked' : blockedAt ? 'schedule blocked' : lastRunFailed ? 'last failed' : lastQualityWeak ? lastQualityLabel : enabled ? `every ${fmtInterval(slot.schedule?.intervalHours)}` : 'paused'}
           </span>
         </div>
         <div style={{
@@ -249,14 +374,23 @@ function IncubatorSlot({ slot, onToggle, onRun, readinessIssue = null, readiness
           color: 'rgba(148,163,184,0.66)',
         }}>
           <span>{runner}</span>
+          {autonomyIntervention && <span title={autonomyIntervention}>strategy shift</span>}
           <span>{slot.charges ?? '∞'} charges</span>
-          <span>{active ? fmtElapsed(slot.elapsed || 0) : runnerBlocked ? 'preflight failed' : blockedAt ? `blocked ${fmtScheduleTime(blockedAt)}` : lastRunFailed ? 'failure recorded' : enabled ? `next ${due}` : 'no timer'}</span>
+          <span>{active ? fmtElapsed(slot.elapsed || 0) : runnerBlocked ? 'preflight failed' : blockedAt ? `blocked ${fmtScheduleTime(blockedAt)}` : lastRunFailed ? 'failure recorded' : lastQualityWeak ? (slotQualityRating(slot) == null ? 'quality unrated' : `quality ${slotQualityRating(slot)}/5`) : enabled ? `next ${due}` : 'no timer'}</span>
         </div>
         {failureVisible && (
           <div data-card-last-run-failure={lastRunFailed ? slot.id : undefined} style={{ marginTop: 7, display: 'flex', gap: 6, alignItems: 'flex-start', borderLeft: '2px solid rgba(248,113,113,0.42)', paddingLeft: 7 }}>
             <span style={{ fontSize: '0.54rem', fontFamily: 'monospace', color: '#f87171', textTransform: 'uppercase', letterSpacing: '0.08em', flexShrink: 0 }}>fail</span>
             <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.6rem', fontFamily: 'monospace', color: 'rgba(254,202,202,0.76)' }}>
               {blockedDetail}
+            </span>
+          </div>
+        )}
+        {qualityVisible && (
+          <div data-card-quality-state={slot.id} style={{ marginTop: 7, display: 'flex', gap: 6, alignItems: 'flex-start', borderLeft: '2px solid rgba(245,158,11,0.42)', paddingLeft: 7 }}>
+            <span style={{ fontSize: '0.54rem', fontFamily: 'monospace', color: '#f59e0b', textTransform: 'uppercase', letterSpacing: '0.08em', flexShrink: 0 }}>qual</span>
+            <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.6rem', fontFamily: 'monospace', color: 'rgba(253,230,138,0.78)' }}>
+              {lastQualityLabel}
             </span>
           </div>
         )}
@@ -368,14 +502,13 @@ export function ProjectPanel() {
   const [incubators, setIncubators] = useState([])
   const [runsBySlot, setRunsBySlot] = useState({})
   const [historyErrorsBySlot, setHistoryErrorsBySlot] = useState({})
-  const [projects, setProjects] = useState([])
   const [addOpen, setAddOpen] = useState(false)
   const [newIdea, setNewIdea] = useState('')
+  const [newTitle, setNewTitle] = useState('')
   const [createError, setCreateError] = useState(null)
   const [creatingIdea, setCreatingIdea] = useState(false)
   const [steerTextBySlot, setSteerTextBySlot] = useState({})
   const [steerStateBySlot, setSteerStateBySlot] = useState({})
-  const [switching, setSwitching] = useState(false)
   const [aiTriggersBySlot, setAiTriggersBySlot] = useState({})
   const [preflightBySlot, setPreflightBySlot] = useState({})
   const [launchErrors, setLaunchErrors] = useState({})
@@ -394,7 +527,6 @@ export function ProjectPanel() {
     runSignatureBySlotRef.current[id] = signature
   }
 
-  const fetchProjects = () => fetchApiJson('/api/projects/list').then(({ data: d }) => { if (d.ok) setProjects(d.projects) }).catch(() => {})
 
   const fetchIncubators = async () => {
     try {
@@ -435,11 +567,11 @@ export function ProjectPanel() {
   }
 
   useEffect(() => {
-    fetchProjects(); fetchIncubators()
+    fetchIncubators()
     const incStream = new EventSource('/api/incubators/stream')
     incStream.onmessage = () => { fetchIncubators() }
     const poll = setInterval(() => {
-      fetchProjects(); fetchIncubators()
+      fetchIncubators()
     }, 30000)
     return () => { incStream.close(); clearInterval(poll) }
   }, [])
@@ -545,26 +677,9 @@ export function ProjectPanel() {
     }
   }
 
-  const addIncubator = async (project) => {
-    setSwitching(true)
-    try {
-      const { data: d } = await fetchApiJson('/api/incubators', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project, enabled: false, intervalHours: 0.5 }),
-      })
-      if (d.ok) {
-        setSelected(project)
-        setAddOpen(false)
-        await fetchIncubators()
-      }
-    } catch {} finally {
-      setSwitching(false)
-    }
-  }
-
   const createIncubatorFromIdea = async () => {
     const idea = newIdea.trim()
+    const title = newTitle.trim()
     if (idea.length < 8 || creatingIdea) return
     setCreatingIdea(true)
     setCreateError(null)
@@ -572,13 +687,13 @@ export function ProjectPanel() {
       const { response: res, data } = await fetchApiJson('/api/incubators/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idea }),
+        body: JSON.stringify({ idea, title }),
       })
       if (!res.ok || !data.ok) throw new Error(data.error || 'failed to create incubator')
       setNewIdea('')
+      setNewTitle('')
       setSelected(data.slot?.id || data.slot?.project || null)
       setAddOpen(false)
-      await fetchProjects()
       await fetchIncubators()
     } catch (err) {
       setCreateError(err.message)
@@ -589,10 +704,33 @@ export function ProjectPanel() {
   const removeIncubator = async (id) => {
     if (id === 'rat-deposit') return
     try {
-      await fetch(`/api/incubators/${id}`, { method: 'DELETE' })
-      setSelected(null)
+      const { response: res, data } = await fetchApiJson(`/api/incubators/${id}`, { method: 'DELETE' })
+      if (!res.ok || !data.ok) throw new Error(data.error || 'failed to remove incubator')
+      setIncubators(prev => {
+        const next = prev.filter(slot => slot.id !== id)
+        if (selected === id) setSelected(next[0]?.id || null)
+        return next
+      })
+      setRunsBySlot(prev => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+      setHistoryErrorsBySlot(prev => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+      setPreflightBySlot(prev => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
       await fetchIncubators()
-    } catch {}
+    } catch (err) {
+      setCreateError(`remove failed: ${err.message}`)
+      setAddOpen(true)
+    }
   }
 
   const sendProjectFeedback = async (id) => {
@@ -639,9 +777,9 @@ export function ProjectPanel() {
   const projectSlots = incubators.map(slot => ({
     ...slot,
     tone: 'project',
-    type: slot.project === 'race-whisperer-predict' ? 'Analysis Incubator' : 'Project Incubator',
-    label: slot.project?.slice(0, 1)?.toUpperCase() || 'P',
-    name: slot.project || slot.id,
+    type: incubatorRoleLabel(slot),
+    label: (slot.displayName || slot.name || slot.project || slot.id)?.slice(0, 1)?.toUpperCase() || 'P',
+    name: slot.displayName || slot.name || slot.project || slot.id,
     schedule: slot,
     status: slot,
     runs: runsBySlot[slot.id] || [],
@@ -665,8 +803,6 @@ export function ProjectPanel() {
   const historyError = historyErrorsBySlot[activeSlot.id]
   const nextRunNum = (activeSlot.runCount ?? activeSlot.runs?.length ?? 0) + 1
   const color = '#a78bfa'
-  const existingIds = new Set(incubators.map(s => s.id))
-  const addableProjects = projects.filter(p => !existingIds.has(p.dir))
   const activePreflight = preflightBySlot[activeSlot.id]
   const runnerNotice = runnerNoticeBySlot[activeSlot.id]
   const runnerReceipt = runnerReceiptsBySlot[activeSlot.id]
@@ -686,10 +822,31 @@ export function ProjectPanel() {
     : selectedRunnerLaunchOk ? 'Codex selected and launchable' : 'Codex selected, launch blocked'
   const staleSourceBlocked = isStaleSourceBlock(readinessIssue)
   const activeScheduleBlockedAt = latestScheduleBlock(activeSlot.schedule)
-  const activeLastRunFailed = activeSlot.lastRunStatus === 'failed' || activeSlot.status?.lastRunStatus === 'failed'
+  const activeLastRunStatus = slotLastRunStatus(activeSlot)
+  const activeLastRunFailed = activeLastRunStatus === 'failed'
+  const activeQualityWeak = isQualityWeak(activeSlot)
+  const activeQualityGate = slotQualityGate(activeSlot)
+  const activeQualityRating = slotQualityRating(activeSlot)
+  const activeEvidenceConfidence = slotEvidenceConfidence(activeSlot)
+  const activeQualitySummary = slotQualitySummary(activeSlot)
+  const activeNorthStar = slotNorthStar(activeSlot)
+  const activeRunStrategy = slotRunStrategy(activeSlot)
+  const activeWhyRunType = slotWhyRunType(activeSlot)
+  const activeExpectedQualityDelta = slotExpectedQualityDelta(activeSlot)
+  const activeActualQualityDelta = slotActualQualityDelta(activeSlot)
+  const activePlateauRegressionVerdict = slotPlateauRegressionVerdict(activeSlot)
+  const activeRecoveryMode = slotRecoveryMode(activeSlot)
+  const activeAppEvidenceGate = slotAppEvidenceGate(activeSlot)
+  const activeAppEvidencePath = slotAppEvidencePath(activeSlot)
+  const activeAppEvidenceSummary = slotAppEvidenceSummary(activeSlot)
+  const activeAppEvidencePrimaryAction = slotAppEvidencePrimaryAction(activeSlot)
+  const activeAppEvidenceMode = slotAppEvidenceMode(activeSlot)
+  const activeAppEvidenceTopTier = slotAppEvidenceTopTier(activeSlot)
+  const activeAppEvidenceSemanticSuccess = slotAppEvidenceSemanticSuccess(activeSlot)
   const activeLastFailure = activeSlot.lastRunFailure || activeSlot.status?.lastRunFailure || ''
   const activeLastFailureSource = activeSlot.lastRunFailureSource || activeSlot.status?.lastRunFailureSource || 'last run'
-  const activeStatusColor = activeSlot.running ? color : (activeScheduleBlockedAt || activeLastRunFailed) ? '#f87171' : '#22c55e'
+  const activeAutonomyIntervention = slotAutonomyIntervention(activeSlot)
+  const activeStatusColor = activeSlot.running ? color : (activeScheduleBlockedAt || activeLastRunFailed) ? '#f87171' : activeQualityWeak ? '#f59e0b' : '#22c55e'
   const runDisabled = activeSlot.launching || activeSlot.running
   const runButtonColor = runnerBlocked ? '#f87171' : color
   const runButtonLabel = runnerBlocked
@@ -764,13 +921,6 @@ export function ProjectPanel() {
 
   return (
     <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.45, delay: 0.3 }} className="panel" style={{ padding: 0, overflow: 'visible', position: 'relative' }}>
-      {switching && (
-        <div style={{ position: 'absolute', inset: 0, zIndex: 10, background: 'rgba(8,8,8,0.85)', backdropFilter: 'blur(2px)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, borderRadius: 'inherit' }}>
-          <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }} style={{ width: 8, height: 8, borderRadius: '50%', border: '1.5px solid #a78bfa', borderTopColor: 'transparent' }} />
-          <span style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'rgba(167,139,250,0.8)', letterSpacing: '0.1em' }}>updating slots…</span>
-        </div>
-      )}
-
       <div style={{ padding: '16px 18px', borderBottom: '1px solid var(--border)', background: 'linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0.08))' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 12 }}>
           <div>
@@ -790,7 +940,7 @@ export function ProjectPanel() {
             </button>
             {addOpen && (
               <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 6, zIndex: 20, minWidth: 330, maxWidth: 380, background: '#111118', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: 6, boxShadow: '0 8px 32px rgba(0,0,0,0.6)' }}>
-                <div style={{ padding: 8, display: 'grid', gap: 7, borderBottom: '1px solid rgba(255,255,255,0.08)', marginBottom: 6 }}>
+                <div style={{ padding: 8, display: 'grid', gap: 7 }}>
                   <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'rgba(167,139,250,0.84)' }}>Create from idea</div>
                   <textarea
                     value={newIdea}
@@ -798,6 +948,13 @@ export function ProjectPanel() {
                     rows={4}
                     placeholder="Write the project idea here..."
                     style={{ resize: 'vertical', minHeight: 78, borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(0,0,0,0.28)', color: 'rgba(241,245,249,0.84)', padding: '8px 9px', fontSize: '0.72rem', lineHeight: 1.35, outline: 'none' }}
+                  />
+                  <input
+                    value={newTitle}
+                    onChange={e => { setNewTitle(e.target.value); setCreateError(null) }}
+                    maxLength={48}
+                    placeholder="Optional short name, otherwise auto-generated"
+                    style={{ borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(0,0,0,0.22)', color: 'rgba(241,245,249,0.82)', padding: '7px 9px', fontSize: '0.68rem', lineHeight: 1.3, outline: 'none' }}
                   />
                   {createError && <div style={{ fontSize: '0.62rem', color: 'rgba(248,113,113,0.82)', fontFamily: 'monospace' }}>{createError}</div>}
                   <button
@@ -808,13 +965,6 @@ export function ProjectPanel() {
                     {creatingIdea ? 'creating...' : 'create incubator'}
                   </button>
                 </div>
-                <div style={{ padding: '3px 8px 6px', fontSize: '0.55rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.1em', color: 'rgba(71,85,105,0.58)' }}>Existing projects</div>
-                {addableProjects.length === 0 ? <div style={{ padding: 10, fontSize: '0.7rem', color: 'rgba(148,163,184,0.5)' }}>no available projects</div> : addableProjects.map(p => (
-                  <button key={p.dir} onClick={() => addIncubator(p.dir)} style={{ width: '100%', border: 'none', background: 'transparent', padding: '8px 10px', textAlign: 'left', cursor: 'pointer', borderRadius: 6 }}>
-                    <div style={{ fontSize: '0.7rem', fontFamily: 'monospace', color: 'rgba(241,245,249,0.78)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{p.name}</div>
-                    <div style={{ marginTop: 2, fontSize: '0.58rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.55)' }}>{p.phase || 'project'} · run #{p.runCount ?? 0}</div>
-                  </button>
-                ))}
               </div>
             )}
           </div>
@@ -869,6 +1019,27 @@ export function ProjectPanel() {
         <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           {(activeSlot.current_focus || activeSlot.status?.current_focus) && <div><div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', marginBottom: 5 }}>Focus</div><div style={{ fontSize: '0.77rem', color: 'rgba(241,245,249,0.78)', lineHeight: 1.45 }}>{activeSlot.current_focus || activeSlot.status?.current_focus}</div></div>}
           {(activeSlot.next_run_goal || activeSlot.status?.next_run_goal) && <div><div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', marginBottom: 5 }}>Next</div><div style={{ fontSize: '0.72rem', color: 'rgba(71,85,105,0.75)', lineHeight: 1.4 }}>{((activeSlot.next_run_goal || activeSlot.status?.next_run_goal) || '').slice(0, 130)}</div></div>}
+          <div data-quality-state={activeSlot.id} data-quality-gate={activeQualityGate || ''} style={{ display: 'grid', gap: 5, borderLeft: `2px solid ${activeQualityWeak ? 'rgba(245,158,11,0.48)' : 'rgba(34,197,94,0.28)'}`, paddingLeft: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+              <div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)' }}>Quality</div>
+              <div style={{ fontSize: '0.54rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.08em', color: activeQualityWeak ? 'rgba(253,230,138,0.82)' : 'rgba(134,239,172,0.74)' }}>{qualityLabel(activeSlot)}</div>
+            </div>
+            <div style={{ fontSize: '0.6rem', fontFamily: 'monospace', color: 'rgba(148,163,184,0.68)', lineHeight: 1.35 }}>
+              gate: {activeQualityGate || 'unknown'} · rating: {activeQualityRating == null ? 'unrated' : `${activeQualityRating}/5`} · evidence: {activeEvidenceConfidence == null ? 'unrated' : `${activeEvidenceConfidence}/5`} · app evidence: {activeAppEvidenceGate || 'n/a'}
+            </div>
+            {activeRecoveryMode && <div style={{ fontSize: '0.6rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(253,230,138,0.8)' }}>recovery: {activeRecoveryMode.slice(0, 150)}</div>}
+            {activeAppEvidencePath && <div data-app-evidence-path={activeSlot.id} style={{ fontSize: '0.58rem', fontFamily: 'monospace', lineHeight: 1.35, color: activeAppEvidenceGate === 'PASS' ? 'rgba(134,239,172,0.68)' : 'rgba(253,230,138,0.76)', wordBreak: 'break-word' }}>app evidence: {shortPath(activeAppEvidencePath)}</div>}
+            {activeAppEvidenceMode && <div data-app-evidence-mode={activeSlot.id} style={{ fontSize: '0.58rem', fontFamily: 'monospace', lineHeight: 1.35, color: activeAppEvidenceTopTier ? 'rgba(134,239,172,0.68)' : 'rgba(253,230,138,0.76)' }}>mode: {activeAppEvidenceMode} · top-tier: {activeAppEvidenceTopTier ? 'yes' : 'no'}</div>}
+            {activeAppEvidencePrimaryAction && <div data-app-evidence-primary={activeSlot.id} style={{ fontSize: '0.58rem', fontFamily: 'monospace', lineHeight: 1.35, color: activeAppEvidencePrimaryAction.changed ? 'rgba(134,239,172,0.68)' : 'rgba(253,230,138,0.76)' }}>primary: {activeAppEvidencePrimaryAction.available ? activeAppEvidencePrimaryAction.changed ? 'changed state' : 'no visible change' : 'not available'}</div>}
+            {activeAppEvidenceSemanticSuccess?.available && <div data-app-evidence-success={activeSlot.id} style={{ fontSize: '0.58rem', fontFamily: 'monospace', lineHeight: 1.35, color: activeAppEvidenceSemanticSuccess.passed ? 'rgba(134,239,172,0.68)' : 'rgba(253,230,138,0.76)' }}>success: {activeAppEvidenceSemanticSuccess.passed ? 'passed' : 'failed'}</div>}
+            {activeAppEvidenceSummary && <div style={{ fontSize: '0.6rem', lineHeight: 1.35, color: 'rgba(253,230,138,0.68)' }}>{activeAppEvidenceSummary.slice(0, 150)}</div>}
+            {activePlateauRegressionVerdict && <div data-run-verdict={activeSlot.id} style={{ fontSize: '0.58rem', fontFamily: 'monospace', lineHeight: 1.35, color: /REGRESSION/i.test(activePlateauRegressionVerdict) ? 'rgba(254,202,202,0.82)' : /PLATEAU|UNCLEAR/i.test(activePlateauRegressionVerdict) ? 'rgba(253,230,138,0.78)' : 'rgba(134,239,172,0.68)' }}>verdict: {activePlateauRegressionVerdict.slice(0, 150)}</div>}
+            {activeNorthStar && <div data-run-north-star={activeSlot.id} style={{ fontSize: '0.6rem', lineHeight: 1.35, color: 'rgba(196,181,253,0.78)' }}>north star: {activeNorthStar.slice(0, 170)}</div>}
+            {activeRunStrategy && <div data-run-strategy={activeSlot.id} style={{ fontSize: '0.6rem', lineHeight: 1.35, color: 'rgba(148,163,184,0.78)' }}>strategy: {activeRunStrategy.slice(0, 170)}</div>}
+            {(activeExpectedQualityDelta || activeActualQualityDelta) && <div data-quality-delta={activeSlot.id} style={{ fontSize: '0.58rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(148,163,184,0.72)' }}>delta: {(activeActualQualityDelta || 'actual unrated').slice(0, 90)} / expected {(activeExpectedQualityDelta || 'unrated').slice(0, 90)}</div>}
+            {activeWhyRunType && <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(148,163,184,0.66)' }}>why run: {activeWhyRunType.slice(0, 140)}</div>}
+            {activeQualitySummary && <div style={{ fontSize: '0.62rem', lineHeight: 1.35, color: activeQualityWeak ? 'rgba(253,230,138,0.72)' : 'rgba(187,247,208,0.62)' }}>{activeQualitySummary.slice(0, 160)}</div>}
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div style={{ fontSize: '0.57rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--muted)', minWidth: 44 }}>Runner</div>
             <RunnerSwitch
@@ -1022,6 +1193,11 @@ export function ProjectPanel() {
             {activeScheduleBlockedAt && (
               <div style={{ marginLeft: 52, borderLeft: '2px solid rgba(248,113,113,0.35)', paddingLeft: 8, fontSize: '0.63rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(254,202,202,0.78)' }}>
                 latest scheduled run was blocked by preflight; history should contain a FAILED row with command detail
+              </div>
+            )}
+            {activeAutonomyIntervention && (
+              <div data-autonomy-intervention={activeSlot.id} style={{ marginLeft: 52, borderLeft: '2px solid rgba(167,139,250,0.35)', paddingLeft: 8, fontSize: '0.63rem', fontFamily: 'monospace', lineHeight: 1.35, color: 'rgba(196,181,253,0.78)' }}>
+                {activeAutonomyIntervention}
               </div>
             )}
           </div>
