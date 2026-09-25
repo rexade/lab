@@ -39,12 +39,28 @@ import {
   newestFailedRunKey,
   runHistoryKey,
 } from '../src/lib/runSignals.js'
+import { incubatorLauncherScript } from '../server/incubator-templates.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
 
 function tempDir(name) {
   return fs.mkdtempSync(join(os.tmpdir(), `pi-pulse-${name}-`))
+}
+
+// server.js is the route table; the logic lives in server/*.js. Source-contract
+// assertions read them together so moving code between modules stays free.
+function serverSource() {
+  const moduleDir = join(root, 'server')
+  const files = [join(root, 'server.js'), ...fs.readdirSync(moduleDir).filter(name => name.endsWith('.js')).sort().map(name => join(moduleDir, name))]
+  return files.map(file => fs.readFileSync(file, 'utf8')).join('\n')
+}
+
+// Codex and Claude share one runner; the shims only pick the agent.
+function runnerSource() {
+  return ['run-incubator.sh', join('lib', 'incubator-run.mjs')]
+    .map(file => fs.readFileSync(join(root, 'scripts', file), 'utf8'))
+    .join('\n')
 }
 
 function assertIncludes(haystack, needle, message) {
@@ -292,12 +308,15 @@ function testStaleClaudeFableFallsThrough() {
 }
 
 function testFreshIncubatorsHaveGenericClaudeRunner() {
-  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
-  const scriptPath = join(root, 'scripts', 'run-claude-incubator.sh')
-  const script = fs.readFileSync(scriptPath, 'utf8')
-  const mode = fs.statSync(scriptPath).mode
+  const server = serverSource()
+  const shimPath = join(root, 'scripts', 'run-claude-incubator.sh')
+  const shim = fs.readFileSync(shimPath, 'utf8')
+  const script = runnerSource()
 
-  assert.ok(mode & 0o111, 'generic Claude incubator runner should be executable')
+  assert.ok(fs.statSync(shimPath).mode & 0o111, 'generic Claude incubator entrypoint should be executable')
+  assert.ok(fs.statSync(join(root, 'scripts', 'run-incubator.sh')).mode & 0o111, 'unified incubator runner should be executable')
+  assertIncludes(shim, 'export PI_PULSE_AGENT=claude', 'Claude entrypoint should select the Claude agent')
+  assertIncludes(shim, 'exec bash "$SCRIPT_DIR/run-incubator.sh" "$@"', 'Claude entrypoint should delegate to the unified runner')
   assertIncludes(server, 'GENERIC_CLAUDE_INCUBATOR_SCRIPT', 'server should define a generic Claude runner script')
   assertIncludes(server, 'if (cfg.claudeRunScript === GENERIC_CLAUDE_INCUBATOR_SCRIPT && fs.existsSync(cfg.claudeRunScript)) return cfg.claudeRunScript', 'fresh slots should only preserve the generic Claude runner path')
   assertIncludes(server, 'return GENERIC_CLAUDE_INCUBATOR_SCRIPT', 'fresh slots should fall back to the generic Claude runner')
@@ -308,7 +327,7 @@ function testFreshIncubatorsHaveGenericClaudeRunner() {
   assertIncludes(server, "cfg.runner === 'claude' && cfg.runScript?.includes('run-claude-incubator.sh')", 'generic Claude runs should receive the slot status path')
   assertIncludes(script, 'STATUS_PATH=${1:-}', 'generic Claude runner should be status-file driven')
   assertIncludes(script, 'RUN_LOG.md', 'generic Claude runner comments should identify run history behavior')
-  assertIncludes(script, '[claude-incubator] missing prompt', 'generic Claude runner should fail with visible prompt errors')
+  assertIncludes(script, 'echo "$TAG missing prompt: $PROMPT_FILE"', 'generic Claude runner should fail with visible prompt errors')
   assertIncludes(script, 'Full stdout saved to $STDOUT_FILE', 'generic Claude runner should preserve stdout for run history detail')
   assertIncludes(script, "invalid=new Set(['fable','claude-sonnet-4-20250514'])", 'generic Claude runner should quarantine stale model pins')
   assertIncludes(script, "const safe='sonnet'", 'generic Claude runner should fall forward to the stable Sonnet alias')
@@ -317,7 +336,7 @@ function testFreshIncubatorsHaveGenericClaudeRunner() {
 }
 
 function testExistingIncubatorsNormalizeClaudeRelayState() {
-  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
+  const server = serverSource()
 
   assertIncludes(server, 'function normalizeIncubatorStatus(statusPath)', 'existing incubator slots should be normalized before relay switching')
   assertIncludes(server, 'function ensureIncubatorProjectScaffold(status)', 'existing incubator slots should get missing run scaffold repaired')
@@ -595,20 +614,16 @@ function testProjectPanelApiJsonErrorsStayVisible() {
 }
 
 function testCachedAiLatestEndpointsHydrateLegacyFiles() {
-  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
+  const server = serverSource()
   assertIncludes(server, 'function readCachedAiFeedback(target)', 'server should centralize saved AI feedback hydration')
   assertIncludes(server, "app.get('/api/incubators/:id/ai/latest'", 'incubator latest endpoint should exist')
-  assertIncludes(server, "app.get('/api/child/ai/latest'", 'legacy child latest endpoint should exist')
+  assert.ok(!server.includes("'/api/child/"), 'retired mounted-child endpoints should stay removed; incubator slots replace them')
+  assert.ok(!server.includes('CHILD_FEEDBACK_JSON'), 'retired mounted-child AI feedback cache should stay removed')
   assertIncludes(server, "app.get('/api/ai/latest'", 'legacy core latest endpoint should exist')
   assertIncludes(
     server,
     "res.json(readCachedAiFeedback(target))",
     'incubator latest endpoint should hydrate cached feedback before returning it'
-  )
-  assertIncludes(
-    server,
-    'paths: { json: CHILD_FEEDBACK_JSON, md: CHILD_FEEDBACK_MD }',
-    'legacy child latest endpoint should use the same cached feedback contract'
   )
   assertIncludes(
     server,
@@ -619,7 +634,7 @@ function testCachedAiLatestEndpointsHydrateLegacyFiles() {
 
 function testPreflightBlockedLaunchLooksBlocked() {
   const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
-  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
+  const server = serverSource()
   assertIncludes(server, 'function appendManualPreflightFailure', 'manual launch preflight blocks should append durable FAILED history')
   assertIncludes(server, "source: 'manual-preflight'", 'manual preflight history rows should identify manual launch blocks')
   assertIncludes(server, 'function appendRunnerSwitchPreflightFailure', 'blocked relay switches should append durable FAILED history')
@@ -717,7 +732,9 @@ function testPreflightBlockedLaunchLooksBlocked() {
   assertIncludes(server, 'status.launcher = writeIncubatorLauncher({ slug, statusPath }).path', 'new incubator status should record the launcher path')
   assertIncludes(server, 'if (current !== content)', 'generated incubator launchers should be rewritten when stale')
   assertIncludes(server, 'return { path: launcherPath, repaired }', 'launcher repair should be visible to normalization')
-  assertIncludes(server, 'exec ${GENERIC_CLAUDE_INCUBATOR_SCRIPT} "$STATUS_PATH" "$RUN_TYPE"', 'the project launcher should delegate Claude runs to the generic Claude relay')
+  assertIncludes(server, 'incubatorLauncherScript({ runnerScript: INCUBATOR_RUNNER_SCRIPT, statusPath })', 'project launchers should delegate every agent to the unified incubator runner')
+  const launcher = incubatorLauncherScript({ runnerScript: '/lab/src/pi-pulse/scripts/run-incubator.sh', statusPath: '/lab/projects/demo $x/status.json' })
+  assertIncludes(launcher, 'exec bash /lab/src/pi-pulse/scripts/run-incubator.sh "${1:-/lab/projects/demo \\$x/status.json}" "${2:-}"', 'launchers should pin a shell-safe default status path and pass the run type through')
   assertIncludes(server, 'function suggestedIncubatorTitle(idea)', 'idea-created incubators should derive a short display title instead of using the full request')
   assertIncludes(server, "function createIncubatorProjectFromIdea(idea, requestedTitle = '')", 'idea-created incubators should accept an optional short title override')
   assertIncludes(server, 'const title = normalizedIncubatorTitle(requestedTitle) || suggestedIncubatorTitle(cleanIdea)', 'new incubator creation should title the project before slugging it')
@@ -876,7 +893,7 @@ function testRecoveredOldFailuresStopBeingPinned() {
   assertIncludes(panel, 'selectedHistoryRuns(activeSlot.runs || []).reverse()', 'active run history should render selected recent rows')
   assertIncludes(panel, 'data-history-failure-receipt={activeSlot.id}', 'run history should disclose when a failure is visible before expanded rows')
 
-  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
+  const server = serverSource()
   assertIncludes(server, 'runsWithPinnedLatestFailure(runs, 10)', 'host run API should use filtered failure pinning through cached runs')
   assertIncludes(server, 'runsWithPinnedLatestFailure(runs, 10)', 'project run APIs should use filtered failure pinning through cached runs')
 }
@@ -1190,7 +1207,7 @@ function testFormalFailedRowsExposeAllDiagnostics() {
 }
 
 function testClaudeRunnerSwitchWarnsFromLaunchPreflight() {
-  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
+  const server = serverSource()
   assertIncludes(server, "const launchBlocked = runner === 'claude' && preflight && !preflight.ok", 'Claude switch responses should check launch preflight, not only setup')
   assertIncludes(server, 'Claude relay selected but launch preflight blocked:', 'Claude switch warning should name launch preflight blocks')
   assertIncludes(server, 'preflightFailureDetail(preflight)', 'Claude switch warning should include concrete failed checks')
@@ -1268,9 +1285,8 @@ window.__PI_PULSE_APP__ = {
 }
 
 function testIncubatorQualityContractIsWired() {
-  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
-  const codexRunner = fs.readFileSync(join(root, '..', '..', 'scripts', 'run-codex-incubator.sh'), 'utf8')
-  const claudeRunner = fs.readFileSync(join(root, 'scripts', 'run-claude-incubator.sh'), 'utf8')
+  const server = serverSource()
+  const runner = runnerSource()
   const mutatePrompt = fs.readFileSync(join(root, '..', '..', 'prompts', 'mutate.md'), 'utf8')
 
   assertIncludes(mutatePrompt, 'INCUBATOR_QUALITY.md', 'core prompts should require the quality contract')
@@ -1293,38 +1309,24 @@ function testIncubatorQualityContractIsWired() {
   assertIncludes(server, 'Do not make manual/human validation the required next move', 'new incubator prompt templates should replace hard human-validation waits with proxy evidence')
   assertIncludes(server, 'Research runs must infer a defensible north star themselves', 'new incubator prompt templates should require autonomous north-star selection')
   assertIncludes(server, '**North star:** [the strongest inferred product/benchmark/taste target for this project]', 'new incubator prompt templates should require first-class north-star fields')
-  assertIncludes(codexRunner, "status.lastNorthStar = (fields['North star']", 'Codex runner should persist north-star fields')
-  assertIncludes(codexRunner, "status.lastPlateauRegressionVerdict = (fields['Plateau/regression verdict']", 'Codex runner should persist plateau/regression verdict')
-  assertIncludes(claudeRunner, "status.lastNorthStar = (fields['North star']", 'Claude runner should persist north-star fields')
-  assertIncludes(claudeRunner, "status.lastPlateauRegressionVerdict = (fields['Plateau/regression verdict']", 'Claude runner should persist plateau/regression verdict')
+  assertIncludes(runner, "status.lastNorthStar = (fields['North star']", 'Incubator runner should persist north-star fields')
+  assertIncludes(runner, "status.lastPlateauRegressionVerdict = (fields['Plateau/regression verdict']", 'Incubator runner should persist plateau/regression verdict')
   assertIncludes(server, 'window.__PI_PULSE_APP__', 'new incubator prompt templates should mention semantic app contracts')
   assertIncludes(server, 'App evidence:** [reports/evidence/run-[number]/summary.md, or not applicable]', 'new incubator prompt templates should include app evidence receipts')
-  assertIncludes(codexRunner, "status.lastRunnerStatus = runnerOk ? 'ok' : 'failed'", 'Codex runner should separate process status from quality status')
-  assertIncludes(codexRunner, "status.lastRunStatus = runnerOk ? (qualityGate === 'PASS' ? 'ok'", 'Codex runner should only mark ok when quality gate passes')
-  assertIncludes(codexRunner, 'QUALITY RECOVERY MODE TRIGGERED', 'Codex runner should inject recovery mode when feedback is negative')
-  assertIncludes(codexRunner, 'Runner fallback - required quality fields were missing from this run summary.', 'Codex runner should append fallback quality fields when agents omit them')
-  assertIncludes(codexRunner, 'APP_EVIDENCE_SCRIPT', 'Codex runner should invoke the app evidence harness')
-  assertIncludes(codexRunner, 'APP EVIDENCE REPAIR REQUIRED:', 'Codex runner should feed previous app evidence failures into the next prompt')
-  assertIncludes(codexRunner, 'data-primary-action', 'Codex runner evidence repair prompt should tell apps to expose the real primary action')
-  assertIncludes(codexRunner, 'status.lastAppEvidenceGate = appEvidenceGate', 'Codex runner should persist app evidence gate')
-  assertIncludes(codexRunner, "Math.min(status.lastQualityRating, appEvidenceGate === 'FAIL' ? 2 : 3)", 'Codex runner should cap ratings when app evidence is not passing')
-  assertIncludes(codexRunner, 'status.lastAppEvidencePrimaryAction = appEvidence?.primaryAction', 'Codex runner should persist primary-action evidence')
-  assertIncludes(codexRunner, "appEvidence?.topTierEligible !== true", 'Codex runner should cap 4.5+ ratings without semantic top-tier evidence')
-  assertIncludes(codexRunner, 'status.lastAppEvidenceTopTier = appEvidence?.topTierEligible === true', 'Codex runner should persist top-tier evidence eligibility')
-  assertIncludes(codexRunner, "status.lastRecoveryRequired = recoveryRequired === '1'", 'Codex runner should persist recovery-required state')
-  assertIncludes(claudeRunner, "status.lastRunnerStatus = runnerOk ? 'ok' : 'failed'", 'Claude runner should separate process status from quality status')
-  assertIncludes(claudeRunner, '**Quality gate:** NEEDS-EVIDENCE', 'no-summary rows should be marked as needs-evidence')
-  assertIncludes(claudeRunner, 'QUALITY RECOVERY MODE TRIGGERED', 'Claude runner should inject recovery mode when feedback is negative')
-  assertIncludes(claudeRunner, 'Runner fallback - required quality fields were missing from this run summary.', 'Claude runner should append fallback quality fields when agents omit them')
-  assertIncludes(claudeRunner, 'APP_EVIDENCE_SCRIPT', 'Claude runner should invoke the app evidence harness')
-  assertIncludes(claudeRunner, 'APP EVIDENCE REPAIR REQUIRED:', 'Claude runner should feed previous app evidence failures into the next prompt')
-  assertIncludes(claudeRunner, 'data-primary-action', 'Claude runner evidence repair prompt should tell apps to expose the real primary action')
-  assertIncludes(claudeRunner, 'status.lastAppEvidenceGate = appEvidenceGate', 'Claude runner should persist app evidence gate')
-  assertIncludes(claudeRunner, "Math.min(status.lastQualityRating, appEvidenceGate === 'FAIL' ? 2 : 3)", 'Claude runner should cap ratings when app evidence is not passing')
-  assertIncludes(claudeRunner, 'status.lastAppEvidencePrimaryAction = appEvidence?.primaryAction', 'Claude runner should persist primary-action evidence')
-  assertIncludes(claudeRunner, "appEvidence?.topTierEligible !== true", 'Claude runner should cap 4.5+ ratings without semantic top-tier evidence')
-  assertIncludes(claudeRunner, 'status.lastAppEvidenceTopTier = appEvidence?.topTierEligible === true', 'Claude runner should persist top-tier evidence eligibility')
-  assertIncludes(claudeRunner, "status.lastRecoveryRequired = recoveryRequired === '1'", 'Claude runner should persist recovery-required state')
+  assertIncludes(runner, "status.lastRunnerStatus = runnerOk ? 'ok' : 'failed'", 'Incubator runner should separate process status from quality status')
+  assertIncludes(runner, "status.lastRunStatus = runnerOk ? (qualityGate === 'PASS' ? 'ok'", 'Incubator runner should only mark ok when quality gate passes')
+  assertIncludes(runner, 'QUALITY RECOVERY MODE TRIGGERED', 'Incubator runner should inject recovery mode when feedback is negative')
+  assertIncludes(runner, 'Runner fallback - required quality fields were missing from this run summary.', 'Incubator runner should append fallback quality fields when agents omit them')
+  assertIncludes(runner, 'APP_EVIDENCE_SCRIPT', 'Incubator runner should invoke the app evidence harness')
+  assertIncludes(runner, 'APP EVIDENCE REPAIR REQUIRED:', 'Incubator runner should feed previous app evidence failures into the next prompt')
+  assertIncludes(runner, 'data-primary-action', 'Incubator runner evidence repair prompt should tell apps to expose the real primary action')
+  assertIncludes(runner, 'status.lastAppEvidenceGate = appEvidenceGate', 'Incubator runner should persist app evidence gate')
+  assertIncludes(runner, "Math.min(status.lastQualityRating, appEvidenceGate === 'FAIL' ? 2 : 3)", 'Incubator runner should cap ratings when app evidence is not passing')
+  assertIncludes(runner, 'status.lastAppEvidencePrimaryAction = appEvidence?.primaryAction', 'Incubator runner should persist primary-action evidence')
+  assertIncludes(runner, "appEvidence?.topTierEligible !== true", 'Incubator runner should cap 4.5+ ratings without semantic top-tier evidence')
+  assertIncludes(runner, 'status.lastAppEvidenceTopTier = appEvidence?.topTierEligible === true', 'Incubator runner should persist top-tier evidence eligibility')
+  assertIncludes(runner, "status.lastRecoveryRequired = recoveryRequired === '1'", 'Incubator runner should persist recovery-required state')
+  assertIncludes(runner, '**Quality gate:** NEEDS-EVIDENCE', 'no-summary rows should be marked as needs-evidence')
   const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
   assertIncludes(panel, 'data-app-evidence-primary', 'incubator UI should show primary-action evidence')
   assertIncludes(panel, 'data-app-evidence-mode', 'incubator UI should show semantic/degraded evidence mode')
@@ -1349,10 +1351,9 @@ function testTrustHarnessRunsBeforeBuild() {
 }
 
 function testPublicWriteSafetyAndLoopFusesAreWired() {
-  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
+  const server = serverSource()
   const appEvidence = fs.readFileSync(join(root, 'scripts', 'app-evidence.mjs'), 'utf8')
-  const codexRunner = fs.readFileSync(join(root, '..', '..', 'scripts', 'run-codex-incubator.sh'), 'utf8')
-  const claudeRunner = fs.readFileSync(join(root, 'scripts', 'run-claude-incubator.sh'), 'utf8')
+  const runner = runnerSource()
   const viteConfig = fs.readFileSync(join(root, 'vite.config.js'), 'utf8')
   const readme = fs.readFileSync(join(root, '..', '..', 'README.md'), 'utf8')
   const generateBrief = fs.readFileSync(join(root, '..', '..', 'generate-brief.sh'), 'utf8')
@@ -1366,7 +1367,7 @@ function testPublicWriteSafetyAndLoopFusesAreWired() {
   assertIncludes(server, '!isProxiedWrite(req)', 'local direct writes may stay convenient while proxied writes require identity')
   assertIncludes(server, 'TRUST_CLOUDFLARE_ACCESS && hasCloudflareAccessIdentity(req)', 'Cloudflare Access headers should only be trusted when explicitly enabled')
   assertIncludes(readme, 'Cloudflare Access', 'README should state the Cloudflare Access requirement for public tunnel exposure')
-  assertIncludes(server, "execFileText('/home/admin/.local/bin/mempalace'", 'MemPalace queries should use execFile arguments, not shell strings')
+  assertIncludes(server, "execFileText(MEMPALACE_BIN, args", 'MemPalace queries should use execFile arguments, not shell strings')
   assertIncludes(server, '[memory unavailable:', 'MemPalace query failures should be visible instead of identical to no memory')
   assert.ok(!server.includes('mempalace search ${JSON.stringify(query)}'), 'MemPalace query should not interpolate project text into a shell command')
   assertIncludes(generateBrief, 'mktemp "$BRIEF_PATH.tmp', 'memory brief should be written atomically')
@@ -1395,16 +1396,14 @@ function testPublicWriteSafetyAndLoopFusesAreWired() {
   assertIncludes(server, 'setTimeout(notifyRunLogChanged, 500)', 'RUN_LOG file watch should be debounced')
   assertIncludes(appEvidence, "summary.evidenceMode = 'unavailable'", 'browser infrastructure failures should be separated from product failures')
   assertIncludes(appEvidence, "summary.gate = 'NEEDS-EVIDENCE'", 'browser infrastructure failures should be needs-evidence, not fail')
-  assertIncludes(codexRunner, "const evidenceUnavailable = mode === 'unavailable'", 'Codex runner should skip product repair prompts for unavailable evidence tooling')
-  assertIncludes(codexRunner, "process.env.PI_PULSE_SCHEDULED_RUN === '1'", 'scheduled Codex runs should ignore bypass mode')
-  assert.ok(!codexRunner.includes('find "$HOME/.codex/sessions"'), 'Codex runner should not delete global Codex session history')
-  assertIncludes(claudeRunner, "const evidenceUnavailable = mode === 'unavailable'", 'Claude runner should skip product repair prompts for unavailable evidence tooling')
-  assertIncludes(claudeRunner, "process.env.PI_PULSE_SCHEDULED_RUN === '1'", 'scheduled Claude runs should ignore bypass mode')
+  assertIncludes(runner, "const evidenceUnavailable = mode === 'unavailable'", 'Incubator runner should skip product repair prompts for unavailable evidence tooling')
+  assertIncludes(runner, "process.env.PI_PULSE_SCHEDULED_RUN === '1'", 'scheduled incubator runs should ignore bypass mode')
+  assert.ok(!runner.includes('find "$HOME/.codex/sessions"'), 'Incubator runner should not delete global Codex session history')
   assertIncludes(viteConfig, "target: 'http://127.0.0.1:8089'", 'Vite dev proxy should point at the actual Pi Pulse server')
 }
 
 function testStaleSourceMutationsAreWriteGated() {
-  const server = fs.readFileSync(join(root, 'server.js'), 'utf8')
+  const server = serverSource()
   assertIncludes(server, 'function requireFreshSource(req, res, next)', 'server should centralize stale-source write gating')
   assertIncludes(server, "code: 'STALE_SERVICE_SOURCE'", 'stale-source write blocks should return a machine-readable code')
   assertIncludes(server, 'PI_PULSE_SOURCE_HEALTH_FILES', 'smoke tests should be able to add a temporary source health probe')
@@ -1453,6 +1452,169 @@ function testDependencyErrorPackageNamesDoNotCreateFailedRows() {
   assertIncludes(runs[0]['Output excerpt'], 'Implemented Run 15 mutation', 'stdout excerpt should prefer useful transcript lines over dependency inventory')
 }
 
+function writeExecutable(filePath, content) {
+  fs.writeFileSync(filePath, content)
+  fs.chmodSync(filePath, 0o755)
+}
+
+function runnerFixture(name) {
+  const dir = tempDir(name)
+  const repo = join(dir, 'proj')
+  const bin = join(dir, 'bin')
+  fs.mkdirSync(join(repo, 'prompts'), { recursive: true })
+  fs.mkdirSync(join(repo, 'reports'), { recursive: true })
+  fs.mkdirSync(bin)
+  fs.writeFileSync(join(repo, 'prompts', 'mutate.md'), 'Mutate prompt.\n')
+  fs.writeFileSync(join(repo, 'prompts', 'research.md'), 'Research prompt.\n')
+  fs.writeFileSync(join(repo, 'reports', 'RUN_LOG.md'), '# Run Log\n\n## Run 3 - 2026-01-01 - MUTATE\n\n**Quality gate:** PASS\n')
+  fs.writeFileSync(join(repo, 'reports', 'USER_FEEDBACK.md'), 'the first screen is confusing\n')
+  fs.writeFileSync(join(dir, 'BENCHMARK_SUITE.md'), '# Benchmarks\n- benchmark marker\n')
+  const statusPath = join(repo, 'status.json')
+  fs.writeFileSync(statusPath, JSON.stringify({
+    project: 'proj',
+    repo,
+    runLog: join(repo, 'reports', 'RUN_LOG.md'),
+    runTypes: ['mutate', 'research'],
+    runCount: 1,
+    runner: 'codex',
+    incubatorRole: 'signal-feeder',
+    claudeModel: 'fable',
+  }, null, 2))
+  // Fake agents record their argv; the fake Codex also writes a structured summary.
+  writeExecutable(join(bin, 'codex'), `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$FAKE_ARGS_OUT"
+N=$(printf '%s\\n' "$@" | grep -oE '^Run number: [0-9]+' | grep -oE '[0-9]+')
+printf '\\n## Run %s - 2026-01-02 - MUTATE\\n\\n**Quality gate:** PASS\\n**Quality rating:** 5/5\\n**North star:** fixture north star\\n**Pi Pulse lesson:** fixture lesson\\n**Learning evidence:** fixture evidence\\n' "$N" >> "$FAKE_RUN_LOG"
+echo "fake codex"
+`)
+  writeExecutable(join(bin, 'claude'), `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$FAKE_ARGS_OUT"
+echo "fake claude output"
+`)
+  writeExecutable(join(bin, 'codex-fail'), '#!/usr/bin/env bash\necho "fixture api error"\nexit 3\n')
+  return { dir, repo, bin, statusPath, runLog: join(repo, 'reports', 'RUN_LOG.md') }
+}
+
+function runRunner(script, args, env) {
+  const result = spawnSync('bash', [script, ...args], { encoding: 'utf8', env: { ...process.env, PI_PULSE_AGENT: '', CODEX_BYPASS: '', CLAUDE_BYPASS: '', PI_PULSE_SCHEDULED_RUN: '', CLAUDE_MODEL: '', PI_PULSE_DEFAULT_CLAUDE_MODEL: '', ...env } })
+  assert.equal(result.status, 0, `${script} should exit cleanly: ${result.stderr}`)
+  return result
+}
+
+function testUnifiedRunnerGivesCodexAndClaudeTheSameContract() {
+  const fx = runnerFixture('unified-runner')
+  const codexShim = join(root, '..', '..', 'scripts', 'run-codex-incubator.sh')
+  const claudeShim = join(root, 'scripts', 'run-claude-incubator.sh')
+  const codexArgsPath = join(fx.dir, 'codex-args')
+  const claudeArgsPath = join(fx.dir, 'claude-args')
+  const readStatus = () => JSON.parse(fs.readFileSync(fx.statusPath, 'utf8'))
+
+  // Scheduled runs must never inherit the service's bypass flag.
+  runRunner(codexShim, [fx.statusPath, 'mutate'], {
+    LAB_DIR: fx.dir,
+    CODEX_BIN: join(fx.bin, 'codex'),
+    FAKE_ARGS_OUT: codexArgsPath,
+    FAKE_RUN_LOG: fx.runLog,
+    CODEX_BYPASS: '1',
+    PI_PULSE_SCHEDULED_RUN: '1',
+  })
+  const codexArgs = fs.readFileSync(codexArgsPath, 'utf8')
+  assertIncludes(codexArgs, 'exec\n-C\n' + fx.repo + '\n--add-dir\n' + fx.dir, 'Codex should run in the project with the lab dir attached')
+  assertIncludes(codexArgs, '--sandbox\nworkspace-write', 'scheduled Codex runs should stay sandboxed')
+  assert.ok(!codexArgs.includes('--dangerously-bypass-approvals-and-sandbox'), 'scheduled Codex runs should ignore CODEX_BYPASS')
+  assertIncludes(codexArgs, 'Run number: 4', 'run numbers should continue from the highest RUN_LOG/status count')
+  assertIncludes(codexArgs, 'INCUBATOR ROLE: signal feeder', 'signal-feeder role should reach the Codex prompt')
+  assertIncludes(codexArgs, 'benchmark marker', 'signal-feeder benchmark suite should reach the Codex prompt')
+  assertIncludes(codexArgs, 'QUALITY RECOVERY MODE TRIGGERED', 'negative feedback should trigger recovery mode')
+  let status = readStatus()
+  assert.equal(status.runCount, 4)
+  assert.equal(status.lastRunnerStatus, 'ok')
+  assert.equal(status.lastQualityGate, 'PASS')
+  assert.equal(status.lastNorthStar, 'fixture north star')
+  assert.equal(status.lastRecoveryRequired, true)
+  assert.ok(fs.existsSync(join(fx.repo, 'reports', 'stdout', 'codex-run-4.log')), 'Codex stdout should be saved per run')
+  assertIncludes(fs.readFileSync(join(fx.repo, 'reports', 'RECENT_RUNS.md'), 'utf8'), '## Run 4 - 2026-01-02 - MUTATE', 'RECENT_RUNS.md should be regenerated after the run')
+  const learnings = fs.readFileSync(join(fx.dir, 'INCUBATOR_LEARNINGS.md'), 'utf8')
+  assertIncludes(learnings, '<!-- incubator-learning:proj:4 -->', 'signal-feeder lessons should be harvested once with a marker')
+  assertIncludes(learnings, '**Lesson:** fixture lesson', 'harvested lesson text should be preserved')
+
+  // Claude gets the same prompt blocks, repairs stale model pins, and writes a
+  // conservative no-summary receipt when the agent skips the RUN_LOG entry.
+  runRunner(claudeShim, [fx.statusPath], {
+    LAB_DIR: fx.dir,
+    CLAUDE_BIN: join(fx.bin, 'claude'),
+    FAKE_ARGS_OUT: claudeArgsPath,
+    CLAUDE_BYPASS: '1',
+  })
+  const claudeArgs = fs.readFileSync(claudeArgsPath, 'utf8').split('\n')
+  assert.equal(claudeArgs[0], '-p')
+  assert.equal(claudeArgs[claudeArgs.indexOf('--model') + 1], 'sonnet', 'stale fable pins should fall forward to sonnet')
+  assert.ok(claudeArgs.includes('--dangerously-skip-permissions'), 'manual Claude runs should honor CLAUDE_BYPASS')
+  const claudePrompt = claudeArgs.join('\n')
+  assertIncludes(claudePrompt, 'Run type: mutate', 'rotation should pick runTypes[previous run count % length]')
+  assertIncludes(claudePrompt, 'INCUBATOR ROLE: signal feeder', 'signal-feeder role should reach the Claude prompt too')
+  assertIncludes(claudePrompt, 'GLOBAL INCUBATOR LEARNINGS', 'global learnings should reach the Claude prompt too')
+  const log = fs.readFileSync(fx.runLog, 'utf8')
+  assertIncludes(log, '## Run 5 - ', 'Claude no-summary runs should get a RUN_LOG receipt')
+  assertIncludes(log, '**Done:** Claude completed but did not append a run summary.', 'no-summary receipts should name the agent')
+  assertIncludes(log, '**Output excerpt:** fake claude output', 'no-summary receipts should include an output excerpt')
+  status = readStatus()
+  assert.equal(status.runCount, 5)
+  assert.equal(status.lastQualityGate, 'NEEDS-EVIDENCE')
+  assert.equal(status.claudeModel, 'sonnet', 'Claude runs should persist the repaired model')
+  assert.equal(status.runner, 'codex', 'running through a relay should not rewrite the selected runner')
+
+  runRunner(codexShim, [fx.statusPath], { LAB_DIR: fx.dir, CODEX_BIN: join(fx.bin, 'codex-fail') })
+  assertIncludes(fs.readFileSync(fx.runLog, 'utf8'), '**Failure:** [run failed - codex exited 3]', 'agent failures should write a FAILED receipt')
+  status = readStatus()
+  assert.equal(status.lastRunnerStatus, 'failed')
+  assert.equal(status.lastRunStatus, 'failed')
+}
+
+function testUnifiedRunnerFailsVisiblyOnBadInput() {
+  const fx = runnerFixture('runner-errors')
+  const runner = join(root, 'scripts', 'run-incubator.sh')
+  const env = { ...process.env, LAB_DIR: fx.dir, CODEX_BIN: join(fx.bin, 'codex'), PI_PULSE_AGENT: '' }
+  const missing = spawnSync('bash', [runner, join(fx.dir, 'nope.json')], { encoding: 'utf8', env })
+  assert.equal(missing.status, 2)
+  assertIncludes(missing.stderr, 'missing status.json path', 'missing status files should fail with exit 2')
+  fs.writeFileSync(join(fx.dir, 'partial.json'), '{"project":"x"}')
+  const partial = spawnSync('bash', [runner, join(fx.dir, 'partial.json')], { encoding: 'utf8', env })
+  assert.equal(partial.status, 2)
+  assertIncludes(partial.stderr, 'missing required field(s): repo, runLog', 'incomplete status files should name the missing fields')
+  const full = spawnSync('bash', [runner, fx.statusPath], { encoding: 'utf8', env: { ...env, MIN_FREE_MB: '999999999' } })
+  assert.equal(full.status, 75)
+  assertIncludes(full.stderr, 'aborting: only', 'the disk guard should check the project filesystem, not a hardcoded /home/admin')
+  fs.rmSync(join(fx.repo, 'prompts', 'research.md'))
+  const noPrompt = spawnSync('bash', [runner, fx.statusPath], { encoding: 'utf8', env: { ...env, FAKE_ARGS_OUT: '/dev/null', FAKE_RUN_LOG: fx.runLog } })
+  assert.equal(noPrompt.status, 1)
+  assertIncludes(noPrompt.stderr, '[codex-incubator] missing prompt:', 'missing prompts should fail visibly with the agent tag')
+}
+
+function testCorruptIncubatorsFileIsNeverOverwritten() {
+  const dir = tempDir('incubators-corrupt')
+  const projectsDir = join(dir, 'projects')
+  fs.mkdirSync(projectsDir, { recursive: true })
+  const incubatorsPath = join(projectsDir, 'incubators.json')
+  fs.writeFileSync(incubatorsPath, '{"slots": [ truncated')
+  const script = `
+    const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
+    const data = store.readIncubators()
+    let error = null
+    try { store.writeIncubators({ ...data, slots: [{ id: 'new' }] }) } catch (err) { error = { status: err.status, message: err.message } }
+    console.log(JSON.stringify({ slots: data.slots.length, error }))
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    env: { ...process.env, PI_PULSE_LAB_ROOT: dir, PI_PULSE_INCUBATOR_REPO_ROOT: dir, PI_PULSE_PROJECTS_DIR: projectsDir },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  const out = JSON.parse(result.stdout.trim().split('\n').pop())
+  assert.equal(out.slots, 0)
+  assert.equal(out.error?.status, 409, 'writes over an unreadable incubators.json should be refused')
+  assert.equal(fs.readFileSync(incubatorsPath, 'utf8'), '{"slots": [ truncated', 'the corrupt file should be left for manual repair')
+}
+
 const tests = [
   testStdoutFailedRunsShowCommandError,
   testCapturedFailureDetailIsReusableForStatusReceipts,
@@ -1499,6 +1661,9 @@ const tests = [
   testTrustHarnessRunsBeforeBuild,
   testPublicWriteSafetyAndLoopFusesAreWired,
   testStaleSourceMutationsAreWriteGated,
+  testUnifiedRunnerGivesCodexAndClaudeTheSameContract,
+  testUnifiedRunnerFailsVisiblyOnBadInput,
+  testCorruptIncubatorsFileIsNeverOverwritten,
 ]
 
 for (const test of tests) {

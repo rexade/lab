@@ -2,7 +2,7 @@
 
 A Raspberry Pi-hosted creative incubator for autonomous AI work.
 
-Pi Lab runs repeated create/mutate/research loops against mounted projects. It keeps memory, taste feedback, run history, failure visibility, and human steering in one small local system.
+Pi Lab runs repeated create/mutate/research loops against incubator projects. It keeps memory, taste feedback, run history, failure visibility, and human steering in one small local system.
 
 This is not a generic dashboard. It is a workshop for producing weird, shippable creative software. Steer it toward higher trust per run, not more widgets.
 
@@ -12,12 +12,12 @@ This is not a generic dashboard. It is a workshop for producing weird, shippable
 
 ## What this actually is
 
-A Raspberry Pi 5 (`testpi`) running a self-directed creative lab. **Its purpose is to let AI be creative — to produce real things.** Not to run experiments for their own sake. The lab exists so that autonomous Claude Code turns can incrementally push shippable creative work forward: models, tools, apps, artifacts, whatever the mounted project is chasing.
+A Raspberry Pi 5 (`testpi`) running a self-directed creative lab. **Its purpose is to let AI be creative — to produce real things.** Not to run experiments for their own sake. The lab exists so that autonomous Claude Code turns can incrementally push shippable creative work forward: models, tools, apps, artifacts, whatever each incubator project is chasing.
 
 Two layers, don't conflate them:
 
 - **The workshop** — this repo. `src/pi-pulse/` (a Node+React dashboard bound to `127.0.0.1:8089` by default, reachable externally only through Cloudflare Tunnel hostnames `home.rexthedog.space` / `pipulse.rexthedog.space` when Cloudflare Access or an equivalent write guard is configured) makes the loop visible and steerable. `run-lab.sh` is the loop. MemPalace + the markdown files (`DAILY_SEED.md`, `TASTE_PROFILE.md`, `RUN_LOG.md`, `ACTIVE_THREADS.md`, etc.) give the loop continuity across turns. Optimize this layer for **signal, not features** — every widget you add is scaffolding you'll have to maintain instead of ship.
-- **The products** — whatever gets mounted as a child project. Today: `race-whisperer-predict` (V85 horse-race analysis). Historically the ghost/whisper/oracle quartet, the narrator, and pi-pulse's own visual identity have all been shaped by this loop. Products live in their own repos with their own `run-<name>.sh` scripts; the workshop hosts them and drives the AI turns against them. Optimize this layer for **shippable creative output**.
+- **The products** — whatever runs in an incubator slot. Today: `race-whisperer-predict` (V85 horse-race analysis). Historically the ghost/whisper/oracle quartet, the narrator, and pi-pulse's own visual identity have all been shaped by this loop. Products live in their own repos with their own `run-<name>.sh` scripts; the workshop hosts them and drives the AI turns against them. Optimize this layer for **shippable creative output**.
 
 The workshop is not itself a product. But its whole reason to exist is to produce them.
 
@@ -49,7 +49,7 @@ pi-pulse UI (SSE watch on RUN_LOG.md)   ← live-updates without reload
 
 **Rotation:** `create → mutate → research → mutate`. `harvest` is manual-only (`./run-lab.sh harvest`) and consolidates. Each type has its own prompt in `prompts/`.
 
-**Trigger:** Currently invoked either by a systemd timer, by the pi-pulse UI's "Run Lab" button (`POST /api/run`), or the incubator auto-schedule (`POST /api/child/schedule` — fires the *mounted* child project on an interval).
+**Trigger:** Currently invoked either by a systemd timer, by the pi-pulse UI's "Run Lab" button (`POST /api/run`), or per-slot incubator schedules (`POST /api/incubators/:id/schedule` — fires that slot's runner on an interval). One global run lock keeps the core lab and all slots from running at once.
 
 ---
 
@@ -109,13 +109,13 @@ lab/
 │   └── harvest.md               ← manual consolidation
 │
 ├── projects/                    ← per-project incubator metadata
-│   ├── mounted.json             ← which project is currently "mounted"
-│   ├── schedule.json            ← auto-schedule state for the mounted child
-│   ├── INCUBATOR.md             ← notes on the incubator concept
-│   ├── pi-pulse/                ← the host itself, tracked as a project
-│   ├── race-whisperer-predict/  ← currently mounted (V85 race analysis)
-│   ├── ghost-trio/              ← dormant (see BACKLOG.md)
-│   └── hatchery/                ← ??
+│   ├── incubators.json          ← slot list: status path + schedule per slot
+│   ├── INCUBATOR.md             ← how slots, launchers, and runs work
+│   ├── pi-pulse/                ← the host itself (core lab status + schedule)
+│   └── <slug>/                  ← one per slot: status.json + generated run-<slug>.sh
+│
+├── scripts/
+│   └── run-codex-incubator.sh   ← stable Codex entrypoint → src/pi-pulse/scripts/run-incubator.sh
 │
 ├── memory/                      ← structured palace-mined notes
 │   ├── decisions.md
@@ -125,7 +125,12 @@ lab/
 │   └── runs/                    ← run-NNN.md, one per run
 │
 └── src/
-    ├── pi-pulse/                ← Node+React dashboard (port 8089)
+    ├── pi-pulse/                ← Node+React dashboard (port 8089) — see docs/ARCHITECTURE.md
+    │   ├── server.js            ← route table + boot only
+    │   ├── server/              ← config, security, incubator store/runs, core lab, AI, stats
+    │   ├── server-core.js       ← pure RUN_LOG parsing + preflight (unit-tested)
+    │   ├── scripts/run-incubator.sh  ← the one incubator runner (Codex + Claude)
+    │   └── src/                 ← React UI (Pulse / Lab / Project tabs)
     ├── ghost/                   ← ghost/whisper/oracle quartet (dormant)
     └── narrator/                ← ambient narrator (ports 3031 area)
 ```
@@ -190,23 +195,13 @@ Do not switch `.mcp.json` to `mempalace-mcp` until that executable exists on the
 
 ---
 
-## The project mount system
+## Incubator slots
 
-The incubator hosts one **mounted child project** at a time. `projects/mounted.json` points at a project's `status.json`; pi-pulse's UI has a `ProjectPanel` that shows the mounted child's runs and can trigger its run script.
+Pi Pulse hosts any number of **incubator slots** (`projects/incubators.json`). Each slot points at `projects/<slug>/status.json`, which names the project repo (under `/home/admin/<slug>/`), its run log, prompts, runner (`codex` or `claude`), and last-run quality state. The Project tab lists every slot with its history, schedule, runner switch, feedback box, and AI strip.
 
-```
-projects/mounted.json
-{
-  "project": "race-whisperer-predict",
-  "labStatus": "/home/admin/lab/projects/race-whisperer-predict/status.json"
-}
-```
+Every slot launches through a generated `projects/<slug>/run-<slug>.sh`, which execs the unified runner `src/pi-pulse/scripts/run-incubator.sh`. The runner picks the agent from `status.runner`, builds the prompt, runs the agent under a timeout, writes RUN_LOG receipts and `reports/stdout/<agent>-run-N.log`, runs app evidence, and updates `status.json`.
 
-Each project directory contains a `status.json` with fields like `repo`, `runLog`, `runScript`, `phase`, plus arbitrary project-specific keys (race-whisperer-predict's status.json is 2 KB of evaluation state).
-
-**To add a new mountable project:** create `projects/<name>/status.json` with `repo`, `runLog`, `runScript`. That's it — the UI auto-discovers it via `GET /api/projects/list`. Mount it via `POST /api/projects/mount`, which rewrites `mounted.json` and exits pi-pulse's process (systemd restarts it in ~1s).
-
-The `runScript` lives outside this repo (typically `/home/admin/run-<project>.sh`). Those scripts are the project's equivalent of `run-lab.sh` — they usually invoke Claude Code with the project's own prompt against the project's own repo.
+**To add a project:** use the UI's new-incubator form (`POST /api/incubators/create`), or write `projects/<name>/status.json` and `POST /api/incubators { "project": "<name>" }`. No restart needed. Details: `projects/INCUBATOR.md`.
 
 ---
 
@@ -217,7 +212,7 @@ The `runScript` lives outside this repo (typically `/home/admin/run-<project>.sh
 3. **Work only in `src/` for code changes.** Don't touch `run-lab.sh` / `generate-brief.sh` / `save-run.sh` unless the seed explicitly directs you there. They are the fabric of the loop.
 4. **One meaningful change beats ten small tweaks.** The prompts say this. Believe it. Don't sprinkle refactors.
 5. **Do not add dependencies** without a strong reason justified against the seed. `npm install <thing>` is a request for approval, not a decision.
-6. **Do not restructure `RUN_LOG.md` format.** `server.js` parses it with two regexes (formal `## Run N — DATE — TYPE` headers and `<!-- stdout from run N DATE -->` comment blocks). Break either and the UI stops parsing history.
+6. **Do not restructure `RUN_LOG.md` format.** `server-core.js` parses it with two regexes (formal `## Run N — DATE — TYPE` headers and `<!-- stdout from run N DATE -->` comment blocks). Break either and the UI stops parsing history.
 7. **Do not "fix" things the seed doesn't ask about.** Broken things exist by design sometimes. The seed says what deserves fixing.
 8. **Do not propose milestone/verdict discipline.** See the "Why freeform" section. If you think this system needs it, you have misread it.
 9. **Do not push `node_modules/` or `dist/`.** `.gitignore` handles this — do not commit around it.
@@ -229,7 +224,7 @@ The `runScript` lives outside this repo (typically `/home/admin/run-<project>.sh
 - **Single-Pi single-point-of-failure.** The Pi's SD card is the only physical copy of the running system beyond this repo. If runtime state matters (day-buffer, live palace state), it lives only on the Pi. This repo is source + config + notes, not a full backup.
 - **Cloudflared lockout.** The Pi is administered through a Cloudflare Tunnel. Never touch `/etc/cloudflared/config.yml` or restart `cloudflared` without understanding you can lock yourself (and the human) out until a physical reboot. The human explicitly asks to be warned before any change touching networking, Docker, or Cloudflare.
 - **Port 8089 double-bind.** `pi-pulse.service` owns restarts. Do not add wrapper restart loops or port-kill guards; a busy port should fail loudly in the journal.
-- **`fs.watch` unreliability.** `server.js` uses `fs.watch` on `RUN_LOG.md`. It's not guaranteed to fire on all filesystems. There's no polling fallback for RUN_LOG.md — if a run happens and the UI doesn't update, refresh the browser once and check the console.
+- **`fs.watch` unreliability.** `server.js` watches the lab directory for `RUN_LOG.md` changes. It's not guaranteed to fire on all filesystems. There's no polling fallback for RUN_LOG.md — if a run happens and the UI doesn't update, refresh the browser once and check the console.
 - **qwen tokenization artifacts.** DRIFT_FEEDBACK sometimes contains garbled tokens like `"arenaught"` or `"areading"` — that's the 1.5B model breaking grammar, not corruption. Don't chase it.
 - **The palace can be stale.** `save-run.sh` mines `memory/` after each run, but the source of truth for "what happened" is still `RUN_LOG.md`. Trust the log first.
 
@@ -238,8 +233,8 @@ The `runScript` lives outside this repo (typically `/home/admin/run-<project>.sh
 ## What "good work" looks like here
 
 - You read `DAILY_SEED.md`, `MEMORY_BRIEF.md`, and `ACTIVE_THREADS.md` before touching code.
-- You pick ONE thing that aligns with the seed and the current active thread — biased toward changes that make the mounted **product** better, not the workshop.
-- You make a small, confident, tasteful change. It compiles. `npm run build` succeeds. If the change is to a mounted product, it moves that product closer to something shippable.
+- You pick ONE thing that aligns with the seed and the current active thread — biased toward changes that make an incubated **product** better, not the workshop.
+- You make a small, confident, tasteful change. It compiles. `npm run build` succeeds. If the change is to an incubated product, it moves that product closer to something shippable.
 - You update `RUN_LOG.md` with an honest entry: what changed, why, what improved, **what broke** (do not lie about this), next move.
 - You rewrite `ACTIVE_THREADS.md` to reflect the current live ideas — kill dead threads.
 - You do NOT explain what the code does in comments; the prompts don't want that either.
@@ -255,7 +250,7 @@ Related but distinct repositories on the same Pi and GitHub account:
 
 - **`rexade/lab`** (this repo, PRIVATE) — the lab loop + pi-pulse + palace notes. Lives at `/home/admin/lab/`.
 - **`rexade/henrik-lab`** (PUBLIC) — the Docker stack at `/home/admin/outline/` running the home services (homepage, recipes, kanban, anime, brain, outline, uptime-kuma). Separate concern. Don't merge them.
-- Mounted child projects (like `race-whisperer-predict`) live in their OWN repos at `/home/admin/<project>/` and are referenced from `projects/<name>/status.json`. This repo does not vendor them.
+- Incubator projects (like `race-whisperer-predict`) live in their OWN repos at `/home/admin/<project>/` and are referenced from `projects/<name>/status.json`. This repo does not vendor them.
 
 ---
 

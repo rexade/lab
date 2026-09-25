@@ -9,6 +9,8 @@ src/pi-pulse/dist.bak/
 
 # Runtime state
 src/pi-pulse/day-buffer.json
+projects/.run-capture/
+projects/.run-locks/
 *.log
 
 # Auto-generated per run (noisy diffs, easily regenerated)

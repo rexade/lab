@@ -166,6 +166,9 @@ echo "[run-lab] run complete, logging"
 BUILD_NOTE=""
 CHANGED=$(find "$LAB_DIR/src/pi-pulse/src" \
     "$LAB_DIR/src/pi-pulse/server.js" \
+    "$LAB_DIR/src/pi-pulse/server-core.js" \
+    "$LAB_DIR/src/pi-pulse/server" \
+    "$LAB_DIR/src/pi-pulse/scripts" \
     "$LAB_DIR/src/pi-pulse/index.html" \
     "$LAB_DIR/src/pi-pulse/tailwind.config.js" \
     "$LAB_DIR/src/pi-pulse/postcss.config.js" \
