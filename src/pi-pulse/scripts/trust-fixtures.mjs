@@ -4,8 +4,6 @@ import fs from 'node:fs'
 import os from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createElement as h } from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
 import {
   aiFeedbackPayload,
   appendFailedPreflightEntry,
@@ -21,21 +19,17 @@ import {
   runsWithPinnedLatestFailure,
 } from '../server-core.js'
 import {
-  AiStripView,
   cachedAiFeedbackForSlot,
   fetchSavedAiFeedback,
   normalizeAnalysis,
   rememberAiFeedbackForSlot,
   shouldRefreshAiForTrigger,
-} from '../src/components/AiStrip.js'
+} from '../src/lib/critic.js'
 import {
-  failureSignal,
-  outputSignal,
   runFailureDetail,
-  RunHistoryList,
   runHistorySummary,
   runOutputDetail,
-} from '../src/components/RunHistoryList.js'
+} from '../src/lib/runHistory.js'
 import {
   latestCompletedRunSignature,
   newestFailedRunKey,
@@ -67,20 +61,6 @@ function runnerSource() {
 
 function assertIncludes(haystack, needle, message) {
   assert.ok(String(haystack).includes(needle), `${message}: expected "${haystack}" to include "${needle}"`)
-}
-
-function findReactElement(node, predicate) {
-  if (!node) return null
-  if (Array.isArray(node)) {
-    for (const child of node) {
-      const found = findReactElement(child, predicate)
-      if (found) return found
-    }
-    return null
-  }
-  if (typeof node !== 'object') return null
-  if (predicate(node)) return node
-  return findReactElement(node.props?.children, predicate)
 }
 
 function testStdoutFailedRunsShowCommandError() {
@@ -523,8 +503,6 @@ async function testFeedbackSwitchingReadsLatestWithoutRegenerating() {
 
   const core = await fetchSavedAiFeedback({ fetchImpl, slotId: 'core' })
   const race = await fetchSavedAiFeedback({ fetchImpl, slotId: 'race-whisperer-predict' })
-  const coreHtml = renderToStaticMarkup(h(AiStripView, { open: true, analysis: core.analysis, lastRun: core.lastRun }))
-  const raceHtml = renderToStaticMarkup(h(AiStripView, { open: true, analysis: race.analysis, lastRun: race.lastRun }))
 
   assert.deepEqual(calls.map(call => call.url), [
     '/api/incubators/core/ai/latest',
@@ -532,18 +510,16 @@ async function testFeedbackSwitchingReadsLatestWithoutRegenerating() {
   ])
   assert.ok(calls.every(call => call.method === 'GET'), 'slot switching should use GET latest calls only')
   assert.ok(calls.every(call => !call.url.includes('/ai/analyze')), 'slot switching latest-feedback path must not regenerate analysis')
-  assertIncludes(coreHtml, 'data-ai-strip-source="local-ollama-qwen"', 'rendered strip should label local Ollama/Qwen source')
-  assertIncludes(coreHtml, 'data-ai-incubator="core"', 'rendered core feedback should retain incubator identity')
-  assertIncludes(coreHtml, 'Core cached direction', 'rendered core strip should show cached field text')
-  assertIncludes(raceHtml, 'data-ai-incubator="race-whisperer-predict"', 'rendered child feedback should retain incubator identity')
-  assertIncludes(raceHtml, 'Race cached direction', 'rendered child strip should show its own cached field text')
+  assert.equal(core.analysis.fields.DIRECTION, 'Core cached direction')
+  assert.equal(race.analysis.fields.DIRECTION, 'Race cached direction', 'each incubator keeps its own saved critique')
+  assert.equal(race.savedAt, 456)
 
   const fallback = normalizeAnalysis({ response: 'DIRECTION: Raw-only feedback', incubatorId: 'core' })
   assert.equal(fallback.fields.DIRECTION, undefined)
   assert.equal(fallback.malformed, true, 'raw-only cached feedback should stay visibly malformed until parsed by the server')
 }
 
-function testAiStripKeepsPerSlotClientCache() {
+function testCriticKeepsPerSlotCache() {
   let cache = {}
   const coreFeedback = {
     analysis: normalizeAnalysis({
@@ -591,36 +567,6 @@ function testAiStripKeepsPerSlotClientCache() {
   assert.equal(shouldRefreshAiForTrigger(1, 2), true, 'completed runs should still trigger fresh local critic feedback')
 }
 
-function testSlotSwitchingHasBrowserStableDomHooks() {
-  const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
-  assertIncludes(panel, 'data-incubator-card={slot.id}', 'incubator cards should expose stable slot ids for browser smoke clicks')
-  assertIncludes(panel, "data-incubator-selected={selected === slot.id ? 'true' : 'false'}", 'selected incubator card should expose selection state')
-  assertIncludes(panel, 'data-active-ai-slot={activeSlot.id}', 'AI strip wrapper should expose the selected slot id')
-  assertIncludes(panel, 'aria-label={`Select incubator ${slot.name || slot.id}`}', 'incubator cards should have accessible click targets')
-  assertIncludes(panel, "if (event.key === 'Enter' || event.key === ' ')", 'incubator card selection should be keyboard reachable')
-
-  const loadingHtml = renderToStaticMarkup(h(AiStripView, { slotId: 'race-whisperer-predict', open: false }))
-  assertIncludes(loadingHtml, 'data-ai-incubator="race-whisperer-predict"', 'AI strip should keep active incubator identity before feedback loads')
-  assertIncludes(loadingHtml, 'Local Ollama/Qwen feedback for race-whisperer-predict', 'AI strip accessible label should identify the selected incubator')
-}
-
-function testProjectPanelApiJsonErrorsStayVisible() {
-  const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
-  const selectedRunnerIndex = panel.indexOf('const selectedRunner = activeSlot.runner || activeSlot.schedule?.runner || \'script\'')
-  const receiptIndex = panel.indexOf('const runnerReceiptLabel = selectedRunner === \'claude\'')
-
-  assertIncludes(panel, 'async function readApiJson(response, label = \'API request\')', 'project panel should centralize API JSON parsing')
-  assertIncludes(panel, 'returned HTML instead of JSON', 'project panel should explain HTML/API fallthrough instead of surfacing Unexpected token')
-  assertIncludes(panel, 'async function fetchApiJson(url, options)', 'project panel should use one API JSON helper for route reads')
-  assertIncludes(panel, 'const { response: res, data: d } = await fetchApiJson(`/api/incubators/${id}/runs`)', 'history loading should use the guarded JSON parser')
-  assertIncludes(panel, 'setHistoryErrorsBySlot(prev => ({ ...prev, [id]: err.message || \'failed to load run history\' }))', 'history parser failures should stay visible in UI state')
-  assertIncludes(panel, 'const { response: res, data: d } = await fetchApiJson(`/api/incubators/${slot.id}/runner`,', 'runner switching should use the guarded JSON parser')
-  assert.ok(!panel.includes('.then(r => r.json())'), 'project panel should not contain raw response.json chains')
-  assert.ok(!panel.includes('await res.json()'), 'project panel should not contain raw response.json awaits')
-  assert.ok(selectedRunnerIndex > 0, 'selected runner should be initialized')
-  assert.ok(receiptIndex > selectedRunnerIndex, 'runner receipt should not read selectedRunner before initialization')
-}
-
 function testCachedAiLatestEndpointsHydrateLegacyFiles() {
   const server = serverSource()
   assertIncludes(server, 'function readCachedAiFeedback(target)', 'server should centralize saved AI feedback hydration')
@@ -641,7 +587,6 @@ function testCachedAiLatestEndpointsHydrateLegacyFiles() {
 }
 
 function testPreflightBlockedLaunchLooksBlocked() {
-  const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
   const server = serverSource()
   assertIncludes(server, 'function appendManualPreflightFailure', 'manual launch preflight blocks should append durable FAILED history')
   assertIncludes(server, "source: 'manual-preflight'", 'manual preflight history rows should identify manual launch blocks')
@@ -652,38 +597,6 @@ function testPreflightBlockedLaunchLooksBlocked() {
   assertIncludes(server, 'capturedFailureDetail(capturePath)', 'process-level failure status should reuse the captured command error')
   assertIncludes(server, "lastRunFailureSource: cfg.lastRunFailureSource", 'hydrated incubator slots should expose the failure source')
   assertIncludes(server, 'const runs = parsedRunsForLog(status.runLog)', 'next incubator run numbers should include existing FAILED history rows through the cached parser')
-  assertIncludes(panel, 'const runnerBlocked = !!readinessIssue', 'launch button should derive blocked state from preflight/readiness failure')
-  assertIncludes(panel, 'const runDisabled = activeSlot.launching || activeSlot.running', 'preflight-blocked slots should still let the server record a blocked manual run')
-  assertIncludes(panel, "data-run-blocked={runnerBlocked ? 'true' : 'false'}", 'blocked launch state should be visible to browser tests')
-  assertIncludes(panel, 'RUNNER BLOCKED', 'blocked launch button should be visibly labeled')
-  assertIncludes(panel, 'click to record failure: ${readinessIssue.slice(0, 72)}', 'blocked launch button should explain that clicking records a durable failure row')
-  assertIncludes(panel, "onClick={() => { if (!runDisabled) activeSlot.onRun?.() }}", 'blocked launch button should call the server endpoint so preflight can write history')
-  assertIncludes(panel, 'function preflightFailureRows(preflight)', 'panel should format every failed preflight check for the selected incubator')
-  assertIncludes(panel, "data-preflight-detail={readinessDetails.length ? 'true' : 'false'}", 'runner blocked panel should expose detailed preflight state to browser tests')
-  assertIncludes(panel, '`${label}: ${detail}${check.path ? ` (${check.path})` : \'\'}', 'preflight detail should keep the failed check path visible')
-  assertIncludes(panel, 'setPreflightBySlot(prev => ({ ...prev, [slot.id]: setup }))', 'failed relay switch responses should keep full setup detail in the UI')
-  assertIncludes(panel, '{preflightRunnerLabel} preflight', 'runner blocked panel should label which runner preflight failed')
-  assertIncludes(panel, "function mutationBlockMessage(data = {}, fallback = 'request failed')", 'mutating requests should preserve machine-readable stale-source blocks')
-  assertIncludes(panel, "data-restart-pulse-service=\"true\"", 'stale-source runner blocks should expose a service restart action')
-  assertIncludes(panel, "fetch('/api/restart', { method: 'POST' })", 'stale-source restart action should restart Pi Pulse without using full host reboot')
-  assertIncludes(panel, 'async function waitForPulseHealthy', 'stale-source restart action should wait for Pi Pulse to come back')
-  assertIncludes(panel, "if (d.code === 'STALE_SERVICE_SOURCE' && allowStaleRestart)", 'stale-source relay switches should trigger one automatic service restart path')
-  assertIncludes(panel, 'Pi Pulse source stale; restarting service, then retrying ${runner} relay switch.', 'relay switch recovery should tell the user exactly what is happening')
-  assertIncludes(panel, 'return performSwitch(false)', 'relay switch recovery should retry only once after restart')
-  assertIncludes(panel, "data-card-run-blocked={runnerBlocked ? 'true' : 'false'}", 'incubator cards should expose blocked runner state before selection')
-  assertIncludes(panel, "data-card-preflight-detail={readinessDetails.length ? 'true' : 'false'}", 'incubator cards should expose whether failed check details are present')
-  assertIncludes(panel, "runnerBlocked ? 'runner blocked'", 'incubator cards should visibly label blocked runners')
-  assertIncludes(panel, 'fetchSlotPreflight(slot.id)', 'incubator polling should hydrate preflight state for every project slot')
-  assertIncludes(panel, "onRun={(e) => { e?.stopPropagation?.(); slot.onRun() }}", 'card run button should route blocked attempts through server preflight history')
-  assertIncludes(panel, "title={runnerBlocked ? `Record blocked run: ${readinessIssue}` : `Run ${slot.name}`}", 'card run control should expose the blocking error in its title')
-  assertIncludes(panel, "const lastRunFailed = lastRunStatus === 'failed'", 'incubator cards should detect failed last-run status')
-  assertIncludes(panel, 'function isQualityWeak(slot = {})', 'incubator cards should detect weak quality status separately from failed runner status')
-  assertIncludes(panel, 'data-card-quality-state={slot.id}', 'incubator cards should expose weak quality receipts to browser tests')
-  assertIncludes(panel, 'data-quality-state={activeSlot.id}', 'selected incubator should expose quality state in the detail panel')
-  assertIncludes(panel, 'function slotRecoveryRequired(slot = {})', 'incubator cards should treat negative-feedback recovery as a quality state')
-  assertIncludes(panel, "return 'recovery required'", 'quality label should make recovery-required state visible')
-  assertIncludes(panel, 'lastRunFailed ? \'last failed\'', 'incubator cards should label failed last-run state')
-  assertIncludes(panel, 'data-card-last-run-failure={lastRunFailed ? slot.id : undefined}', 'incubator cards should expose last-run failure receipts to browser tests')
   assertIncludes(server, "availableRunners: ['codex', 'claude']", 'Claude should stay visible as a relay option even when setup is incomplete')
   assertIncludes(server, 'function claudeRunnerSetupForStatus(cfg)', 'server should report Claude setup state separately from launch preflight')
   assertIncludes(server, "runnerSetups: { claude: claudeSetup }", 'incubator payload should include Claude setup diagnostics')
@@ -706,28 +619,6 @@ function testPreflightBlockedLaunchLooksBlocked() {
   assertIncludes(server, 'function incubatorLaunchCommand(cfg, statusPath, runType = null)', 'incubator preflight should expose the exact launch command')
   assertIncludes(server, 'command: incubatorLaunchCommand(cfg, slot.statusPath, runType)', 'incubator preflight payload should include the resolved launch command')
   assertIncludes(server, 'const args = incubatorRunArgs(cfg, slot.statusPath, runType)', 'incubator launch should use the same args reported by preflight')
-  assertIncludes(panel, 'if (d.slot) setIncubators(prev => prev.map(item => item.id === slot.id ? d.slot : item))', 'successful relay switches should update the selected slot immediately')
-  assertIncludes(panel, 'await fetchSlotRuns(slot.id)', 'relay switches should immediately refresh the selected slot history after preflight state changes')
-  assertIncludes(panel, 'd.preflight || d.setup', 'relay switch UI should prefer returned launch preflight over setup-only diagnostics')
-  assertIncludes(panel, 'data-runner-relay-detail={activeSlot.id}', 'selected incubator should expose auditable runner relay details')
-  assertIncludes(panel, 'data-runner-switch-receipt={activeSlot.id}', 'selected incubator should expose a durable runner switch receipt')
-  assertIncludes(panel, "data-runner-launch-ok={selectedRunnerLaunchOk ? 'true' : 'false'}", 'runner switch receipt should disclose whether the selected runner can launch')
-  assertIncludes(panel, 'data-last-run-failure={activeSlot.id}', 'selected incubator should expose the last failed run detail outside the timeline')
-  assertIncludes(panel, 'Last run failed', 'selected incubator should visibly label a failed last run')
-  assertIncludes(panel, 'Claude selected, launch blocked', 'selected Claude should remain visibly selected even when launch preflight blocks it')
-  assertIncludes(panel, 'Claude selected and launchable', 'successful Claude switches should have a clear launchable receipt')
-  assertIncludes(panel, 'function shortCommand(value = \'\')', 'selected incubator should trim long command previews without dropping them')
-  assertIncludes(panel, 'activePreflight?.command ? `command: ${shortCommand(activePreflight.command)}` : null', 'selected incubator should show the exact command preflight will launch')
-  assertIncludes(panel, 'relay: ${shortPath(activeSlot.claudeRelayScript || activeSlot.relayScript || claudeSetup?.expectedScript)}', 'Claude relay details should show the actual relay path, not just the launcher')
-  assertIncludes(panel, "model: ${activeSlot.claudeModel || claudeSetup?.model || 'Claude CLI default'}", 'Claude relay details should show the persisted model/default')
-  assertIncludes(panel, 'data-runner-setup="claude"', 'project panel should render a persistent Claude setup diagnostic')
-  assertIncludes(panel, 'Claude setup incomplete', 'Claude setup failure should be visible near the relay switch')
-  assertIncludes(panel, 'relay switch preflight', 'Claude setup panel should identify that the relay switch is blocked')
-  assertIncludes(panel, 'const [historyErrorsBySlot, setHistoryErrorsBySlot] = useState({})', 'run history load failures should have explicit UI state')
-  assertIncludes(panel, 'if (!res.ok || d.ok === false)', 'incubator run API errors should not collapse into empty history')
-  assertIncludes(panel, 'setRunsBySlot(prev => ({ ...prev, [id]: [] }))', 'history load failures should clear stale rows for the selected slot')
-  assertIncludes(panel, 'data-run-history-error={activeSlot.id}', 'selected incubator history errors should be visible to browser tests')
-  assertIncludes(panel, 'history unavailable', 'run history panel should tell the user when the log cannot be loaded')
   assertIncludes(server, "res.status(500).json({", 'incubator run history read failures should return an explicit failed API response')
   assertIncludes(server, 'statusPath: slot.statusPath', 'incubator history errors should include the status path for diagnosis')
   assertIncludes(server, 'function writeIncubatorLauncher', 'new incubators should get their own project launcher script')
@@ -743,11 +634,6 @@ function testPreflightBlockedLaunchLooksBlocked() {
   assertIncludes(server, 'const slug = uniqueIncubatorSlug(title)', 'new incubator slugs should be based on the short generated title')
   assertIncludes(server, 'displayName: title', 'new incubator status should persist the generated display title')
   assertIncludes(server, 'name: cfg.displayName ?? cfg.incubatorTitle', 'hydrated incubators should expose the display title to the UI')
-  assertIncludes(panel, 'name: slot.displayName || slot.name || slot.project || slot.id', 'project cards should render generated display names before filesystem ids')
-  assertIncludes(panel, "const [newTitle, setNewTitle] = useState('')", 'create incubator UI should expose an optional short-name field')
-  assertIncludes(panel, 'body: JSON.stringify({ idea, title })', 'create incubator UI should send the optional short name to the API')
-  assert.ok(!panel.includes('Existing projects'), 'add incubator menu should not invite re-adding old project directories')
-  assert.ok(!panel.includes('addableProjects'), 'add incubator menu should be create-only')
 }
 
 function testFailedRunsDoNotAutoRegenerateFeedback() {
@@ -793,66 +679,6 @@ function testNoSummaryCompletedRowsTriggerFeedbackSignal() {
   assertIncludes(stdoutOnly, 'Full stdout saved to /tmp/stdout/claude-run-5.log', 'stdout-only no-summary rows should still trigger per-incubator feedback after completion')
 }
 
-function testFailedHistoryRowsExposeExpandableDetail() {
-  const displayRuns = [
-    { num: 3, date: '2026-07-04', type: 'MUTATE', 'What I changed': 'recovered', signature: 'ok-3' },
-    { num: 2, date: '2026-07-04', type: 'FAILED', Failure: '[run failed - exit 127]', detail: 'bash: line 7: codex: command not found\nexit status 127', signature: 'failed-2' },
-    { num: 1, date: '2026-07-04', type: 'RESEARCH', 'What I found': 'baseline', signature: 'ok-1' },
-  ]
-  const defaultOpenFailureKey = newestFailedRunKey(displayRuns, 'core')
-  const openHtml = renderToStaticMarkup(h(RunHistoryList, {
-    displayRuns,
-    slotId: 'core',
-    expandedFailureKeys: {},
-    defaultOpenFailureKey,
-  }))
-
-  assertIncludes(openHtml, 'data-run-type="FAILED"', 'rendered history should mark FAILED rows')
-  assertIncludes(openHtml, 'data-latest-failure="true"', 'run history should render a top-level latest failure callout')
-  assertIncludes(openHtml, 'latest failure', 'latest failure callout should be visibly labeled')
-  assertIncludes(openHtml, 'Open latest failure detail for run 2', 'latest failure callout should target the failed run detail')
-  assertIncludes(openHtml, 'data-failure-open="true"', 'FAILED row should expose open state for browser tests')
-  assertIncludes(openHtml, 'Toggle failure detail for run 2', 'FAILED detail toggle should have a specific accessible label')
-  assertIncludes(openHtml, 'aria-expanded="true"', 'newest FAILED history detail should default open by run key')
-  assertIncludes(openHtml, 'codex: command not found', 'FAILED history row should render the command error')
-  assertIncludes(openHtml, 'exit status 127', 'expanded FAILED history detail should render full command output')
-
-  const collapsedHtml = renderToStaticMarkup(h(RunHistoryList, {
-    displayRuns,
-    slotId: 'core',
-    expandedFailureKeys: { [defaultOpenFailureKey]: false },
-    defaultOpenFailureKey,
-  }))
-  assertIncludes(collapsedHtml, 'aria-expanded="false"', 'FAILED detail button should reflect collapsed state')
-  assert.ok(!collapsedHtml.includes('<pre'), 'collapsed FAILED detail should not render the full preformatted output')
-  assert.equal(failureSignal(displayRuns[1].detail), 'bash: line 7: codex: command not found')
-
-  let toggledState = null
-  const tree = RunHistoryList({
-    displayRuns,
-    slotId: 'core',
-    expandedFailureKeys: { [defaultOpenFailureKey]: true },
-    defaultOpenFailureKey,
-    setExpandedFailureKeys: updater => { toggledState = updater({ [defaultOpenFailureKey]: true }) },
-  })
-  const toggle = findReactElement(tree, node => node.props?.['data-failure-toggle'] === defaultOpenFailureKey)
-  assert.equal(toggle?.type, 'button', 'FAILED detail should render a real button control')
-  toggle.props.onClick()
-  assert.equal(toggledState[defaultOpenFailureKey], false, 'FAILED detail button click should collapse the expanded row')
-
-  const calloutTree = RunHistoryList({
-    displayRuns,
-    slotId: 'core',
-    expandedFailureKeys: { [defaultOpenFailureKey]: false },
-    defaultOpenFailureKey,
-    setExpandedFailureKeys: updater => { toggledState = updater({ [defaultOpenFailureKey]: false }) },
-  })
-  const callout = findReactElement(calloutTree, node => node.props?.['data-latest-failure'] === 'true')
-  assert.equal(callout?.type, 'button', 'latest failure callout should be a real button control')
-  callout.props.onClick()
-  assert.equal(toggledState[defaultOpenFailureKey], true, 'latest failure callout should reopen the failed row detail')
-}
-
 function testNewestFailedRowStaysOpenBelowCompletedRun() {
   const displayRuns = [
     { num: 3, date: '2026-07-04', type: 'MUTATE', 'What I changed': 'recovered', signature: 'ok-3' },
@@ -888,12 +714,6 @@ function testRecoveredOldFailuresStopBeingPinned() {
   assert.ok(!recovered.some(run => run.type === 'FAILED'), 'old failure should drop out once later runs recovered')
   assert.equal(recovered.at(-1).num, 13)
 
-  const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
-  assertIncludes(panel, 'function recoveredAfterFailure(run)', 'project panel should know when later runs recovered an old failure')
-  assertIncludes(panel, 'const recovered = failureIndex >= 0 && runs.slice(failureIndex + 1).some(recoveredAfterFailure)', 'selected history should stop pinning failures after recovery')
-  assertIncludes(panel, 'return recovered ? recent : [...recent, latestFailure]', 'selected history should only pin unresolved failures')
-  assertIncludes(panel, 'selectedHistoryRuns(activeSlot.runs || []).reverse()', 'active run history should render selected recent rows')
-  assertIncludes(panel, 'data-history-failure-receipt={activeSlot.id}', 'run history should disclose when a failure is visible before expanded rows')
 
   const server = serverSource()
   assertIncludes(server, 'runsWithPinnedLatestFailure(runs, 10)', 'host run API should use filtered failure pinning through cached runs')
@@ -976,32 +796,6 @@ function testNoSummaryRowsPreferStdoutOverGenericDone() {
     'expanded output detail should still expose the saved stdout location'
   )
 }
-
-function testNoSummaryRowsExposeExpandableStdoutDetail() {
-  const run = {
-    num: 12,
-    date: '2026-07-04',
-    type: 'MUTATE',
-    Done: 'Claude completed but did not append a run summary.',
-    'Output excerpt': 'Built the missing relay switch diagnostics.',
-    'Stdout tail': 'Built the missing relay switch diagnostics.\nWrote the trust fixture.',
-    Output: 'Full stdout saved to /tmp/stdout/claude-run-12.log',
-    signature: 'stdout-detail-12',
-  }
-  const html = renderToStaticMarkup(h(RunHistoryList, {
-    displayRuns: [run],
-    slotId: 'fresh-slot',
-    expandedFailureKeys: { [runHistoryKey('fresh-slot', run, 0)]: true },
-  }))
-
-  assertIncludes(runOutputDetail(run), 'Wrote the trust fixture.', 'stdout-backed rows should expose hydrated output detail')
-  assertIncludes(html, 'data-stdout-open="true"', 'stdout-backed non-failed rows should expose open state for browser tests')
-  assertIncludes(html, 'Toggle stdout detail for run 12', 'stdout detail toggle should have a specific accessible label')
-  assertIncludes(html, 'stdout: /tmp/stdout/claude-run-12.log', 'collapsed stdout detail should show the saved stdout file path')
-  assertIncludes(html, 'Full stdout saved to /tmp/stdout/claude-run-12.log', 'expanded stdout detail should show the saved stdout path')
-  assert.equal(outputSignal(runOutputDetail(run)), 'stdout: /tmp/stdout/claude-run-12.log')
-}
-
 
 function testQualityGateFieldsDriveStatusAndHistory() {
   const content = [
@@ -1216,13 +1010,6 @@ function testClaudeRunnerSwitchWarnsFromLaunchPreflight() {
   assertIncludes(server, 'repaired: result.repaired ?? false', 'runner switch responses should disclose legacy status repair')
   assertIncludes(server, 'const hydratedSlot = hydrateIncubator(slot)\n  const warning = launchBlocked', 'Claude switch responses should hydrate the slot before reporting')
   assert.ok(!server.includes('runner-switch-preflight'), 'a runner switch is configuration, not a run: it must not write run history')
-  const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
-  assertIncludes(panel, 'const keepNotice = d.historyRecorded || String(d.warning || \'\').includes(\'blocked\')', 'blocked Claude switch notices should stay visible after writing history')
-  assertIncludes(panel, 'if (!keepNotice)', 'successful runner notices may still clear without hiding blocked relay failures')
-  assertIncludes(panel, 'runnerReceiptsBySlot', 'runner switches should keep a concrete UI receipt after the async refresh')
-  assertIncludes(panel, 'data-runner-switch-receipt-detail', 'runner switch receipts should be renderable for browser checks')
-  assertIncludes(panel, 'data-runner-switch-history-recorded', 'blocked Claude switch receipts should disclose when a FAILED history row was written')
-  assertIncludes(panel, 'command: {shortCommand(runnerReceipt.command)}', 'runner switch receipts should show the exact launch command that preflight evaluated')
 }
 
 
@@ -1328,21 +1115,14 @@ function testIncubatorQualityContractIsWired() {
   assertIncludes(runner, 'status.lastAppEvidenceTopTier = appEvidence?.topTierEligible === true', 'Incubator runner should persist top-tier evidence eligibility')
   assertIncludes(runner, "status.lastRecoveryRequired = recoveryRequired === '1'", 'Incubator runner should persist recovery-required state')
   assertIncludes(runner, '**Quality gate:** NEEDS-EVIDENCE', 'no-summary rows should be marked as needs-evidence')
-  const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
-  assertIncludes(panel, 'data-app-evidence-primary', 'incubator UI should show primary-action evidence')
-  assertIncludes(panel, 'data-app-evidence-mode', 'incubator UI should show semantic/degraded evidence mode')
-  assertIncludes(panel, 'data-app-evidence-success', 'incubator UI should show semantic success contract result')
-  assertIncludes(panel, 'data-run-north-star', 'incubator UI should show first-class north-star field')
-  assertIncludes(panel, 'data-run-verdict', 'incubator UI should show plateau/regression verdict')
-  assertIncludes(panel, 'data-quality-delta', 'incubator UI should show expected/actual quality delta')
 }
 
 function testTrustHarnessRunsBeforeBuild() {
   const pkg = JSON.parse(fs.readFileSync(join(root, 'package.json'), 'utf8'))
   assert.match(
     pkg.scripts?.['test:trust'] || '',
-    /node scripts\/trust-fixtures\.mjs\s*&&\s*node scripts\/trust-smoke\.mjs/,
-    'npm run test:trust must run source fixtures and live HTTP smoke'
+    /node scripts\/trust-fixtures\.mjs\s*&&\s*node scripts\/trust-ui\.mjs\s*&&\s*node scripts\/trust-smoke\.mjs/,
+    'npm run test:trust must run source fixtures, rendered UI contracts, and live HTTP smoke'
   )
   assert.match(
     pkg.scripts?.build || '',
@@ -1845,20 +1625,16 @@ const tests = [
   testPerIncubatorAiFeedbackShape,
   testApiFallbackCannotServeSpaHtml,
   testFeedbackSwitchingReadsLatestWithoutRegenerating,
-  testAiStripKeepsPerSlotClientCache,
-  testSlotSwitchingHasBrowserStableDomHooks,
-  testProjectPanelApiJsonErrorsStayVisible,
+  testCriticKeepsPerSlotCache,
   testCachedAiLatestEndpointsHydrateLegacyFiles,
   testPreflightBlockedLaunchLooksBlocked,
   testFailedRunsDoNotAutoRegenerateFeedback,
   testNoSummaryCompletedRowsTriggerFeedbackSignal,
-  testFailedHistoryRowsExposeExpandableDetail,
   testNewestFailedRowStaysOpenBelowCompletedRun,
   testRecoveredOldFailuresStopBeingPinned,
   testFormalParagraphRunsKeepReadableSummary,
   testClaudeNoSummaryRowsShowOutputExcerpt,
   testNoSummaryRowsPreferStdoutOverGenericDone,
-  testNoSummaryRowsExposeExpandableStdoutDetail,
   testQualityGateFieldsDriveStatusAndHistory,
   testFormalRowsHydrateSavedStdoutFile,
   testFormalRowsHydrateStdoutPathFromExcerpt,

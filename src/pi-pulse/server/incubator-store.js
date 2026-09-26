@@ -338,11 +338,13 @@ export function projectFeedbackPath(cfg) {
   return pathInside(cfg.feedbackPath, cfg.repo || '') ? cfg.feedbackPath : fallback
 }
 
+// Notes are appended as `## <timestamp>` sections under a file header; the
+// latest note is the last section's body, never the header text.
 export function readLatestProjectFeedback(filePath, maxChars = 900) {
   try {
-    const text = fs.readFileSync(filePath, 'utf8').trim()
-    if (!text) return null
-    return text.slice(-maxChars)
+    const sections = fs.readFileSync(filePath, 'utf8').split(/^## .*$/m).slice(1)
+    const latest = sections.map(section => section.trim()).filter(Boolean).pop()
+    return latest ? latest.slice(-maxChars) : null
   } catch {
     return null
   }

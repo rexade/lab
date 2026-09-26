@@ -1,286 +1,208 @@
-import { useEffect, useState } from 'react'
-import { useSystemStats } from './hooks/useSystemStats.js'
-import { NavShell } from './components/NavShell.jsx'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { motion } from 'framer-motion'
+import { IncubatorDetail } from './components/IncubatorDetail.jsx'
+import { LoopHero } from './components/LoopHero.jsx'
 import { PulsePanel } from './components/PulsePanel.jsx'
-import { ProjectPanel } from './components/ProjectPanel.jsx'
-import { LabPanel } from './components/LabPanel.jsx'
+import { Roster } from './components/Roster.jsx'
+import { ServicesView } from './components/ServicesView.jsx'
+import { TopBar } from './components/TopBar.jsx'
+import { useIncubators } from './hooks/useIncubators.js'
+import { useNow } from './hooks/useNow.js'
+import { useSystemStats } from './hooks/useSystemStats.js'
+import { fetchApiJson } from './lib/api.js'
+import { localDay, loopHeadline, runsOnDay } from './lib/incubator.js'
+import { latestCompletedRunSignature } from './lib/runSignals.js'
 
-// Ambient color thresholds — shifts the whole UI accent as load rises
-const COOL   = { accent: '#22d3ee', dim: 'rgba(34,211,238,0.12)',  glow: 'rgba(34,211,238,0.35)'  }
-const WARM   = { accent: '#fb923c', dim: 'rgba(251,146,60,0.12)',  glow: 'rgba(251,146,60,0.35)'  }
-const HOT    = { accent: '#f87171', dim: 'rgba(248,113,113,0.12)', glow: 'rgba(248,113,113,0.35)' }
+const AMBIENT = {
+  cool: { accent: '#22d3ee', glow: 'rgba(34,211,238,0.32)' },
+  warm: { accent: '#fb923c', glow: 'rgba(251,146,60,0.32)' },
+  hot: { accent: '#f87171', glow: 'rgba(248,113,113,0.34)' },
+}
+const TABS = ['lab', 'system', 'services']
 
-function applyAccent({ accent, dim, glow }) {
-  const r = document.documentElement.style
-  r.setProperty('--accent', accent)
-  r.setProperty('--accent-dim', dim)
-  r.setProperty('--accent-glow', glow)
+function readStored(key, fallback) {
+  try { return localStorage.getItem(key) ?? fallback } catch { return fallback }
 }
 
-// Circadian ambient — bloom opacity and vertical position follow the time of day.
-// Night: dim and receded. Dawn: rising. Day: full presence. Dusk: fading.
-function useCircadian() {
-  const compute = () => {
-    const h = new Date().getHours() + new Date().getMinutes() / 60
-    if (h >= 22 || h < 5) return { opacity: 0.07, top: '-6vh' }   // deep night — receded
-    if (h < 8) {                                                    // dawn — rising
-      const p = (h - 5) / 3
-      return { opacity: 0.07 + p * 0.09, top: `${(-6 + p * 6).toFixed(1)}vh` }
-    }
-    if (h < 18) return { opacity: 0.16, top: '0vh' }               // day — full presence
-    const p = (h - 18) / 4                                         // dusk — fading
-    return { opacity: 0.16 - p * 0.09, top: `${(-p * 6).toFixed(1)}vh` }
-  }
-  const [state, setState] = useState(compute)
+function writeStored(key, value) {
+  try { localStorage.setItem(key, value) } catch { /* private mode */ }
+}
+
+// Bloom presence follows the local time of day: receded at night, full by day.
+function circadian(now) {
+  const date = new Date(now)
+  const h = date.getHours() + date.getMinutes() / 60
+  if (h >= 22 || h < 5) return 0.55
+  if (h < 8) return 0.55 + ((h - 5) / 3) * 0.45
+  if (h < 18) return 1
+  return 1 - ((h - 18) / 4) * 0.45
+}
+
+function useHealth() {
+  const [health, setHealth] = useState(null)
   useEffect(() => {
-    const id = setInterval(() => setState(compute()), 60_000)
+    const load = () => fetchApiJson('/api/health', { cache: 'no-store' }).then(({ data }) => setHealth(data)).catch(() => setHealth(null))
+    load()
+    const id = setInterval(load, 30000)
     return () => clearInterval(id)
   }, [])
-  return state
+  return [health, setHealth]
 }
 
-function fmtBytes(b) {
-  if (b == null) return '—'
-  if (b < 1024) return `${b} B/s`
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB/s`
-  return `${(b / 1024 / 1024).toFixed(1)} MB/s`
+function useTab() {
+  const initial = TABS.includes(window.location.hash.slice(1)) ? window.location.hash.slice(1) : 'lab'
+  const [tab, setTab] = useState(initial)
+  useEffect(() => {
+    const onHash = () => TABS.includes(window.location.hash.slice(1)) && setTab(window.location.hash.slice(1))
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+  const select = next => {
+    setTab(next)
+    window.history.replaceState(null, '', next === 'lab' ? window.location.pathname : `#${next}`)
+  }
+  return [tab, select]
 }
 
-function SystemStrip({ stats, latestTemp, connected }) {
-  const disk = stats?.disk?.percent ?? null
-  const memory = stats?.memory?.percent ?? null
-  const cpu = stats?.cpu ?? null
-  const hot = latestTemp > 70 || cpu > 85
-  const diskHigh = disk != null && disk > 88
-  const status = hot ? 'hot' : diskHigh ? 'disk pressure' : connected ? 'safe' : 'offline'
-  const statusColor = hot ? '#f87171' : diskHigh ? '#fb923c' : connected ? '#22c55e' : '#64748b'
-
-  const metric = (label, value, color = 'rgba(226,232,240,0.72)') => (
-    <div style={{ display: 'grid', gap: 2, minWidth: 64 }}>
-      <span style={{ fontSize: '0.52rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'rgba(71,85,105,0.62)' }}>
-        {label}
-      </span>
-      <strong style={{ fontSize: '0.78rem', fontFamily: 'monospace', color, fontWeight: 650, lineHeight: 1 }}>
-        {value}
-      </strong>
-    </div>
-  )
-
-  return (
-    <div
-      className="panel"
-      style={{
-        padding: '10px 16px',
-        display: 'flex',
-        flexWrap: 'wrap',
-        gap: 12,
-        alignItems: 'center',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 140, flex: '1 1 160px' }}>
-        <span style={{
-          width: 8,
-          height: 8,
-          borderRadius: '50%',
-          background: statusColor,
-          boxShadow: `0 0 10px ${statusColor}66`,
-          flexShrink: 0,
-        }} />
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.14em', color: statusColor }}>
-            {status}
-          </div>
-          <div style={{ marginTop: 2, fontSize: '0.62rem', color: 'rgba(148,163,184,0.56)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {stats?.hostname ?? 'pi'} · {stats?.uptimeFormatted ?? '—'}
-          </div>
-        </div>
-      </div>
-      {metric('cpu', cpu == null ? '—' : `${cpu}%`, cpu > 65 ? '#fb923c' : undefined)}
-      {metric('temp', latestTemp == null ? '—' : `${latestTemp.toFixed(1)}°`, latestTemp > 60 ? '#fb923c' : undefined)}
-      {metric('mem', memory == null ? '—' : `${memory}%`)}
-      {metric('disk', disk == null ? '—' : `${disk}%`, diskHigh ? '#fb923c' : undefined)}
-      {metric('net ↓', fmtBytes(stats?.net?.rx), '#22d3ee')}
-      {metric('net ↑', fmtBytes(stats?.net?.tx), '#a78bfa')}
-    </div>
-  )
-}
-
-function CollapsiblePulse({ stats, history, tempHistory, netRxHistory, netTxHistory }) {
-  const [open, setOpen] = useState(false)
-
-  return (
-    <section className="panel" style={{ padding: 0, overflow: 'hidden' }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%',
-          border: 'none',
-          background: 'transparent',
-          padding: '12px 18px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          cursor: 'pointer',
-          color: 'inherit',
-          textAlign: 'left',
-        }}
-      >
-        <span style={{
-          width: 7,
-          height: 7,
-          borderRadius: '50%',
-          background: 'var(--accent)',
-          boxShadow: '0 0 10px var(--accent-glow)',
-          flexShrink: 0,
-        }} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: '0.58rem', fontFamily: 'monospace', textTransform: 'uppercase', letterSpacing: '0.14em', color: 'var(--muted)' }}>
-            System Pulse
-          </div>
-          <div style={{ marginTop: 3, fontSize: '0.72rem', color: 'rgba(148,163,184,0.58)' }}>
-            Full telemetry chamber, expanded only when you need the diagnostics.
-          </div>
-        </div>
-        <span style={{ fontSize: '0.64rem', fontFamily: 'monospace', color: 'rgba(71,85,105,0.55)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-          {open ? 'hide' : 'open'}
-        </span>
-      </button>
-      {open && (
-        <div style={{ borderTop: '1px solid var(--border)', padding: 16 }}>
-          <PulsePanel stats={stats} history={history} tempHistory={tempHistory} netRxHistory={netRxHistory} netTxHistory={netTxHistory} />
-        </div>
-      )}
-    </section>
-  )
+// A newly completed run bumps that slot's trigger so its critic refreshes once.
+function useCriticTriggers(runsBySlot) {
+  const [triggers, setTriggers] = useState({})
+  const seen = useRef({})
+  useEffect(() => {
+    const bumps = {}
+    for (const [id, runs] of Object.entries(runsBySlot)) {
+      const signature = latestCompletedRunSignature(runs)
+      const previous = seen.current[id]
+      if (previous != null && previous !== signature) bumps[id] = true
+      seen.current[id] = signature
+    }
+    if (Object.keys(bumps).length) {
+      setTriggers(prev => Object.fromEntries([...Object.entries(prev), ...Object.keys(bumps).map(id => [id, (prev[id] || 0) + 1])]))
+    }
+  }, [runsBySlot])
+  return triggers
 }
 
 export default function App() {
   const { stats, history, tempHistory, netRxHistory, netTxHistory, connected } = useSystemStats()
-  const [runCount, setRunCount] = useState(null)
-  const [serviceHealth, setServiceHealth] = useState(null)
-  const [activeTab, setActiveTab] = useState('pulse')
-  const circadian = useCircadian()
+  const { slots, loaded, loadError, runsBySlot, historyErrors, preflightBySlot, actions } = useIncubators()
+  const [health, setHealth] = useHealth()
+  const [tab, setTab] = useTab()
+  const [selectedId, setSelectedId] = useState(() => readStored('pi-pulse.selected', null))
+  const [restarting, setRestarting] = useState(false)
+  const now = useNow(1000)
+  const criticTriggers = useCriticTriggers(runsBySlot)
+
+  const headline = useMemo(() => loopHeadline(slots, { preflightBySlot, now }), [slots, preflightBySlot, now])
+  const today = useMemo(() => runsOnDay(runsBySlot, localDay(new Date(now))), [runsBySlot, now])
+  const selected = slots.find(slot => slot.id === selectedId) || slots.find(slot => slot.id === headline.focusId) || slots[0] || null
+
+  const select = id => {
+    setSelectedId(id)
+    writeStored('pi-pulse.selected', id)
+  }
 
   useEffect(() => {
-    const fetchCount = () =>
-      fetch('/api/project/status')
-        .then(r => r.json())
-        .then(d => setRunCount(d.runCount))
-        .catch(() => {})
+    const cpu = stats?.cpu ?? 0
+    const temp = stats?.temperature ?? 40
+    const level = cpu > 85 || temp > 75 ? 'hot' : cpu > 65 || temp > 60 ? 'warm' : 'cool'
+    const root = document.documentElement.style
+    root.setProperty('--accent', AMBIENT[level].accent)
+    root.setProperty('--accent-glow', AMBIENT[level].glow)
+  }, [stats?.cpu, stats?.temperature])
 
-    fetchCount()
-    const es = new EventSource('/api/runs/stream')
-    es.onmessage = fetchCount
-    return () => es.close()
-  }, [])
-
-  useEffect(() => {
-    const fetchHealth = () =>
-      fetch('/api/health')
-        .then(r => r.json())
-        .then(d => setServiceHealth(d))
-        .catch(() => setServiceHealth(null))
-
-    fetchHealth()
-    const id = setInterval(fetchHealth, 30_000)
-    return () => clearInterval(id)
-  }, [])
-
-  // Ambient color mode — whole UI heats up with CPU/temp
-  useEffect(() => {
-    const cpu  = stats?.cpu ?? 0
-    const temp = tempHistory.at(-1) ?? 40
-    if (cpu > 85 || temp > 75) {
-      applyAccent(HOT)
-    } else if (cpu > 65 || temp > 60) {
-      applyAccent(WARM)
-    } else {
-      applyAccent(COOL)
+  const restart = async () => {
+    setRestarting(true)
+    try {
+      setHealth(await actions.restartService())
+    } catch {
+      // The pill keeps offering the restart while the source is still stale.
+    } finally {
+      setRestarting(false)
     }
-  }, [stats?.cpu, tempHistory.length])
+  }
 
-  const latestTemp = tempHistory.at(-1)
-  const tempColor = latestTemp > 75 ? '#f87171' : latestTemp > 60 ? '#fb923c' : 'rgba(71,85,105,0.4)'
-
+  const running = headline.tone === 'run'
   return (
-    <>
-      {/* Ambient bloom — fixed radial glow behind all content, shifts with heat and time of day */}
-      <div
-        className="pointer-events-none"
-        style={{
-          position: 'fixed',
-          top: circadian.top,
-          left: '50%',
-          transform: 'translateX(-50%)',
-          width: 'min(1200px, 130vw)',
-          height: '65vh',
-          background: 'radial-gradient(ellipse at 50% 0%, var(--accent-glow), transparent 65%)',
-          opacity: circadian.opacity,
-          zIndex: 0,
-          transition: 'opacity 90s ease, top 90s ease',
-        }}
+    <div className="relative min-h-screen">
+      <div aria-hidden="true" className="pointer-events-none fixed inset-0 overflow-hidden">
+        <div
+          className="absolute left-1/2 top-[-22vh] h-[70vh] w-[min(1400px,140vw)] -translate-x-1/2 rounded-full"
+          style={{
+            background: `radial-gradient(ellipse at 50% 40%, ${running ? 'rgba(167,139,250,0.22)' : 'var(--accent-glow)'}, transparent 62%)`,
+            opacity: 0.55 * circadian(now),
+            transition: 'opacity 60s ease, background 1.2s ease',
+          }}
+        />
+        <div className="absolute inset-x-0 bottom-0 h-[40vh]" style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.6), transparent)' }} />
+      </div>
+
+      <TopBar
+        tab={tab}
+        onTab={setTab}
+        stats={stats}
+        connected={connected}
+        health={health}
+        busy={running}
+        restarting={restarting}
+        onRestart={restart}
       />
 
-      <div
-        className="min-h-screen flex flex-col"
-        style={{ maxWidth: 1100, margin: '0 auto', position: 'relative', zIndex: 1 }}
-      >
-        <NavShell
-          hostname={stats?.hostname}
-          connected={connected}
-          uptime={stats?.uptimeFormatted}
-          runCount={runCount}
-          serviceHealth={serviceHealth}
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-        />
-
-        <main className="flex-1 flex flex-col gap-4 p-4 sm:p-6">
-          {activeTab === 'pulse' ? (
-            <>
-              <SystemStrip stats={stats} latestTemp={latestTemp} connected={connected} />
-
-              {/* Incubator deck — host and mounted project loops */}
-              <ProjectPanel />
-
-              <CollapsiblePulse
-                stats={stats}
-                history={history}
-                tempHistory={tempHistory}
-                netRxHistory={netRxHistory}
-                netTxHistory={netTxHistory}
-              />
-            </>
-          ) : (
-            <LabPanel />
-          )}
-        </main>
-
-        {/* Device status strip — identity left, heat state right */}
-        <footer
-          style={{
-            borderTop: '1px solid var(--border)',
-            padding: '7px 24px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            background: 'rgba(0,0,0,0.3)',
-          }}
-        >
-          <span
-            className="font-mono"
-            style={{ fontSize: '0.62rem', color: 'rgba(71,85,105,0.28)', letterSpacing: '0.04em' }}
+      <main className="relative mx-auto flex max-w-[1240px] flex-col gap-5 px-4 pb-16 pt-5 sm:px-6 sm:pt-7">
+        {/* Enter-only on purpose: an exit-gated (mode="wait") switch can hang when
+            the outgoing view holds shared-layout animations, leaving the old tab up. */}
+        <motion.div
+            key={tab}
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+            className="flex flex-col gap-5"
           >
-            {stats?.arch ?? 'arm64'} · {stats?.platform ?? 'linux'}
-          </span>
-
-          {latestTemp != null && (
-            <span className="font-mono" style={{ fontSize: '0.62rem', color: tempColor }}>
-              {latestTemp.toFixed(1)}°C
-            </span>
-          )}
-        </footer>
-      </div>
-    </>
+            {tab === 'lab' && (
+              <>
+                {loaded
+                  ? <LoopHero slots={slots} headline={headline} today={today} now={now} onFocus={select} />
+                  : <div className="glass h-[340px] animate-pulse" aria-label="Loading the lab" />}
+                <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-5 lg:grid-cols-[360px_minmax(0,1fr)]">
+                  <div className="min-w-0 lg:sticky lg:top-[84px]">
+                    <Roster
+                      slots={slots}
+                      selectedId={selected?.id}
+                      onSelect={select}
+                      runsBySlot={runsBySlot}
+                      preflightBySlot={preflightBySlot}
+                      now={now}
+                      onCreate={async (idea, title) => {
+                        const slot = await actions.create(idea, title)
+                        if (slot?.id) select(slot.id)
+                      }}
+                      loadError={loadError}
+                    />
+                  </div>
+                  {selected ? (
+                    <IncubatorDetail
+                      key={selected.id}
+                      slot={{ ...selected, criticTrigger: criticTriggers[selected.id] || 0 }}
+                      runs={runsBySlot[selected.id] || []}
+                      preflight={preflightBySlot[selected.id]}
+                      historyError={historyErrors[selected.id]}
+                      now={now}
+                      actions={actions}
+                    />
+                  ) : loaded && (
+                    <div className="glass grid min-h-[320px] place-items-center p-10 text-center text-[15px] text-fg3">
+                      Create your first incubator and it will appear here.
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+            {tab === 'system' && (
+              <PulsePanel stats={stats} history={history} tempHistory={tempHistory} netRxHistory={netRxHistory} netTxHistory={netTxHistory} />
+            )}
+            {tab === 'services' && <ServicesView />}
+          </motion.div>
+      </main>
+    </div>
   )
 }

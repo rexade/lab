@@ -2,87 +2,115 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Register accent variables as typed CSS properties so transitions interpolate smoothly */
+/* Typed so the ambient accent can interpolate as host load changes. */
 @property --accent {
   syntax: '<color>';
   inherits: true;
   initial-value: #22d3ee;
 }
 
-@property --accent-dim {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: rgba(34, 211, 238, 0.12);
-}
-
 @property --accent-glow {
   syntax: '<color>';
   inherits: true;
-  initial-value: rgba(34, 211, 238, 0.35);
+  initial-value: rgba(34, 211, 238, 0.32);
 }
 
 :root {
+  color-scheme: dark;
+  --bg: #04060a;
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.12);
+  --text: #eef2f7;
+  --text-2: rgba(226, 232, 240, 0.74);
+  --text-3: rgba(148, 163, 184, 0.72);
+  --text-4: rgba(100, 116, 139, 0.72);
   --accent: #22d3ee;
-  --accent-dim: rgba(34, 211, 238, 0.12);
-  --accent-glow: rgba(34, 211, 238, 0.35);
-  --bg: #080808;
-  --surface: #0f0f0f;
-  --surface2: #161616;
-  --border: rgba(255, 255, 255, 0.07);
-  --text: #f1f5f9;
-  --muted: #475569;
-  /* Smooth ambient mode transitions — registered @property enables color interpolation */
-  transition: --accent 0.8s ease, --accent-dim 0.8s ease, --accent-glow 0.8s ease;
+  --accent-glow: rgba(34, 211, 238, 0.32);
+  --run: #a78bfa;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --fail: #f87171;
+  transition: --accent 1.2s ease, --accent-glow 1.2s ease;
 }
 
-* {
-  box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 html, body, #root {
-  height: 100%;
+  min-height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-feature-settings: 'cv11', 'ss01';
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-body {
-  overflow-x: hidden;
-}
+body { overflow-x: hidden; }
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 4px; height: 4px; }
+::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.16); }
 
-/* Glow text utility */
-.glow-text {
-  text-shadow: 0 0 20px var(--accent-glow);
+@layer components {
+  /* Layered glass: top highlight, soft body, deep drop shadow. */
+  .glass {
+    position: relative;
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018) 38%, rgba(255, 255, 255, 0.012));
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 30px 80px -40px rgba(0, 0, 0, 0.9);
+    backdrop-filter: blur(22px) saturate(140%);
+    -webkit-backdrop-filter: blur(22px) saturate(140%);
+  }
+
+  .hairline { border-color: var(--line); }
+
+  .eyebrow {
+    font-size: 11px;
+    line-height: 14px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--text-4);
+  }
+
+  .num { font-variant-numeric: tabular-nums; }
+
+  .focus-ring:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    outline-offset: 2px;
+  }
+
+  .field {
+    width: 100%;
+    border-radius: 14px;
+    border: 1px solid var(--line);
+    background: rgba(0, 0, 0, 0.32);
+    color: var(--text);
+    padding: 11px 14px;
+    font-size: 14px;
+    line-height: 1.45;
+    outline: none;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  }
+  .field::placeholder { color: var(--text-4); }
+  .field:focus {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent);
+    background: rgba(0, 0, 0, 0.42);
+  }
 }
 
-/* Panel surface */
-.panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 16px;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
-
-/* Accent border glow — uses var(--accent) so it shifts with ambient color mode */
-.border-accent-glow {
-  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent) inset,
-              0 4px 24px rgba(0, 0, 0, 0.5);
-  transition: border-color 0.6s ease, box-shadow 0.6s ease;
-}
-
-/* Number display */
-.mono {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-variant-numeric: tabular-nums;
-}
-
-/* Smooth all transitions */
-* { transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }

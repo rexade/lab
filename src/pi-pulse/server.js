@@ -8,6 +8,7 @@ import { firstRunnableClaudeModel, preflightFailureDetail, runsWithPinnedLatestF
 import {
   CORE_FEEDBACK_JSON,
   CORE_FEEDBACK_MD,
+  DEFAULT_RUN_TYPES,
   DIST_DIR,
   GHOST_DIARY_PATH,
   HOST,
@@ -152,6 +153,7 @@ function hydrateIncubator(slot) {
   const playRoute = fs.existsSync(join(cfg.repo, 'index.html')) ? mountPlayRoute(cfg) : null
   const claudeSetup = claudeRunnerSetupForStatus(cfg)
   const claudeRelayScript = claudeSetup.script || claudeSetup.expectedScript || cfg.claudeRunScript || null
+  const runTypes = Array.isArray(cfg.runTypes) && cfg.runTypes.length ? cfg.runTypes : DEFAULT_RUN_TYPES
   return {
     ...slot,
     project: cfg.project,
@@ -168,6 +170,9 @@ function hydrateIncubator(slot) {
     relayScript: cfg.runner === 'claude' ? claudeRelayScript : null,
     playUrl: playRoute ? `${playRoute}/` : null,
     runCount: cfg.runCount ?? repoStatus.runCount ?? 0,
+    runTypes,
+    // The runner picks runTypes[runCount % length] unless the scheduler shifts strategy.
+    nextRunType: String(runTypes[Number(cfg.runCount || 0) % runTypes.length] || 'mutate').toUpperCase(),
     lastRun: cfg.lastRun ?? repoStatus.lastRun ?? null,
     lastRunType: cfg.lastRunType ?? repoStatus.lastRunType ?? null,
     lastRunStatus: cfg.lastRunStatus ?? repoStatus.lastRunStatus ?? null,

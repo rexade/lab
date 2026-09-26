@@ -1,5 +1,6 @@
 import { useRef, useEffect, useMemo, useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { fetchApiJson } from '../lib/api.js'
 
 // ─── Network Pulse — bidirectional rx/tx sparkline ────────────────────────────
 
@@ -54,7 +55,7 @@ function NetPulse({ rxHistory, txHistory, net, width }) {
   return (
     <div>
       <div className="flex items-center gap-3 mb-1.5">
-        <span className="text-xs uppercase tracking-widest" style={{ color: 'var(--muted)', letterSpacing: '0.12em' }}>
+        <span className="text-xs uppercase tracking-widest" style={{ color: 'var(--text-4)', letterSpacing: '0.12em' }}>
           net i/o
         </span>
         <span className="text-xs font-mono" style={{ color: 'rgba(34,211,238,0.8)' }}>
@@ -468,7 +469,7 @@ function DayRing({ entries, narrations = [], diaryEntries = [] }) {
             >
               <span style={{
                 fontSize: '0.58rem', textTransform: 'uppercase', letterSpacing: '0.13em',
-                color: 'var(--muted)', fontFamily: 'monospace',
+                color: 'var(--text-4)', fontFamily: 'monospace',
               }}>24h activity</span>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {[
@@ -479,7 +480,7 @@ function DayRing({ entries, narrations = [], diaryEntries = [] }) {
                 ].map(({ label, color }) => (
                   <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
                     <div style={{ width: 6, height: 6, borderRadius: 2, background: color, flexShrink: 0 }} />
-                    <span style={{ fontSize: '0.55rem', color: 'var(--muted)', fontFamily: 'monospace' }}>{label}</span>
+                    <span style={{ fontSize: '0.55rem', color: 'var(--text-4)', fontFamily: 'monospace' }}>{label}</span>
                   </div>
                 ))}
               </div>
@@ -497,7 +498,7 @@ function DayRing({ entries, narrations = [], diaryEntries = [] }) {
 function useDayHistory() {
   const [entries, setEntries] = useState([])
   useEffect(() => {
-    const load = () => fetch('/api/history/day').then(r => r.json()).then(d => {
+    const load = () => fetchApiJson('/api/history/day').then(({ data: d }) => {
       if (d.ok && Array.isArray(d.entries)) setEntries(d.entries)
     }).catch(() => {})
     load()
@@ -510,7 +511,7 @@ function useDayHistory() {
 function useNarrations() {
   const [entries, setEntries] = useState([])
   useEffect(() => {
-    fetch('/api/narrations').then(r => r.json()).then(d => {
+    fetchApiJson('/api/narrations').then(({ data: d }) => {
       if (d.ok && Array.isArray(d.entries)) setEntries(d.entries)
     }).catch(() => {})
   }, [])
@@ -521,7 +522,7 @@ function useDiaryEntries() {
   const [entries, setEntries] = useState([])
   useEffect(() => {
     const load = () =>
-      fetch('/api/ghost/diary').then(r => r.json()).then(d => {
+      fetchApiJson('/api/ghost/diary').then(({ data: d }) => {
         if (d.ok && Array.isArray(d.entries)) setEntries(d.entries)
       }).catch(() => {})
     load()
@@ -662,7 +663,7 @@ function LoadBar({ label, value, max = 100, color = 'var(--accent)' }) {
   return (
     <div>
       <div className="flex justify-between items-baseline mb-1.5">
-        <span className="text-xs uppercase tracking-wider font-medium" style={{ color: 'var(--muted)' }}>{label}</span>
+        <span className="text-xs uppercase tracking-wider font-medium" style={{ color: 'var(--text-4)' }}>{label}</span>
         <span className="text-xs font-mono" style={{ color }}>{pct}%</span>
       </div>
       <div className="h-1 rounded-full overflow-hidden" style={{ background: 'rgba(255,255,255,0.06)' }}>
@@ -716,7 +717,7 @@ export function PulsePanel({ stats, history, tempHistory = [], netRxHistory = []
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, delay: 0.1, ease: [0.4, 0, 0.2, 1] }}
-      className="panel border-accent-glow overflow-hidden"
+      className="glass overflow-hidden"
       style={{ padding: 0 }}
     >
       {/* Header */}
@@ -729,7 +730,7 @@ export function PulsePanel({ stats, history, tempHistory = [], netRxHistory = []
               className="w-1.5 h-1.5 rounded-full"
               style={{ background: 'var(--accent)', boxShadow: '0 0 6px var(--accent-glow)' }}
             />
-            <span className="text-xs uppercase tracking-widest font-medium" style={{ color: 'var(--muted)' }}>
+            <span className="text-xs uppercase tracking-widest font-medium" style={{ color: 'var(--text-4)' }}>
               system pulse
             </span>
           </div>
@@ -741,21 +742,21 @@ export function PulsePanel({ stats, history, tempHistory = [], netRxHistory = []
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -4 }}
                 transition={{ duration: 0.2 }}
-                className="text-6xl font-bold mono glow-text"
-                style={{ color: 'var(--accent)', letterSpacing: '-2px', lineHeight: 1 }}
+                className="num font-mono text-6xl font-semibold"
+                style={{ color: 'var(--accent)', letterSpacing: '-2px', lineHeight: 1, textShadow: '0 0 24px var(--accent-glow)' }}
               >
                 {Math.round(latest)}
               </motion.span>
             </AnimatePresence>
             <div>
               <div className="text-xl font-semibold" style={{ color: 'rgba(255,255,255,0.4)' }}>%</div>
-              <div className="text-xs" style={{ color: 'var(--muted)' }}>cpu usage</div>
+              <div className="text-xs" style={{ color: 'var(--text-4)' }}>cpu usage</div>
             </div>
           </div>
         </div>
 
         {/* Mini stats */}
-        <div className="hidden md:flex flex-col gap-3 items-end" style={{ minWidth: 160 }}>
+        <div className="hidden md:flex flex-col gap-3" style={{ width: 180 }}>
           <LoadBar label="CPU" value={latest} color="var(--accent)" />
           <LoadBar
             label="Memory"
@@ -786,7 +787,7 @@ export function PulsePanel({ stats, history, tempHistory = [], netRxHistory = []
       {hasTempData && (
         <div className="px-4 pt-3 pb-1">
           <div className="flex items-center gap-3 mb-1.5">
-            <span className="text-xs uppercase tracking-widest" style={{ color: 'var(--muted)', letterSpacing: '0.12em' }}>
+            <span className="text-xs uppercase tracking-widest" style={{ color: 'var(--text-4)', letterSpacing: '0.12em' }}>
               temp
             </span>
             <span className="text-xs font-mono font-medium" style={{ color: tempColor }}>
@@ -823,19 +824,19 @@ export function PulsePanel({ stats, history, tempHistory = [], netRxHistory = []
       {/* Bottom bar — load avg */}
       <div
         className="flex flex-wrap items-center gap-x-6 gap-y-1 px-6 py-3 mt-3 border-t"
-        style={{ borderColor: 'var(--border)', background: 'rgba(0,0,0,0.2)' }}
+        style={{ borderColor: 'var(--line)', background: 'rgba(0,0,0,0.2)' }}
       >
-        <span className="text-xs uppercase tracking-widest" style={{ color: 'var(--muted)' }}>load avg</span>
+        <span className="text-xs uppercase tracking-widest" style={{ color: 'var(--text-4)' }}>load avg</span>
         {(stats?.loadAvg ?? [0, 0, 0]).map((v, i) => (
           <div key={i} className="flex items-baseline gap-1">
-            <span className="mono font-medium text-sm text-white">{v.toFixed(2)}</span>
-            <span className="text-xs" style={{ color: 'var(--muted)' }}>{['1m', '5m', '15m'][i]}</span>
+            <span className="num font-mono font-medium text-sm text-white">{v.toFixed(2)}</span>
+            <span className="text-xs" style={{ color: 'var(--text-4)' }}>{['1m', '5m', '15m'][i]}</span>
           </div>
         ))}
         {stats?.memory && (
           <div className="ml-auto flex items-baseline gap-1">
-            <span className="mono text-sm font-medium text-white">{stats.memory.usedMB}</span>
-            <span className="text-xs" style={{ color: 'var(--muted)' }}>/ {stats.memory.totalMB} MB</span>
+            <span className="num font-mono text-sm font-medium text-white">{stats.memory.usedMB}</span>
+            <span className="text-xs" style={{ color: 'var(--text-4)' }}>/ {stats.memory.totalMB} MB</span>
           </div>
         )}
       </div>
