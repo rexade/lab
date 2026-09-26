@@ -199,8 +199,24 @@ function getNetworkRate() {
   }
 }
 
-export function primeCpuBaseline() {
+// CPU and network rates are deltas between samples. One sampler owns them, so an
+// extra consumer (a second tab, /api/stats, the day buffer) cannot shorten the
+// window and report a random 0% or spike.
+const SAMPLE_INTERVAL_MS = 2000
+let latestCpu = 0
+let latestNet = { rx: 0, tx: 0, iface: 'unknown' }
+let cpuWindow = { sum: 0, count: 0 }
+
+function takeSample() {
+  latestCpu = getCpuUsage()
+  latestNet = getNetworkRate()
+  cpuWindow = { sum: cpuWindow.sum + latestCpu, count: cpuWindow.count + 1 }
+}
+
+export function startStatsSampler() {
   prevCpuTimes = readCpuTimes()
+  getNetworkRate()
+  setInterval(takeSample, SAMPLE_INTERVAL_MS).unref?.()
 }
 
 export function buildStatsPayload() {
@@ -208,9 +224,9 @@ export function buildStatsPayload() {
   const temp = getTemperature()
   const uptimeSecs = getUptime()
   const load = getLoadAvg()
-  const cpu = getCpuUsage()
+  const cpu = latestCpu
   const disk = getDiskInfo()
-  const net = getNetworkRate()
+  const net = latestNet
   return {
     cpu,
     memory: {
@@ -244,9 +260,15 @@ function loadDayBuffer() {
 
 function pushDaySnapshot() {
   const p = buildStatsPayload()
-  dayBuffer.push({ ts: Date.now(), cpu: p.cpu ?? 0, temp: p.temperature ?? null, mem: p.memory?.percent ?? 0, rx: p.net?.rx ?? 0, tx: p.net?.tx ?? 0 })
+  // Each 5-minute point is the mean of its window, not one 2-second sample.
+  const cpu = cpuWindow.count ? Math.round(cpuWindow.sum / cpuWindow.count) : p.cpu
+  cpuWindow = { sum: 0, count: 0 }
+  dayBuffer.push({ ts: Date.now(), cpu: cpu ?? 0, temp: p.temperature ?? null, mem: p.memory?.percent ?? 0, rx: p.net?.rx ?? 0, tx: p.net?.tx ?? 0 })
   if (dayBuffer.length > DAY_BUFFER_MAX) dayBuffer.shift()
-  fs.writeFile(DAY_BUFFER_PATH, JSON.stringify(dayBuffer), () => {})
+  const tmp = `${DAY_BUFFER_PATH}.${process.pid}.tmp`
+  fs.writeFile(tmp, JSON.stringify(dayBuffer), err => {
+    if (!err) fs.rename(tmp, DAY_BUFFER_PATH, () => {})
+  })
 }
 
 export function startDayBuffer() {

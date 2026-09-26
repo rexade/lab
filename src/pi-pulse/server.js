@@ -47,6 +47,7 @@ import {
   normalizeIncubatorStatus,
   projectFeedbackPath,
   readIncubators,
+  reconcileStaleSchedulesAtBoot,
   readLatestProjectFeedback,
   readStatusAt,
   repairClaudeRunnerStatusIfNeeded,
@@ -57,10 +58,10 @@ import { inferIncubatorRole } from './server/incubator-templates.js'
 import { aiTargetForIncubator, analyzeAiTarget, localLlmStatus, readCachedAiFeedback } from './server/local-ai.js'
 import { globalRunBusy } from './server/run-lock.js'
 import { appendSteeringNote, parsedRunsForLog, readLogContent } from './server/run-logs.js'
-import { appendManualPreflightFailure, appendRunnerSwitchPreflightFailure, nextCoreRunNum } from './server/run-receipts.js'
+import { appendManualPreflightFailure, nextCoreRunNum } from './server/run-receipts.js'
 import { createGeneratedAppWriteGuard, generatedAppSecurityHeaders, requireTrustedWrite } from './server/security.js'
 import { requireFreshSource, serviceHealth } from './server/service-health.js'
-import { buildStatsPayload, dayBufferEntries, primeCpuBaseline, startDayBuffer } from './server/system-stats.js'
+import { buildStatsPayload, dayBufferEntries, startDayBuffer, startStatsSampler } from './server/system-stats.js'
 import { broadcastSse, clampScheduleInterval, hoursFromNow, openSseStream, routeSlugForProject, writeJsonAtomic } from './server/util.js'
 
 const app = express()
@@ -68,7 +69,7 @@ const app = express()
 // ─── Generated incubator apps (play routes) ───────────────────────────────────
 // A project with an index.html is served at /<project-slug>/ under a restrictive
 // CSP. Routes mounted after boot land behind the SPA fallback, which resolves
-// them through incubatorPlayFileForRequest().
+// them through resolvePlayRequest().
 
 const mountedPlayRoutes = new Set()
 
@@ -97,29 +98,42 @@ function isGeneratedAppPath(refPath) {
   return false
 }
 
-function incubatorPlayFileForRequest(requestPath) {
-  const match = String(requestPath || '').match(/^\/([a-z0-9_-]+)(?:\/(.*))?$/i)
+// Resolves a request against the incubator play routes.
+//   null                      -> not a play route; serve the Pi Pulse SPA
+//   { redirect }              -> bare /<slug>; relative app URLs need the slash
+//   { file }                  -> serve this file from the project repo
+//   { file: null }            -> a play route with no such public file: 404
+// Hidden paths (.git, .env, ...) are never public: a repo's git config can
+// carry credentials in its remote URL.
+function resolvePlayRequest(requestPath) {
+  const match = String(requestPath || '').match(/^\/([a-z0-9_-]+)(\/(.*))?$/i)
   if (!match) return null
   const slug = match[1].toLowerCase()
-  const requestFile = match[2] && match[2] !== '' ? match[2] : 'index.html'
+  const requestFile = match[3] ? match[3] : 'index.html'
 
   for (const slot of readIncubators().slots) {
+    let cfg
     try {
-      const cfg = readStatusAt(slot.statusPath)
-      if (routeSlugForProject(cfg.project) !== slug || !fs.existsSync(join(cfg.repo, 'index.html'))) continue
+      cfg = readStatusAt(slot.statusPath)
+    } catch {
+      continue // malformed slot state must not break the SPA fallback
+    }
+    if (routeSlugForProject(cfg.project) !== slug || !fs.existsSync(join(cfg.repo, 'index.html'))) continue
+    if (!match[2]) return { redirect: `/${slug}/` }
+    if (requestFile.split('/').some(segment => segment.startsWith('.'))) return { file: null }
 
-      const repoRoot = resolve(cfg.repo)
-      const candidate = resolve(repoRoot, requestFile)
-      if (candidate !== repoRoot && !candidate.startsWith(repoRoot + '/')) return null
-
+    const repoRoot = resolve(cfg.repo)
+    const candidate = resolve(repoRoot, requestFile)
+    if (candidate !== repoRoot && !candidate.startsWith(repoRoot + '/')) return { file: null }
+    try {
       const stat = fs.statSync(candidate)
       if (stat.isDirectory()) {
         const indexPath = join(candidate, 'index.html')
-        return fs.existsSync(indexPath) ? indexPath : null
+        return { file: fs.existsSync(indexPath) ? indexPath : null }
       }
-      return stat.isFile() ? candidate : null
+      return { file: stat.isFile() ? candidate : null }
     } catch {
-      // Keep scanning other slots; malformed slot state should not break SPA fallback.
+      return { file: null }
     }
   }
   return null
@@ -200,9 +214,10 @@ function hydrateIncubator(slot) {
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
-primeCpuBaseline()
+startStatsSampler()
 syncProjectStatus()
 startDayBuffer()
+reconcileStaleSchedulesAtBoot()
 
 app.use(express.json({ limit: '1mb' }))
 app.use('/api', rejectGeneratedAppControlWrite, requireTrustedWrite)
@@ -359,7 +374,7 @@ app.post('/api/lab/feedback', requireFreshSource, (req, res) => {
       feedbackUpdatedAt: stamp,
       next_run_goal: `Use latest user feedback: ${feedback.slice(0, 180)}`,
     }
-    fs.writeFileSync(PROJECT_STATUS_PATH, JSON.stringify(status, null, 2) + '\n')
+    writeJsonAtomic(PROJECT_STATUS_PATH, status)
     res.json({ ok: true, status })
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message })
@@ -493,18 +508,10 @@ app.post('/api/incubators/:id/runner', requireFreshSource, (req, res) => {
   const result = updateProjectRunner(slot.statusPath, runner)
   if (!result.ok) return res.status(400).json(result)
   notifyIncubatorClients()
+  // A runner switch is configuration, not a run: a blocked launch is reported
+  // here and in the slot's live preflight, never written into run history.
   const preflight = preflightIncubatorRun(slot)
   const launchBlocked = runner === 'claude' && preflight && !preflight.ok
-  let historyRecorded = false
-  if (launchBlocked) {
-    appendRunnerSwitchPreflightFailure({
-      slot,
-      runLogPath: result.status?.runLog,
-      preflight,
-    })
-    historyRecorded = true
-    notifyIncubatorClients()
-  }
   const hydratedSlot = hydrateIncubator(slot)
   const warning = launchBlocked
     ? `Claude relay selected but launch preflight blocked: ${preflightFailureDetail(preflight) || preflight.error || 'runner preflight failed'}`
@@ -516,7 +523,6 @@ app.post('/api/incubators/:id/runner', requireFreshSource, (req, res) => {
     repaired: result.repaired ?? false,
     setup: result.setup ?? hydratedSlot.runnerSetups?.[runner] ?? null,
     preflight,
-    historyRecorded,
   })
 })
 
@@ -734,11 +740,12 @@ app.use('/api', (req, res) => {
 
 // SPA fallback
 app.get('*', (req, res) => {
-  const incubatorFile = incubatorPlayFileForRequest(req.path)
-  if (incubatorFile) {
+  const play = resolvePlayRequest(req.path)
+  if (play?.redirect) return res.redirect(301, play.redirect)
+  if (play) {
     generatedAppSecurityHeaders(req, res, () => {})
-    res.sendFile(incubatorFile)
-    return
+    if (!play.file) return res.status(404).type('text/plain').send('not found')
+    return res.sendFile(play.file)
   }
 
   const indexPath = join(DIST_DIR, 'index.html')

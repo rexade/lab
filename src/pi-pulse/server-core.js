@@ -2,8 +2,14 @@ import fs from 'fs'
 import { execSync } from 'child_process'
 import { dirname, join, resolve, relative, isAbsolute } from 'path'
 
-export const INVALID_CLAUDE_MODELS = new Set(['fable', 'claude-sonnet-4-20250514'])
+// Retired full model ids fail every run, so they are never pinned. Aliases
+// (sonnet, opus, fable, ...) resolve inside the Claude CLI and stay user choices.
+export const RETIRED_CLAUDE_MODELS = new Set(['claude-sonnet-4-20250514'])
 export const SAFE_CLAUDE_MODEL = 'sonnet'
+// `claude -p` starts in the prompting mode, and a headless run has nobody to
+// answer, so edits and shell commands are denied unless a mode is named.
+export const CLAUDE_PERMISSION_MODES = ['auto', 'acceptEdits', 'dontAsk', 'default', 'plan']
+export const DEFAULT_CLAUDE_PERMISSION_MODE = 'auto'
 export const AI_FIELD_KEYS = ['DIRECTION', 'STRONGEST', 'WEAKEST', 'DRIFT', 'NEXT']
 
 const AI_FIELD_ALIASES = {
@@ -111,11 +117,19 @@ export function checkClaudeCommand(id = 'binary') {
 }
 
 export function isRunnableClaudeModel(model) {
-  return !!model && !INVALID_CLAUDE_MODELS.has(model)
+  return !!model && !RETIRED_CLAUDE_MODELS.has(model)
 }
 
 export function firstRunnableClaudeModel(...candidates) {
   return candidates.find(model => isRunnableClaudeModel(model)) || null
+}
+
+export function resolveClaudeModel(saved, env = process.env) {
+  return firstRunnableClaudeModel(saved, env.CLAUDE_MODEL, env.DEFAULT_CLAUDE_MODEL, env.PI_PULSE_DEFAULT_CLAUDE_MODEL, SAFE_CLAUDE_MODEL)
+}
+
+export function resolveClaudePermissionMode(saved, env = process.env) {
+  return [saved, env.CLAUDE_PERMISSION_MODE].find(mode => CLAUDE_PERMISSION_MODES.includes(mode)) || DEFAULT_CLAUDE_PERMISSION_MODE
 }
 
 export function checkClaudeModel(model, allowCliDefault = false) {
@@ -168,10 +182,21 @@ export function preflightRunConfig({ id, project, runner, runScript, relayScript
   }
 }
 
+// Picks the most telling line from output that is already known to be a failure.
 const FAILURE_SIGNAL_RE = /api error|command not found|not found|enoent|permission denied|exit status|exit \d+|exited \d+|(?:^|[\s:[({-])(?:error|failed|failure)(?:$|[\s:\])},.!-])/i
 
 function firstFailureSignalLine(lines) {
   return lines.find(line => FAILURE_SIGNAL_RE.test(line)) || ''
+}
+
+// Classifying output as a failure needs evidence, not vocabulary: a CLI that
+// dies prints its error first, while a successful transcript that discusses
+// error handling (or quotes a seed about failed runs) must stay a success.
+const CLI_ERROR_RE = /^(?:api error\b|error:|fatal:|npm err!|traceback \(most recent call last\)|there's an issue with the selected model)|command not found|\benoent\b|permission denied|exit status [1-9]\d*|\bexited (?:with )?(?:code )?[1-9]\d*/i
+const LEADING_LINE_LIMIT = 3
+
+export function leadingFailureLine(lines = []) {
+  return lines.slice(0, LEADING_LINE_LIMIT).find(line => CLI_ERROR_RE.test(line)) || ''
 }
 
 export function capturedFailureDetail(capturePath, maxChars = 1200) {
@@ -188,11 +213,11 @@ export function capturedFailureDetail(capturePath, maxChars = 1200) {
   }
 }
 
-export function appendFailedRunEntry({ runLogPath, capturePath, code, signal, num }) {
+export function appendFailedRunEntry({ runLogPath, capturePath, code, signal, num, reason: explicitReason = null }) {
   if (!runLogPath || !num) return
   const detail = capturedFailureDetail(capturePath, 420).replace(/\n+/g, ' | ')
   const date = new Date().toISOString().slice(0, 10)
-  const reason = signal ? `signal ${signal}` : `exit ${code}`
+  const reason = explicitReason || (signal ? `signal ${signal}` : `exit ${code}`)
   const block = [
     '',
     `<!-- stdout from run ${num} ${date} server-captured -->`,
@@ -470,7 +495,7 @@ function hydrateFormalStdoutFields(fields, options = {}) {
     const lines = meaningfulStdoutLines(stdoutText)
     if (!lines.length) return fields
 
-    const failureSignal = firstFailureSignalLine(lines)
+    const failureSignal = leadingFailureLine(lines)
     const excerpt = (failureSignal || lines.slice(0, 6).join(' ')).slice(0, 420)
     const tail = lines.slice(-10).join('\n').slice(0, 1200)
     const excerptIsOnlyPath = stdoutPathFromOutputField(fields['Output excerpt'])
@@ -506,10 +531,13 @@ function parseStdoutRunBlocks(content, runs, { legacyOffset = false } = {}) {
   while ((m = stdoutRe.exec(content)) !== null) {
     const [, codexMarker, slotStr, date, body] = m
     const lines = meaningfulStdoutLines(body)
-    const explicitFailureLine = lines.find(l => l.startsWith('[run failed')) || null
+    // Runners and the server write the marker as the first line; a later
+    // `[run failed` is a successful transcript quoting an older failure.
+    const explicitFailureLine = lines[0]?.startsWith('[run failed') ? lines[0] : null
+    const explicitSuccess = lines[0]?.startsWith('[run completed')
     const boldRun = body.match(/\*\*Run (\d+)\s*(?:[\u2014-]\s*([\w ]+?)\s*[\u2014-]|\s*[\u2014-]\s*done)/)
     const boldType = normalizeRunType(boldRun?.[2])
-    const implicitFailureLine = explicitFailureLine ? null : firstFailureSignalLine(lines)
+    const implicitFailureLine = explicitFailureLine || explicitSuccess ? null : leadingFailureLine(lines)
     const failureLine = explicitFailureLine || implicitFailureLine
     const failed = Boolean(failureLine) || boldType === 'FAILED'
     const num = boldRun ? parseInt(boldRun[1]) : parseInt(slotStr) + (!codexMarker && legacyOffset ? 1 : 0)
@@ -570,11 +598,8 @@ function parseFormalRunBlocks(content, options = {}) {
     hydrateFormalStdoutFields(fields, options)
     const failureSignal = type === 'FAILED'
       ? ''
-      : firstFailureSignalLine([
-          fields['Failure'],
-          fields['Error'],
-          fields['Output excerpt'],
-        ].filter(Boolean))
+      : firstFailureSignalLine([fields['Failure']].filter(Boolean)) ||
+        leadingFailureLine([fields['Error'], fields['Output excerpt']].filter(Boolean))
     const finalType = failureSignal ? 'FAILED' : type
     if (failureSignal && !fields.Failure) fields.Failure = failureSignal
     const plainSummary = summarizeRun(fields) ? '' : plainFormalSummary(lines.slice(1))

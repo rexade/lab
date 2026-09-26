@@ -351,7 +351,7 @@ async function main() {
     const repairedStaleStatus = JSON.parse(fs.readFileSync(fixture.staleStatusPath, 'utf8'))
     assert.equal(repairedStaleStatus.runScript, fixture.staleLauncher, 'stale Claude runScript should be repaired to the project launcher')
     assert.match(repairedStaleStatus.claudeRunScript, /run-claude-incubator\.sh/, 'stale Claude relay script should be repaired to the generic runner')
-    assert.equal(repairedStaleStatus.claudeModel, 'sonnet', 'stale Claude fable pin should be repaired to the safe Sonnet alias')
+    assert.equal(repairedStaleStatus.claudeModel, 'fable', 'the fable alias is a user choice and must survive repair')
 
     const stalePreflight = await fetchJson(baseUrl, '/api/incubators/stale-claude-slot/preflight')
     assert.equal(stalePreflight.data.ok, true, 'repaired half-switched Claude slot should pass generic preflight with fake claude')
@@ -392,9 +392,8 @@ async function main() {
     assert.equal(freshStatus.runScript, fixture.freshLauncher, 'fresh Claude relay switches should preserve the project launcher')
     assert.match(freshStatus.claudeRunScript, /run-claude-incubator\.sh/)
     assert.notEqual(freshStatus.claudeRunScript, join(fixture.labRoot, 'old-fresh-claude-runner.sh'))
-    assert.notEqual(freshStatus.claudeModel, 'fable')
-    assert.notEqual(freshStatus.claudeModel, 'claude-sonnet-4-20250514')
-    assert.equal(freshStatus.claudeModel, 'sonnet', 'fresh Claude relay switches should persist the safe Sonnet alias')
+    assert.equal(freshStatus.claudeModel, 'fable', 'a Claude relay switch should keep the slot\'s chosen alias')
+    assert.equal(switched.data.setup.permissionMode, 'auto', 'Claude setup should disclose the non-prompting permission mode runs will use')
 
     const freshPreflight = await fetchJson(baseUrl, '/api/incubators/fresh-slot/preflight')
     assert.equal(freshPreflight.data.ok, true, 'fresh slot generic Claude preflight should pass with fake claude and prompt')
@@ -411,13 +410,15 @@ async function main() {
     assert.equal(blockedSwitch.data.ok, true)
     assert.equal(blockedSwitch.data.slot.runner, 'claude', 'blocked Claude switches should still persist the selected relay')
     assert.equal(blockedSwitch.data.preflight?.ok, false, 'blocked Claude switches should return the failed launch preflight')
-    assert.equal(blockedSwitch.data.historyRecorded, true, 'blocked Claude switches should write a visible history failure')
     assert.match(blockedSwitch.data.warning || '', /prompt/i, 'blocked Claude switch warning should include the failed check')
+    assert.ok(
+      blockedSwitch.data.preflight.checks.some(check => !check.ok && /not a dir/.test(check.detail)),
+      'the switch response should carry the exact failed check'
+    )
     const blockedHistory = await fetchJson(baseUrl, '/api/incubators/blocked-claude-slot/runs')
-    const blockedRun = blockedHistory.data.runs.find(run => run.type === 'FAILED')
-    assert.ok(blockedRun, 'blocked Claude switch should create a FAILED history row')
-    assert.match(blockedRun.Failure || '', /runner switch preflight/, 'blocked switch history should identify the relay switch preflight')
-    assert.match(blockedRun.detail || '', /prompt directory: not a dir/, 'blocked switch history should expose the invalid prompt detail')
+    assert.equal(blockedHistory.data.runs.length, 0, 'a runner switch is configuration, not a run: history stays empty')
+    const blockedStatus = JSON.parse(fs.readFileSync(fixture.blockedStatusPath, 'utf8'))
+    assert.ok(!blockedStatus.runCount, 'a runner switch must not consume a run number (it would shift the run-type rotation)')
 
     const launched = await fetchJson(baseUrl, '/api/incubators/fresh-slot/run', { method: 'POST', headers: writeHeaders })
     assert.equal(launched.response.status, 200)
@@ -448,6 +449,28 @@ async function main() {
     assert.match(play.headers.get('content-security-policy') || '', /connect-src 'none'/, 'generated app routes should block browser fetch/XHR by CSP')
     assert.match(text, /Fresh Slot Play/, 'fresh slot playUrl should serve the project index.html')
     assert.ok(!text.includes('<title>Pi Pulse</title>'), 'fresh slot playUrl served the Pi Pulse SPA')
+
+    const bare = await fetch(baseUrl + '/fresh-slot', { redirect: 'manual' })
+    assert.equal(bare.status, 301, 'a bare play route should redirect so relative app URLs resolve')
+    assert.equal(bare.headers.get('location'), '/fresh-slot/')
+    fs.mkdirSync(join(fixture.freshRepo, '.git'), { recursive: true })
+    fs.writeFileSync(join(fixture.freshRepo, '.git', 'config'), '[remote "origin"]\n url = https://user:ghp_secret@example.invalid/x\n')
+    fs.writeFileSync(join(fixture.freshRepo, '.env'), 'SECRET_TOKEN=hunter2\n')
+    for (const hidden of ['/fresh-slot/.git/config', '/fresh-slot/.env', '/fresh-slot/%2Egit/config']) {
+      const leak = await fetch(baseUrl + hidden)
+      const body = await leak.text()
+      assert.equal(leak.status, 404, `${hidden} must not be served`)
+      assert.ok(!/ghp_secret|hunter2/.test(body), `${hidden} leaked secret content`)
+    }
+    const missingAsset = await fetch(baseUrl + '/fresh-slot/missing-module.js')
+    assert.equal(missingAsset.status, 404, 'a missing play asset should 404, not serve the Pi Pulse SPA')
+
+    const crossSite = await fetchJson(baseUrl, '/api/incubators/fresh-slot/run', {
+      method: 'POST',
+      headers: { ...writeHeaders, 'Sec-Fetch-Site': 'same-site' },
+    })
+    assert.equal(crossSite.response.status, 403, 'a sibling-site page must not drive control-plane writes')
+    assert.equal(crossSite.data.code, 'CROSS_SITE_WRITE_FORBIDDEN')
 
     const appOriginWrite = await fetchJson(baseUrl, '/api/incubators/fresh-slot/run', {
       method: 'POST',

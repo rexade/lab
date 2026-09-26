@@ -1,10 +1,10 @@
 // Incubator run orchestration: preflight, launch, live-run tracking, and the
 // autonomous scheduler's safety decisions (failure fuse, strategy shifts).
-import { preflightRunConfig } from '../server-core.js'
+import { preflightRunConfig, resolveClaudeModel } from '../server-core.js'
 import { LAB_ROOT, MAX_CONSECUTIVE_AUTONOMOUS_FAILS } from './config.js'
 import { notifyIncubatorClients } from './events.js'
 import { inferIncubatorRole } from './incubator-templates.js'
-import { readIncubators, readStatusAt, repairClaudeRunnerStatusIfNeeded, resolveClaudeModel, writeIncubators } from './incubator-store.js'
+import { readIncubators, readStatusAt, repairClaudeRunnerStatusIfNeeded, writeIncubators } from './incubator-store.js'
 import { acquireRunLock, currentRunLock, globalRunBusy, spawnTrackedRun } from './run-lock.js'
 import { appendIncubatorPreflightFailure, markIncubatorProcessFailure, nextIncubatorRunNum } from './run-receipts.js'
 import { hoursFromNow, shellQuote } from './util.js'
@@ -36,12 +36,14 @@ export function getIncubatorRun(id) {
 }
 
 export function stopIncubatorRun(id) {
-  const running = activeIncubatorRuns.get(id)
+  // After a Pi Pulse restart the in-memory map is empty; the lock still names the run.
+  const lock = currentRunLock()
+  const pid = activeIncubatorRuns.get(id)?.pid ?? (lock?.kind === 'incubator' && lock.id === id ? lock.pid : null)
   let stoppedPid = null
-  if (running?.pid && Number(running.pid) > 1) {
-    stoppedPid = running.pid
-    try { process.kill(-running.pid, 'SIGTERM') } catch {
-      try { process.kill(running.pid, 'SIGTERM') } catch {}
+  if (pid && Number(pid) > 1) {
+    stoppedPid = pid
+    try { process.kill(-pid, 'SIGTERM') } catch {
+      try { process.kill(pid, 'SIGTERM') } catch {}
     }
   }
   activeIncubatorRuns.delete(id)
@@ -104,9 +106,9 @@ export function startIncubatorRun(slot, runType = null, options = {}) {
   if (existing) return { ok: false, error: 'global run already active', code: 'GLOBAL_RUN_LOCK_ACTIVE', pid: existing.pid, owner: existing }
   const alive = getIncubatorRun(slot.id)
   if (alive.running) return { ok: false, error: 'incubator run already active', code: 'GLOBAL_RUN_LOCK_ACTIVE', pid: alive.pid, owner: { kind: 'incubator', id: slot.id, pid: alive.pid, runner: alive.runner } }
-  const { status: cfg } = repairClaudeRunnerStatusIfNeeded(slot.statusPath)
   const preflight = preflightIncubatorRun(slot, runType)
   if (!preflight.ok) return { ok: false, error: 'runner preflight failed', preflight }
+  const cfg = readStatusAt(slot.statusPath)
   const args = incubatorRunArgs(cfg, slot.statusPath, runType)
   const lock = acquireRunLock({ kind: 'incubator', id: slot.id, runner: cfg.runner ?? 'script' })
   if (!lock.ok) return { ok: false, error: 'global run already active', code: 'GLOBAL_RUN_LOCK_ACTIVE', pid: lock.pid, owner: lock }
@@ -127,6 +129,7 @@ export function startIncubatorRun(slot, runType = null, options = {}) {
           code,
           signal,
           num: exitMeta.failedRunNum,
+          error: exitMeta.error,
         })
       }
       activeIncubatorRuns.delete(slot.id)
@@ -231,6 +234,9 @@ export function incubatorSchedulerTick() {
   for (const slot of data.slots) {
     if (!slot.enabled || !slot.nextRunAt || Date.now() < slot.nextRunAt) continue
     if (getIncubatorRun(slot.id).running) continue
+    // Another run holds the lock: stay due and start on the first free tick. Judging
+    // the slot now would count its last failure again on every blocked minute.
+    if (globalRunBusy()) continue
     const failureFuse = incubatorFailureFuseDecision(slot)
     if (failureFuse) {
       applyIncubatorFailureFuse(slot, failureFuse)

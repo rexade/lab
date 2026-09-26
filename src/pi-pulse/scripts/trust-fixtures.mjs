@@ -16,6 +16,8 @@ import {
   parseRunsFromLog,
   preflightRunConfig,
   qualityStateFromRun,
+  resolveClaudeModel,
+  resolveClaudePermissionMode,
   runsWithPinnedLatestFailure,
 } from '../server-core.js'
 import {
@@ -302,9 +304,17 @@ function testClaudePreflightChecksLauncherBackedRelay() {
   }
 }
 
-function testStaleClaudeFableFallsThrough() {
-  assert.equal(firstRunnableClaudeModel('fable', 'claude-sonnet-4-20250514', 'sonnet'), 'sonnet')
+function testRetiredClaudePinsFallThroughButAliasesStay() {
+  assert.equal(firstRunnableClaudeModel('claude-sonnet-4-20250514', 'sonnet'), 'sonnet', 'retired full ids never reach the CLI')
+  assert.equal(firstRunnableClaudeModel('fable', 'sonnet'), 'fable', 'fable is a current Claude CLI alias and a user choice')
   assert.equal(firstRunnableClaudeModel('', null), null)
+  assert.equal(resolveClaudeModel(undefined, {}), 'sonnet')
+  assert.equal(resolveClaudeModel(undefined, { CLAUDE_MODEL: 'opus' }), 'opus')
+  assert.equal(resolveClaudeModel('claude-sonnet-4-20250514', { PI_PULSE_DEFAULT_CLAUDE_MODEL: 'fable' }), 'fable')
+  assert.equal(resolveClaudePermissionMode(undefined, {}), 'auto', 'headless Claude runs need an explicit non-prompting mode')
+  assert.equal(resolveClaudePermissionMode('acceptEdits', {}), 'acceptEdits')
+  assert.equal(resolveClaudePermissionMode(undefined, { CLAUDE_PERMISSION_MODE: 'dontAsk' }), 'dontAsk')
+  assert.equal(resolveClaudePermissionMode('bypassPermissions', {}), 'auto', 'bypass is only reachable through the explicit manual bypass flag')
 }
 
 function testFreshIncubatorsHaveGenericClaudeRunner() {
@@ -329,8 +339,6 @@ function testFreshIncubatorsHaveGenericClaudeRunner() {
   assertIncludes(script, 'RUN_LOG.md', 'generic Claude runner comments should identify run history behavior')
   assertIncludes(script, 'echo "$TAG missing prompt: $PROMPT_FILE"', 'generic Claude runner should fail with visible prompt errors')
   assertIncludes(script, 'Full stdout saved to $STDOUT_FILE', 'generic Claude runner should preserve stdout for run history detail')
-  assertIncludes(script, "invalid=new Set(['fable','claude-sonnet-4-20250514'])", 'generic Claude runner should quarantine stale model pins')
-  assertIncludes(script, "const safe='sonnet'", 'generic Claude runner should fall forward to the stable Sonnet alias')
   assertIncludes(script, 'CLAUDE_ARGS=(-p "$FULL_PROMPT")', 'generic Claude runner should build model args from repaired status')
   assertIncludes(script, 'CLAUDE_BIN=${CLAUDE_BIN:-$(command -v claude || true)}', 'generic Claude runner should honor the same configured binary as preflight')
 }
@@ -637,8 +645,6 @@ function testPreflightBlockedLaunchLooksBlocked() {
   const server = serverSource()
   assertIncludes(server, 'function appendManualPreflightFailure', 'manual launch preflight blocks should append durable FAILED history')
   assertIncludes(server, "source: 'manual-preflight'", 'manual preflight history rows should identify manual launch blocks')
-  assertIncludes(server, 'function appendRunnerSwitchPreflightFailure', 'blocked relay switches should append durable FAILED history')
-  assertIncludes(server, "source: 'runner-switch-preflight'", 'relay switch preflight rows should identify blocked runner switching')
   assertIncludes(server, 'appendManualPreflightFailure({\n      slot,\n      runLogPath,\n      preflight: result.preflight,\n    })\n    notifyIncubatorClients()', 'manual incubator preflight blocks should broadcast the newly written FAILED history row')
   assertIncludes(server, 'function appendIncubatorPreflightFailure', 'incubator preflight failures should share one durable status/history receipt path')
   assertIncludes(server, 'markIncubatorPreflightAttempt({ statusPath: slot.statusPath, preflight, num, label })', 'incubator preflight failures should update status so later run numbers advance')
@@ -686,8 +692,6 @@ function testPreflightBlockedLaunchLooksBlocked() {
   assertIncludes(server, "const { status: cfg } = repairClaudeRunnerStatusIfNeeded(slot.statusPath)", 'incubator preflight/run paths should use repaired Claude runner status')
   assertIncludes(server, 'if (next.claudeModel !== setup.model)', 'half-switched Claude slots should persist the repaired safe model')
   assertIncludes(server, 'Claude relay selected but blocked:', 'Claude relay selection should persist and clearly say when launch preflight is blocked')
-  assertIncludes(server, 'appendRunnerSwitchPreflightFailure({', 'Claude switch launch blocks should write a visible failed history row')
-  assertIncludes(server, 'historyRecorded = true', 'runner switch responses should disclose when history was written')
   assertIncludes(server, "warning: setup.ok ? `Claude relay selected: ${selectedDetail}`", 'successful Claude relay switches should show the exact persisted model and script')
   assertIncludes(server, "(${selectedDetail})", 'blocked Claude relay switches should still expose the persisted model and script')
   assertIncludes(server, 'function runnableLauncherForStatus(cfg = {})', 'runner switches should detect a project launcher before falling back to generic scripts')
@@ -702,8 +706,6 @@ function testPreflightBlockedLaunchLooksBlocked() {
   assertIncludes(server, 'function incubatorLaunchCommand(cfg, statusPath, runType = null)', 'incubator preflight should expose the exact launch command')
   assertIncludes(server, 'command: incubatorLaunchCommand(cfg, slot.statusPath, runType)', 'incubator preflight payload should include the resolved launch command')
   assertIncludes(server, 'const args = incubatorRunArgs(cfg, slot.statusPath, runType)', 'incubator launch should use the same args reported by preflight')
-  assertIncludes(server, "const DEFAULT_CLAUDE_MODEL = process.env.PI_PULSE_DEFAULT_CLAUDE_MODEL || SAFE_CLAUDE_MODEL", 'Claude setup should fall forward to a stable alias instead of the bad CLI default')
-  assertIncludes(server, 'SAFE_CLAUDE_MODEL', 'Claude setup should share the same safe fallback model as preflight')
   assertIncludes(panel, 'if (d.slot) setIncubators(prev => prev.map(item => item.id === slot.id ? d.slot : item))', 'successful relay switches should update the selected slot immediately')
   assertIncludes(panel, 'await fetchSlotRuns(slot.id)', 'relay switches should immediately refresh the selected slot history after preflight state changes')
   assertIncludes(panel, 'd.preflight || d.setup', 'relay switch UI should prefer returned launch preflight over setup-only diagnostics')
@@ -1211,10 +1213,9 @@ function testClaudeRunnerSwitchWarnsFromLaunchPreflight() {
   assertIncludes(server, "const launchBlocked = runner === 'claude' && preflight && !preflight.ok", 'Claude switch responses should check launch preflight, not only setup')
   assertIncludes(server, 'Claude relay selected but launch preflight blocked:', 'Claude switch warning should name launch preflight blocks')
   assertIncludes(server, 'preflightFailureDetail(preflight)', 'Claude switch warning should include concrete failed checks')
-  assertIncludes(server, 'appendRunnerSwitchPreflightFailure({', 'blocked Claude switch preflights should be durable in history')
-  assertIncludes(server, 'historyRecorded,', 'Claude switch responses should tell the UI when a failure row was written')
   assertIncludes(server, 'repaired: result.repaired ?? false', 'runner switch responses should disclose legacy status repair')
-  assertIncludes(server, 'const hydratedSlot = hydrateIncubator(slot)\n  const warning = launchBlocked', 'Claude switch responses should hydrate the slot after any failed-history receipt is written')
+  assertIncludes(server, 'const hydratedSlot = hydrateIncubator(slot)\n  const warning = launchBlocked', 'Claude switch responses should hydrate the slot before reporting')
+  assert.ok(!server.includes('runner-switch-preflight'), 'a runner switch is configuration, not a run: it must not write run history')
   const panel = fs.readFileSync(join(root, 'src', 'components', 'ProjectPanel.jsx'), 'utf8')
   assertIncludes(panel, 'const keepNotice = d.historyRecorded || String(d.warning || \'\').includes(\'blocked\')', 'blocked Claude switch notices should stay visible after writing history')
   assertIncludes(panel, 'if (!keepNotice)', 'successful runner notices may still clear without hiding blocked relay failures')
@@ -1519,7 +1520,8 @@ function testUnifiedRunnerGivesCodexAndClaudeTheSameContract() {
     PI_PULSE_SCHEDULED_RUN: '1',
   })
   const codexArgs = fs.readFileSync(codexArgsPath, 'utf8')
-  assertIncludes(codexArgs, 'exec\n-C\n' + fx.repo + '\n--add-dir\n' + fx.dir, 'Codex should run in the project with the lab dir attached')
+  assertIncludes(codexArgs, 'exec\n-C\n' + fx.repo + '\n--color\nnever', 'Codex should run in the project workspace')
+  assert.ok(!codexArgs.includes('--add-dir'), 'an incubator sandbox must not get write access to the lab control plane')
   assertIncludes(codexArgs, '--sandbox\nworkspace-write', 'scheduled Codex runs should stay sandboxed')
   assert.ok(!codexArgs.includes('--dangerously-bypass-approvals-and-sandbox'), 'scheduled Codex runs should ignore CODEX_BYPASS')
   assertIncludes(codexArgs, 'Run number: 4', 'run numbers should continue from the highest RUN_LOG/status count')
@@ -1548,8 +1550,10 @@ function testUnifiedRunnerGivesCodexAndClaudeTheSameContract() {
   })
   const claudeArgs = fs.readFileSync(claudeArgsPath, 'utf8').split('\n')
   assert.equal(claudeArgs[0], '-p')
-  assert.equal(claudeArgs[claudeArgs.indexOf('--model') + 1], 'sonnet', 'stale fable pins should fall forward to sonnet')
+  assert.equal(claudeArgs[claudeArgs.indexOf('--model') + 1], 'fable', 'the fable alias is a user choice, not a stale pin')
+  assert.equal(claudeArgs[claudeArgs.indexOf('--fallback-model') + 1], 'sonnet', 'an unavailable pinned model should degrade to sonnet instead of failing the run')
   assert.ok(claudeArgs.includes('--dangerously-skip-permissions'), 'manual Claude runs should honor CLAUDE_BYPASS')
+  assert.ok(!claudeArgs.includes('--permission-mode'), 'bypass and an explicit permission mode are mutually exclusive')
   const claudePrompt = claudeArgs.join('\n')
   assertIncludes(claudePrompt, 'Run type: mutate', 'rotation should pick runTypes[previous run count % length]')
   assertIncludes(claudePrompt, 'INCUBATOR ROLE: signal feeder', 'signal-feeder role should reach the Claude prompt too')
@@ -1561,8 +1565,28 @@ function testUnifiedRunnerGivesCodexAndClaudeTheSameContract() {
   status = readStatus()
   assert.equal(status.runCount, 5)
   assert.equal(status.lastQualityGate, 'NEEDS-EVIDENCE')
-  assert.equal(status.claudeModel, 'sonnet', 'Claude runs should persist the repaired model')
+  assert.equal(status.claudeModel, 'fable', 'Claude runs should keep the selected alias')
   assert.equal(status.runner, 'codex', 'running through a relay should not rewrite the selected runner')
+
+  // Autonomous Claude runs cannot answer permission prompts: without an explicit
+  // mode every edit is denied and the run can never write its own RUN_LOG entry.
+  runRunner(claudeShim, [fx.statusPath], {
+    LAB_DIR: fx.dir,
+    CLAUDE_BIN: join(fx.bin, 'claude'),
+    FAKE_ARGS_OUT: claudeArgsPath,
+    CLAUDE_BYPASS: '1',
+    PI_PULSE_SCHEDULED_RUN: '1',
+  })
+  const scheduledClaudeArgs = fs.readFileSync(claudeArgsPath, 'utf8').split('\n')
+  assert.ok(!scheduledClaudeArgs.includes('--dangerously-skip-permissions'), 'scheduled Claude runs should ignore CLAUDE_BYPASS')
+  assert.equal(scheduledClaudeArgs[scheduledClaudeArgs.indexOf('--permission-mode') + 1], 'auto', 'scheduled Claude runs should run in a non-prompting reviewed mode')
+  fs.writeFileSync(fx.statusPath, JSON.stringify({ ...readStatus(), claudeModel: 'sonnet', claudePermissionMode: 'acceptEdits' }, null, 2))
+  runRunner(claudeShim, [fx.statusPath], { LAB_DIR: fx.dir, CLAUDE_BIN: join(fx.bin, 'claude'), FAKE_ARGS_OUT: claudeArgsPath })
+  const pinnedModeArgs = fs.readFileSync(claudeArgsPath, 'utf8').split('\n')
+  assert.equal(pinnedModeArgs[pinnedModeArgs.indexOf('--permission-mode') + 1], 'acceptEdits', 'a per-slot claudePermissionMode should reach the CLI')
+  assert.ok(!pinnedModeArgs.includes('--fallback-model'), 'sonnet needs no fallback to itself')
+  status = readStatus()
+  assert.equal(status.runCount, 7)
 
   runRunner(codexShim, [fx.statusPath], { LAB_DIR: fx.dir, CODEX_BIN: join(fx.bin, 'codex-fail') })
   assertIncludes(fs.readFileSync(fx.runLog, 'utf8'), '**Failure:** [run failed - codex exited 3]', 'agent failures should write a FAILED receipt')
@@ -1615,6 +1639,195 @@ function testCorruptIncubatorsFileIsNeverOverwritten() {
   assert.equal(fs.readFileSync(incubatorsPath, 'utf8'), '{"slots": [ truncated', 'the corrupt file should be left for manual repair')
 }
 
+// Runs an ESM snippet against the real server modules inside a disposable lab
+// and returns the JSON the snippet prints last.
+function runInLab(dir, script, extraEnv = {}) {
+  const projectsDir = join(dir, 'projects')
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    timeout: 30000,
+    env: {
+      ...process.env,
+      PI_PULSE_LAB_ROOT: dir,
+      PI_PULSE_INCUBATOR_REPO_ROOT: dir,
+      PI_PULSE_PROJECTS_DIR: projectsDir,
+      PI_PULSE_RUN_LOCK_DIR: join(projectsDir, '.run-locks'),
+      PI_PULSE_RUN_CAPTURE_DIR: join(projectsDir, '.run-capture'),
+      ...extraEnv,
+    },
+  })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  return JSON.parse(result.stdout.trim().split('\n').pop())
+}
+
+function schedulerLab(name, { slotStatus = {}, slot = {} } = {}) {
+  const dir = tempDir(name)
+  const projectsDir = join(dir, 'projects')
+  const repo = join(dir, 'proj')
+  const bin = join(dir, 'bin')
+  fs.mkdirSync(join(projectsDir, 'proj'), { recursive: true })
+  fs.mkdirSync(join(repo, 'prompts'), { recursive: true })
+  fs.mkdirSync(join(repo, 'reports'), { recursive: true })
+  fs.mkdirSync(bin)
+  fs.writeFileSync(join(repo, 'prompts', 'mutate.md'), 'Mutate prompt.\n')
+  fs.writeFileSync(join(repo, 'reports', 'RUN_LOG.md'), '# Run Log\n')
+  writeExecutable(join(bin, 'codex'), `#!/usr/bin/env bash\necho ran >> ${JSON.stringify(join(dir, 'agent-ran'))}\n`)
+  const statusPath = join(projectsDir, 'proj', 'status.json')
+  fs.writeFileSync(statusPath, JSON.stringify({ project: 'proj', repo, runLog: join(repo, 'reports', 'RUN_LOG.md'), runner: 'codex', runTypes: ['mutate'], runCount: 0, ...slotStatus }, null, 2))
+  fs.writeFileSync(join(projectsDir, 'incubators.json'), JSON.stringify({ slots: [{ id: 'proj', type: 'project', statusPath, enabled: true, intervalHours: 0.5, nextRunAt: Date.now() - 5000, ...slot }] }, null, 2))
+  return { dir, projectsDir, statusPath, agentRan: join(dir, 'agent-ran'), env: { CODEX_BIN: join(bin, 'codex'), PATH: `${bin}:${process.env.PATH}` } }
+}
+
+function testDueScheduledSlotsActuallyFire() {
+  // Regression: reconciling "stale" schedules on every registry read pushed each
+  // due slot forward inside the scheduler's own read, so autonomous runs never fired.
+  const lab = schedulerLab('scheduler-fires')
+  const out = runInLab(lab.dir, `
+    const runs = await import(${JSON.stringify(join(root, 'server', 'incubator-runs.js'))})
+    runs.incubatorSchedulerTick()
+    const fs = await import('node:fs')
+    for (let i = 0; i < 150 && !fs.existsSync(${JSON.stringify(lab.agentRan)}); i += 1) await new Promise(r => setTimeout(r, 100))
+    const slot = JSON.parse(fs.readFileSync(${JSON.stringify(join(lab.projectsDir, 'incubators.json'))}, 'utf8')).slots[0]
+    console.log(JSON.stringify({ slot, ran: fs.existsSync(${JSON.stringify(lab.agentRan)}) }))
+  `, lab.env)
+  assert.equal(out.ran, true, 'a due, enabled, healthy slot must launch its agent')
+  assert.equal(typeof out.slot.lastScheduledRun, 'string', 'the tick should record the scheduled launch')
+  assert.notEqual(out.slot.lastScheduleBlockedCode, 'STALE_SCHEDULE_RECONCILED', 'ordinary reads must not reschedule due slots')
+}
+
+function testOverdueSlotsAreSpacedOutOnlyAtBoot() {
+  const lab = schedulerLab('scheduler-boot')
+  const out = runInLab(lab.dir, `
+    const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
+    const read = store.readIncubators().slots[0].nextRunAt
+    store.reconcileStaleSchedulesAtBoot()
+    const boot = store.readIncubators().slots[0]
+    console.log(JSON.stringify({ read, boot }))
+  `, lab.env)
+  assert.ok(out.read < Date.now(), 'a plain read must leave a due slot due')
+  assert.ok(out.boot.nextRunAt > Date.now(), 'service boot should move an overdue slot one interval out')
+  assert.equal(out.boot.lastScheduleBlockedCode, 'STALE_SCHEDULE_RECONCILED')
+}
+
+function testSchedulerDefersBusySlotsWithoutRecountingFailures() {
+  const lab = schedulerLab('scheduler-busy', { slotStatus: { runCount: 3, lastRunStatus: 'failed', lastQualityGate: 'FAIL' } })
+  const due = JSON.parse(fs.readFileSync(join(lab.projectsDir, 'incubators.json'), 'utf8')).slots[0].nextRunAt
+  const lockDir = join(lab.projectsDir, '.run-locks', 'global')
+  fs.mkdirSync(lockDir, { recursive: true })
+  fs.writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({ pid: process.pid, kind: 'incubator', id: 'another-slot' }))
+  const out = runInLab(lab.dir, `
+    const runs = await import(${JSON.stringify(join(root, 'server', 'incubator-runs.js'))})
+    const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
+    for (let i = 0; i < 8; i += 1) runs.incubatorSchedulerTick()
+    console.log(JSON.stringify(store.readIncubators().slots[0]))
+  `, lab.env)
+  assert.equal(out.enabled, true, 'waiting on another run must not trip the failure fuse')
+  assert.ok(!out.consecutiveFailGates, 'one failed run must not be recounted on every blocked tick')
+  assert.equal(out.nextRunAt, due, 'a deferred slot stays due and starts on the first free tick')
+  assert.ok(!fs.existsSync(lab.agentRan), 'nothing may launch while the global lock is held')
+}
+
+function testStopReachesRunsRecoveredFromTheLock() {
+  const lab = schedulerLab('stop-recovered')
+  const sleeper = spawnSync('bash', ['-c', 'setsid sleep 30 >/dev/null 2>&1 & echo $!'], { encoding: 'utf8' })
+  const pid = Number(sleeper.stdout.trim())
+  assert.ok(pid > 1, 'fixture should start a detached process')
+  const lockDir = join(lab.projectsDir, '.run-locks', 'global')
+  fs.mkdirSync(lockDir, { recursive: true })
+  fs.writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({ pid, kind: 'incubator', id: 'proj' }))
+  const out = runInLab(lab.dir, `
+    const runs = await import(${JSON.stringify(join(root, 'server', 'incubator-runs.js'))})
+    const fs = await import('node:fs')
+    const stopped = runs.stopIncubatorRun('proj')
+    await new Promise(r => setTimeout(r, 300))
+    // An unreaped zombie still answers kill(pid, 0); only a live process counts.
+    let state = 'gone'
+    try { state = fs.readFileSync('/proc/${pid}/stat', 'utf8').split(') ')[1][0] } catch {}
+    console.log(JSON.stringify({ stopped, alive: state !== 'gone' && state !== 'Z' }))
+  `, lab.env)
+  try { process.kill(pid, 'SIGKILL') } catch {}
+  assert.equal(out.stopped, pid, 'after a Pi Pulse restart, stop should find the run through the lock')
+  assert.equal(out.alive, false, 'the recovered run should actually be stopped')
+}
+
+function testSpawnFailuresReleaseTheLockAndLeaveAReceipt() {
+  const dir = tempDir('spawn-error')
+  const runLog = join(dir, 'RUN_LOG.md')
+  fs.writeFileSync(runLog, '# Run Log\n')
+  const out = runInLab(dir, `
+    const lock = await import(${JSON.stringify(join(root, 'server', 'run-lock.js'))})
+    const held = lock.acquireRunLock({ kind: 'incubator', id: 'gone' })
+    const exit = await new Promise(resolve => {
+      lock.spawnTrackedRun({
+        script: '/bin/true', cwd: ${JSON.stringify(join(dir, 'repo-that-vanished'))}, captureName: 'gone',
+        runLogPath: ${JSON.stringify(runLog)}, nextRunNum: () => 9, lock: held,
+        onExit: (code, signal, meta) => resolve({ code, error: meta.error?.code || null }),
+      })
+    })
+    console.log(JSON.stringify({ exit, lockAfter: lock.currentRunLock() }))
+  `)
+  assert.equal(out.exit.error, 'ENOENT', 'a vanished cwd should surface as a spawn error, not crash Pi Pulse')
+  assert.equal(out.lockAfter, null, 'the global lock must be released after a spawn failure')
+  const runs = parseRunsFromLog(fs.readFileSync(runLog, 'utf8'))
+  assert.equal(runs[0]?.type, 'FAILED')
+  assertIncludes(runs[0].Failure, 'spawn failed: ENOENT', 'the FAILED row should name the spawn error')
+}
+
+function testCpuSamplesAreStableAcrossConsumers() {
+  const out = runInLab(tempDir('cpu-sampler'), `
+    const { spawn } = await import('node:child_process')
+    const stats = await import(${JSON.stringify(join(root, 'server', 'system-stats.js'))})
+    const burner = spawn(process.execPath, ['-e', 'for (;;) {}'], { stdio: 'ignore' })
+    stats.startStatsSampler()
+    await new Promise(r => setTimeout(r, 2400))
+    const a = stats.buildStatsPayload().cpu
+    const b = stats.buildStatsPayload().cpu
+    burner.kill('SIGKILL')
+    console.log(JSON.stringify({ a, b }))
+    process.exit(0)
+  `)
+  assert.equal(out.a, out.b, 'back-to-back consumers must read the same sample, not a zero-length delta')
+  assert.ok(out.a > 0, 'a busy sampling window should report non-zero CPU')
+}
+
+function testSuccessfulTranscriptsThatMentionErrorsStaySuccessful() {
+  // Shapes from the real core RUN_LOG that the keyword classifier marked FAILED.
+  const content = [
+    '<!-- stdout from run 29 2026-04-08 12:00 -->',
+    '**Run 29 done.** Build: ✓ built in 5.39s',
+    '',
+    '`RUN_LOG_PATH` was a const read before init; every request failed with a ReferenceError until this fix.',
+    '',
+    '<!-- stdout from run 91 2026-07-03 18:00 -->',
+    'Reading additional input from stdin...',
+    'OpenAI Codex v0.46',
+    '- Make failed stdout-only runs visible in history as `FAILED` with the actual command error',
+    '',
+    '<!-- stdout from run 89 2026-07-03 19:00 -->',
+    '[run completed successfully; verbose Codex transcript omitted to avoid duplicating RUN_LOG content.]',
+    'Quoted from the old log:',
+    '[run failed - codex exited 127]',
+    '',
+    '<!-- stdout from run 92 2026-07-03 20:00 -->',
+    'npm test exited 0 after 41 checks',
+    '',
+  ].join('\n')
+  const failed = parseRunsFromLog(content).filter(run => run.type === 'FAILED')
+  assert.deepEqual(failed.map(run => run.num), [], 'prose about errors, a quoted marker, and exit 0 are not failures')
+
+  const real = parseRunsFromLog([
+    '<!-- stdout from run 67 2026-04-10 19:52 -->',
+    '[run failed — claude exited 1]',
+    '',
+    "You've hit your limit · resets 11pm",
+    '',
+    '<!-- stdout from run 95 2026-07-03 18:42 -->',
+    "There's an issue with the selected model (fable). It may not exist or you may not have access to it.",
+    '',
+  ].join('\n'))
+  assert.deepEqual(real.map(run => run.type), ['FAILED', 'FAILED'], 'explicit markers and a leading CLI error still fail')
+}
+
 const tests = [
   testStdoutFailedRunsShowCommandError,
   testCapturedFailureDetailIsReusableForStatusReceipts,
@@ -1623,7 +1836,7 @@ const tests = [
   testPreflightBlocksBadCodexRunBeforeLaunch,
   testClaudePreflightUsesConfiguredBinaryFallback,
   testClaudePreflightChecksLauncherBackedRelay,
-  testStaleClaudeFableFallsThrough,
+  testRetiredClaudePinsFallThroughButAliasesStay,
   testFreshIncubatorsHaveGenericClaudeRunner,
   testExistingIncubatorsNormalizeClaudeRelayState,
   testStdoutOnlyApiErrorsBecomeFailedRows,
@@ -1664,9 +1877,26 @@ const tests = [
   testUnifiedRunnerGivesCodexAndClaudeTheSameContract,
   testUnifiedRunnerFailsVisiblyOnBadInput,
   testCorruptIncubatorsFileIsNeverOverwritten,
+  testDueScheduledSlotsActuallyFire,
+  testOverdueSlotsAreSpacedOutOnlyAtBoot,
+  testSchedulerDefersBusySlotsWithoutRecountingFailures,
+  testStopReachesRunsRecoveredFromTheLock,
+  testSpawnFailuresReleaseTheLockAndLeaveAReceipt,
+  testCpuSamplesAreStableAcrossConsumers,
+  testSuccessfulTranscriptsThatMentionErrorsStaySuccessful,
 ]
 
+let failures = 0
 for (const test of tests) {
-  await test()
-  console.log(`ok - ${test.name}`)
+  try {
+    await test()
+    console.log(`ok - ${test.name}`)
+  } catch (err) {
+    failures += 1
+    console.log(`not ok - ${test.name}\n${String(err.stack || err.message).split('\n').map(line => `  ${line}`).join('\n')}`)
+  }
+}
+if (failures) {
+  console.log(`${failures} of ${tests.length} trust fixtures failed`)
+  process.exit(1)
 }

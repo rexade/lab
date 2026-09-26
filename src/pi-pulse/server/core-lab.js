@@ -3,12 +3,11 @@
 // Codex runs go through the shared incubator runner with the core status file.
 import fs from 'fs'
 import { join } from 'path'
-import { appendFailedPreflightEntry, firstRunnableClaudeModel, preflightRunConfig, qualityStateFromRun, SAFE_CLAUDE_MODEL } from '../server-core.js'
+import { appendFailedPreflightEntry, preflightRunConfig, qualityStateFromRun, resolveClaudeModel } from '../server-core.js'
 import {
   CODEX_INCUBATOR_SCRIPT,
   CORE_SEED_PATH,
   DAILY_SEED_PATH,
-  DEFAULT_CLAUDE_MODEL,
   DEFAULT_LAB_RUNNER,
   LAB_ROOT,
   LAB_SCHEDULE_PATH,
@@ -18,7 +17,7 @@ import {
 import { acquireRunLock, globalRunBusy, spawnTrackedRun } from './run-lock.js'
 import { parsedRunsForLog } from './run-logs.js'
 import { nextCoreRunNum } from './run-receipts.js'
-import { clampScheduleInterval, hoursFromNow, pidAlive } from './util.js'
+import { clampScheduleInterval, hoursFromNow, pidAlive, writeJsonAtomic } from './util.js'
 
 export const LAB_RUNNERS = {
   claude: {
@@ -80,15 +79,7 @@ export function preflightLabRun(runner = labScheduleState.runner) {
   const selected = normalizeLabRunner(runner)
   const cfg = LAB_RUNNERS[selected]
   const status = readCoreStatus()
-  const claudeModel = selected === 'claude'
-    ? firstRunnableClaudeModel(
-        status.claudeModel,
-        process.env.CLAUDE_MODEL,
-        process.env.DEFAULT_CLAUDE_MODEL,
-        DEFAULT_CLAUDE_MODEL,
-        SAFE_CLAUDE_MODEL
-      )
-    : status.claudeModel
+  const claudeModel = selected === 'claude' ? resolveClaudeModel(status.claudeModel) : status.claudeModel
   return preflightRunConfig({
     id: 'core',
     project: status.project || 'pi-pulse',
@@ -116,7 +107,7 @@ export function startLabRun(runner = labScheduleState.runner, options = {}) {
   const runEnv = options.scheduled ? { PI_PULSE_SCHEDULED_RUN: '1' } : {}
   if (selected === 'claude') {
     const status = readCoreStatus()
-    const model = firstRunnableClaudeModel(status.claudeModel, process.env.CLAUDE_MODEL, process.env.DEFAULT_CLAUDE_MODEL, DEFAULT_CLAUDE_MODEL, SAFE_CLAUDE_MODEL)
+    const model = resolveClaudeModel(status.claudeModel)
     if (model) runEnv.CLAUDE_MODEL = model
   }
   const child = spawnTrackedRun({
@@ -152,7 +143,7 @@ export function syncProjectStatus() {
       syncedAt: new Date().toISOString(),
     }
 
-    fs.writeFileSync(PROJECT_STATUS_PATH, JSON.stringify(updated, null, 2) + '\n')
+    writeJsonAtomic(PROJECT_STATUS_PATH, updated)
 
     // Keep project-level seed.md in sync with the daily seed
     try {

@@ -7,6 +7,7 @@ import { dirname } from 'path'
 import { aiFeedbackPayload, hydrateAiFeedback } from '../server-core.js'
 import { AI_MODEL, HAILO_URL, LOCAL_LLM_ENABLED, MEMPALACE_BIN, MEMPALACE_HOME, RUN_LOG_PATH } from './config.js'
 import { feedbackPathsForIncubator, findIncubatorSlot, readStatusAt } from './incubator-store.js'
+import { readLogContent } from './run-logs.js'
 
 export function localLlmDisabledPayload(scope = 'core') {
   return {
@@ -32,7 +33,7 @@ function localLlmStatusPayload() {
 export async function localLlmStatus() {
   if (!LOCAL_LLM_ENABLED) return localLlmStatusPayload()
   try {
-    const r = await fetch(`${HAILO_URL}/api/tags`)
+    const r = await fetch(`${HAILO_URL}/api/tags`, { signal: AbortSignal.timeout(3000) })
     const data = await r.json()
     const loaded = data.models?.some(m => m.name?.includes('qwen2.5-instruct'))
     return { available: true, modelLoaded: loaded, models: data.models }
@@ -121,7 +122,7 @@ export async function analyzeAiTarget(target, scope = 'incubator') {
   try {
     const palaceCtx = await queryMemPalace(target.query, { wing: 'lab', results: 3, maxChars: 600 })
     let recentLog = ''
-    try { recentLog = fs.readFileSync(target.runLog, 'utf8').slice(-400) } catch {}
+    try { recentLog = readLogContent(target.runLog, { maxBytes: 4096 }).content.slice(-400) } catch {}
 
     const prompt = `You are a local Ollama/Qwen critic analyzing an evolving software incubator.
 

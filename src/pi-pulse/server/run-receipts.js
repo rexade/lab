@@ -41,12 +41,12 @@ function markIncubatorPreflightAttempt({ statusPath, preflight, num, label }) {
   } catch {}
 }
 
-export function markIncubatorProcessFailure({ statusPath, capturePath, code, signal, num }) {
+export function markIncubatorProcessFailure({ statusPath, capturePath, code, signal, num, error = null }) {
   if (!statusPath || !num) return
   try {
     const status = readStatusAt(statusPath)
     const today = new Date().toISOString().slice(0, 10)
-    const reason = signal ? `signal ${signal}` : `exit ${code}`
+    const reason = error ? `spawn failed: ${error.code || error.message}` : signal ? `signal ${signal}` : `exit ${code}`
     status.runCount = Math.max(Number(status.runCount || 0), Number(num))
     status.lastRun = today
     status.lastRunType = 'FAILED'
@@ -83,14 +83,4 @@ export function appendManualPreflightFailure({ slot = null, runLogPath, prefligh
     label: 'manual preflight',
   })
   return num
-}
-
-export function appendRunnerSwitchPreflightFailure({ slot, runLogPath, preflight }) {
-  return appendIncubatorPreflightFailure({
-    slot,
-    runLogPath,
-    preflight,
-    source: 'runner-switch-preflight',
-    label: 'runner switch preflight',
-  })
 }

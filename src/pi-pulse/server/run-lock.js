@@ -80,15 +80,23 @@ export function spawnTrackedRun({ script, args = [], cwd, captureName, runLogPat
   activateRunLock(lock, child.pid)
   if (Array.isArray(stdio)) { try { fs.closeSync(stdio[1]) } catch {} }
   child.unref()
-  child.on('exit', (code, signal) => {
+  // A spawn failure (e.g. the repo vanished after preflight) emits 'error'
+  // instead of 'exit'; unhandled, it would crash Pi Pulse with the lock held.
+  let settled = false
+  const settle = (code, signal, error = null) => {
+    if (settled) return
+    settled = true
     releaseRunLock(lock)
-    if (code || signal) {
+    if (error || code || signal) {
       const failedRunNum = nextRunNum?.() ?? 0
-      appendFailedRunEntry({ runLogPath, capturePath, code, signal, num: failedRunNum })
-      onExit?.(code, signal, { capturePath, failedRunNum })
+      const reason = error ? `spawn failed: ${error.code || error.message}` : null
+      appendFailedRunEntry({ runLogPath, capturePath, code, signal, num: failedRunNum, reason })
+      onExit?.(code ?? 1, signal, { capturePath, failedRunNum, error })
       return
     }
     onExit?.(code, signal, { capturePath, failedRunNum: null })
-  })
+  }
+  child.on('error', error => settle(null, null, error))
+  child.on('exit', (code, signal) => settle(code, signal))
   return child
 }

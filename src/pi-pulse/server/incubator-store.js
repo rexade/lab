@@ -13,13 +13,13 @@ import {
   checkClaudeModel,
   checkPath,
   firstRunnableClaudeModel,
-  SAFE_CLAUDE_MODEL,
+  resolveClaudeModel,
+  resolveClaudePermissionMode,
 } from '../server-core.js'
 import {
   CODEX_INCUBATOR_SCRIPT,
   CORE_FEEDBACK_JSON,
   CORE_FEEDBACK_MD,
-  DEFAULT_CLAUDE_MODEL,
   DEFAULT_RUN_TYPES,
   GENERIC_CLAUDE_INCUBATOR_SCRIPT,
   INCUBATOR_REPO_ROOT,
@@ -143,16 +143,32 @@ function reconcileIncubatorScheduleState(data) {
         changed = true
       }
     }
-    if (slot.enabled && (!slot.nextRunAt || Number(slot.nextRunAt) < now)) {
+    if (slot.enabled && !slot.nextRunAt) {
       slot.nextRunAt = now + slot.intervalHours * 60 * 60 * 1000
-      slot.lastScheduleBlockedAt = new Date().toISOString()
-      slot.lastScheduleBlockedReason = 'stale schedule reconciled from service startup/read'
-      slot.lastScheduleBlockedCode = 'STALE_SCHEDULE_RECONCILED'
       changed = true
     }
   }
   if (changed) writeIncubators(data)
   return data
+}
+
+// Boot-only: after downtime, overdue slots start one interval from now instead
+// of firing in a burst. This must never run on ordinary reads; the scheduler
+// tick reads the registry itself, so doing it there pushed every due slot
+// forward before the tick could see it, and scheduled runs never fired.
+export function reconcileStaleSchedulesAtBoot() {
+  const data = readIncubators()
+  const now = Date.now()
+  let changed = false
+  for (const slot of data.slots) {
+    if (!slot.enabled || !slot.nextRunAt || Number(slot.nextRunAt) >= now) continue
+    slot.nextRunAt = now + slot.intervalHours * 60 * 60 * 1000
+    slot.lastScheduleBlockedAt = new Date().toISOString()
+    slot.lastScheduleBlockedReason = 'overdue at service start; next run moved one interval out'
+    slot.lastScheduleBlockedCode = 'STALE_SCHEDULE_RECONCILED'
+    changed = true
+  }
+  if (changed) writeIncubators(data)
 }
 
 // ─── Trusted status files ─────────────────────────────────────────────────────
@@ -200,16 +216,6 @@ function runnableLauncherForStatus(cfg = {}) {
   }
 }
 
-export function resolveClaudeModel(saved) {
-  return firstRunnableClaudeModel(
-    saved,
-    process.env.CLAUDE_MODEL,
-    process.env.DEFAULT_CLAUDE_MODEL,
-    DEFAULT_CLAUDE_MODEL,
-    SAFE_CLAUDE_MODEL
-  )
-}
-
 export function claudeRunnerSetupForStatus(cfg) {
   const expectedScript = expectedClaudeRunScriptForProject(cfg.project, cfg)
   const model = resolveClaudeModel(cfg.claudeModel)
@@ -226,6 +232,7 @@ export function claudeRunnerSetupForStatus(cfg) {
     expectedScript,
     repairedScript: cfg.claudeRunScript && cfg.claudeRunScript !== expectedScript ? cfg.claudeRunScript : null,
     model,
+    permissionMode: resolveClaudePermissionMode(cfg.claudePermissionMode),
     checks,
     error: ok ? null : checks.find(check => !check.ok)?.detail || 'Claude runner setup failed',
   }

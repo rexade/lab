@@ -190,15 +190,23 @@ if [ "$AGENT" = "claude" ]; then
   CLAUDE_ARGS=(-p "$FULL_PROMPT")
   if [ -n "$CLAUDE_MODEL" ]; then
     CLAUDE_ARGS+=(--model "$CLAUDE_MODEL")
+    # An unavailable or retired pin degrades to the stable alias instead of failing the run.
+    if [ "$CLAUDE_MODEL" != "sonnet" ]; then
+      CLAUDE_ARGS+=(--fallback-model sonnet)
+    fi
   fi
+  # Headless runs cannot answer permission prompts, so name the mode explicitly;
+  # without it every edit and shell command is denied.
   if [ -n "$BYPASS" ]; then
     CLAUDE_ARGS+=(--dangerously-skip-permissions)
+  else
+    CLAUDE_ARGS+=(--permission-mode "${CFG[claudePermissionMode]:-auto}")
   fi
   AGENT_ARGS=("${CLAUDE_ARGS[@]}")
 else
   CLAUDE_MODEL=""
   CODEX_MODEL=${CFG[codexModel]}
-  CODEX_ARGS=(exec -C "$PROJECT_DIR" --add-dir "$LAB_DIR" --color never)
+  CODEX_ARGS=(exec -C "$PROJECT_DIR" --color never)
   if [ -n "$BYPASS" ]; then
     CODEX_ARGS+=("--dangerously-bypass-approvals-and-sandbox")
   else

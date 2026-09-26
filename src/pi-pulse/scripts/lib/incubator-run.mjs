@@ -11,6 +11,7 @@
 //   harvest-learning <status.json> <project> <run#> <today> <log> <globalLearningLog>
 import fs from 'node:fs'
 import path from 'node:path'
+import { resolveClaudeModel, resolveClaudePermissionMode } from '../../server-core.js'
 
 const [command, ...args] = process.argv.slice(2)
 const DEFAULT_RUN_TYPES = ['mutate', 'research', 'mutate']
@@ -60,13 +61,12 @@ function score(value) {
   return match ? Math.max(0, Math.min(5, Number(match[1]))) : null
 }
 
-// Stale pins are quarantined: `fable` never existed as a CLI alias and the dated
-// Sonnet 4 id was retired, so both fall forward to the stable alias.
-function resolveClaudeModel(saved) {
-  const invalid=new Set(['fable','claude-sonnet-4-20250514'])
-  const safe='sonnet'
-  const clean = v => v && !invalid.has(v) ? v : ''
-  return clean(saved) || clean(process.env.CLAUDE_MODEL) || clean(process.env.PI_PULSE_DEFAULT_CLAUDE_MODEL) || safe
+// Pi Pulse reads status.json while runs are in flight; a torn write would read
+// as corrupt and pause the slot's schedule, so replace it atomically.
+function writeJsonAtomic(filePath, value) {
+  const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.tmp`)
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n')
+  fs.renameSync(tmp, filePath)
 }
 
 function resolveAgent(status) {
@@ -113,6 +113,7 @@ const commands = {
       bypass: bypassFor(agent),
       codexModel: status.codexModel || process.env.CODEX_MODEL || '',
       claudeModel: agent === 'claude' ? resolveClaudeModel(status.claudeModel) : '',
+      claudePermissionMode: agent === 'claude' ? resolveClaudePermissionMode(status.claudePermissionMode) : '',
       godotAiEnabled: godot.enabled ? '1' : '',
       godotAiMcpUrl: godot.mcpUrl || '',
       godotAiStatusUrl: godot.statusUrl || 'http://127.0.0.1:8020/godot-ai/status',
@@ -256,7 +257,7 @@ const commands = {
         if (model) status.claudeModel = model
         else delete status.claudeModel
       }
-      fs.writeFileSync(statusPath, JSON.stringify(status, null, 2) + '\n')
+      writeJsonAtomic(statusPath, status)
     } catch (err) {
       console.error(`[${agent || 'incubator'}-incubator] warning: could not update status: ${err.message}`)
     }
