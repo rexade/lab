@@ -96,6 +96,13 @@ const slots = [
   }),
 ]
 
+slots.push(seed({
+  id: 'ghost-trio', title: 'Ghost Trio', runner: 'claude', phase: 'diary ghosts',
+  runs: [entry(3, day(0), 'MUTATE', { 'What I changed': 'Ghost tints now read at a glance on the lock screen palette.', 'Quality gate': 'NEEDS-EVIDENCE', 'Quality rating': '3/5', 'Needs human': 'Install ghost-trio.service and restart pi-pulse so the diary data goes live.' })],
+  status: { runCount: 3, lastRun: day(0), lastRunType: 'MUTATE', lastRunStatus: 'needs-evidence', lastQualityGate: 'NEEDS-EVIDENCE', lastQualityRating: 3, lastNeedsHuman: 'Install ghost-trio.service and restart pi-pulse so the diary data goes live.' },
+  slot: { enabled: true, nextRunAt: min(38) },
+}))
+
 fs.writeFileSync(join(projects, 'incubators.json'), JSON.stringify({ slots }, null, 2))
 fs.writeFileSync(join(lab, 'RUN_LOG.md'), '# Run Log\n')
 

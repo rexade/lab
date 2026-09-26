@@ -36,6 +36,7 @@ import {
   runHistoryKey,
 } from '../src/lib/runSignals.js'
 import { incubatorLauncherScript } from '../server/incubator-templates.js'
+import { needsHuman } from './lib/incubator-run.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
@@ -1375,6 +1376,47 @@ function testUnifiedRunnerGivesCodexAndClaudeTheSameContract() {
   assert.equal(status.lastRunStatus, 'failed')
 }
 
+// Runs report one human-only action in **Needs human:**; recovery mode answers
+// the newest steering note, not every complaint still inside the tail.
+function testRunsAskForAPersonAndRecoveryFollowsTheLatestNote() {
+  const fx = runnerFixture('needs-human')
+  const argsPath = join(fx.dir, 'args')
+  writeExecutable(join(fx.bin, 'codex-asks'), `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$FAKE_ARGS_OUT"
+N=$(printf '%s\\n' "$@" | grep -oE '^Run number: [0-9]+' | grep -oE '[0-9]+')
+printf '\\n## Run %s - 2026-01-02 - MUTATE\\n\\n**Quality gate:** PASS\\n**Needs human:** %s\\n' "$N" "$FAKE_NEEDS_HUMAN" >> "$FAKE_RUN_LOG"
+`)
+  const feedbackPath = join(fx.repo, 'reports', 'USER_FEEDBACK.md')
+  const run = (needsHuman, bin = 'codex-asks') => runRunner(join(root, 'scripts', 'run-incubator.sh'), [fx.statusPath, 'mutate'], {
+    LAB_DIR: fx.dir, PI_PULSE_AGENT: 'codex', CODEX_BIN: join(fx.bin, bin), FAKE_ARGS_OUT: argsPath, FAKE_RUN_LOG: fx.runLog, FAKE_NEEDS_HUMAN: needsHuman,
+  })
+  const status = () => JSON.parse(fs.readFileSync(fx.statusPath, 'utf8'))
+  const prompt = () => fs.readFileSync(argsPath, 'utf8')
+
+  fs.writeFileSync(feedbackPath, '# User Feedback / Steering Notes\n\n## Seed\n\na harbor game\n\n## 2026-09-01T10:00:00.000Z\n\nthe first screen is confusing\n\n## 2026-09-02T10:00:00.000Z\n\nmuch clearer now, keep going\n')
+  run('Restart pi-pulse.service so the new route is served.')
+  assertIncludes(prompt(), 'OPERATING RULES', 'every run is told how to work')
+  assertIncludes(prompt(), '**Needs human:**', 'every run is told how to ask for a person')
+  assertIncludes(prompt(), 'the first screen is confusing', 'older notes stay in the prompt as context')
+  assert.ok(!prompt().includes('QUALITY RECOVERY MODE TRIGGERED'), 'a complaint the person has since answered must not keep forcing recovery')
+  assert.equal(status().lastRecoveryRequired, false)
+  assert.equal(status().lastNeedsHuman, 'Restart pi-pulse.service so the new route is served.')
+
+  run('Restart pi-pulse.service so the new route is served.', 'codex-fail')
+  assert.equal(status().lastNeedsHuman, 'Restart pi-pulse.service so the new route is served.', 'a failed run never answered, so the request stays open')
+
+  fs.appendFileSync(feedbackPath, '\n## 2026-09-03T10:00:00.000Z\n\n## What I saw\nthe new menu is broken on my phone\n')
+  run('none')
+  assertIncludes(prompt(), 'QUALITY RECOVERY MODE TRIGGERED', 'a new complaint triggers recovery, even when it carries its own headings')
+  assert.equal(status().lastRecoveryRequired, true)
+  assert.equal(status().lastNeedsHuman, null, 'a run that reports none clears the request')
+
+  for (const none of ['none', 'None.', 'none - all work was finishable', '`none`', 'n/a', 'none | [the one action]']) {
+    assert.equal(needsHuman(none), null, `${JSON.stringify(none)} means nothing is waiting`)
+  }
+  assert.equal(needsHuman('No SSH key on the Pi; add one'), 'No SSH key on the Pi; add one', 'a request that starts with "No" is still a request')
+}
+
 function testUnifiedRunnerFailsVisiblyOnBadInput() {
   const fx = runnerFixture('runner-errors')
   const runner = join(root, 'scripts', 'run-incubator.sh')
@@ -1651,6 +1693,7 @@ const tests = [
   testPublicWriteSafetyAndLoopFusesAreWired,
   testStaleSourceMutationsAreWriteGated,
   testUnifiedRunnerGivesCodexAndClaudeTheSameContract,
+  testRunsAskForAPersonAndRecoveryFollowsTheLatestNote,
   testUnifiedRunnerFailsVisiblyOnBadInput,
   testCorruptIncubatorsFileIsNeverOverwritten,
   testDueScheduledSlotsActuallyFire,

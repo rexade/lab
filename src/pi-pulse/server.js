@@ -189,6 +189,7 @@ function hydrateIncubator(slot) {
     lastPlateauRegressionVerdict: cfg.lastPlateauRegressionVerdict ?? repoStatus.lastPlateauRegressionVerdict ?? null,
     lastRecoveryRequired: cfg.lastRecoveryRequired ?? repoStatus.lastRecoveryRequired ?? null,
     lastRecoveryMode: cfg.lastRecoveryMode ?? repoStatus.lastRecoveryMode ?? null,
+    lastNeedsHuman: cfg.lastNeedsHuman ?? repoStatus.lastNeedsHuman ?? null,
     lastAppEvidencePath: cfg.lastAppEvidencePath ?? repoStatus.lastAppEvidencePath ?? null,
     lastAppEvidenceGate: cfg.lastAppEvidenceGate ?? repoStatus.lastAppEvidenceGate ?? null,
     lastAppEvidenceTopTier: cfg.lastAppEvidenceTopTier ?? repoStatus.lastAppEvidenceTopTier ?? null,

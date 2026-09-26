@@ -2,7 +2,7 @@
 
 Pi Pulse runs any number of **incubator slots** side by side. Each slot is one
 project with its own repo, prompts, run log, schedule, and runner (Codex or
-Claude). Slots are listed in `projects/incubators.json`; the Project tab shows
+Claude). Slots are listed in `projects/incubators.json`; the Lab tab shows
 them all. No restart is needed to add, remove, or switch a slot.
 
 > The old single-project "mount" flow (`mounted.json`, `/api/child/*`,
@@ -12,7 +12,7 @@ them all. No restart is needed to add, remove, or switch a slot.
 
 ## Create a slot
 
-**From the UI (recommended):** Project tab → new incubator → describe the idea.
+**From the UI (recommended):** Lab tab → describe the idea in the roster's create box.
 `POST /api/incubators/create { idea, title? }` scaffolds:
 
 ```
@@ -49,7 +49,8 @@ them all. No restart is needed to add, remove, or switch a slot.
 | `runTypes` | Rotation; the run type is `runTypes[runCount % length]` unless one is requested |
 | `promptDir` | Defaults to `<repo>/prompts`; needs `<runType>.md` for each run type |
 | `incubatorRole` | `signal-feeder` adds the role + benchmark blocks and harvests `**Pi Pulse lesson:**` lines into `INCUBATOR_LEARNINGS.md` |
-| `codexModel` / `claudeModel` | Optional model pins. Stale Claude pins (`fable`, dated Sonnet 4) fall forward to `sonnet` |
+| `codexModel` / `claudeModel` | Optional model pins. Aliases (`sonnet`, `opus`, `fable`) are kept; retired dated pins fall forward to `sonnet`. Claude runs on any other model add `--fallback-model sonnet` |
+| `claudePermissionMode` | How unattended Claude runs handle tool permissions: `auto` (default), `acceptEdits`, `dontAsk`, `default`, `plan`. Env `CLAUDE_PERMISSION_MODE` sets the lab-wide default. Headless `-p` runs cannot answer prompts, so a prompting mode denies edits |
 | `godotAi` | Optional `{ enabled, mcpUrl, statusUrl, serverVersion, log }`; Codex runs start the Godot MCP bridge first |
 
 On first read the server **normalizes** the file: it fills `promptDir`,
@@ -67,7 +68,7 @@ UI / scheduler ─► preflight (script, binary, model, prompt, log)
               ─► projects/<slug>/run-<slug>.sh            (launcher)
               ─► src/pi-pulse/scripts/run-incubator.sh    (one runner, both agents)
                    agent = $PI_PULSE_AGENT or status.runner
-                   prompt = <promptDir>/<type>.md + role/benchmark/learnings/feedback/recovery/app-evidence blocks
+                   prompt = <promptDir>/<type>.md + operating rules + role/benchmark/learnings/feedback/recovery/app-evidence blocks
                    codex exec … | claude -p …   (timeout, stdout → reports/stdout/<agent>-run-N.log)
                    RUN_LOG receipt → app evidence → quality fallback → status.json → learning harvest
 ```
@@ -82,6 +83,16 @@ matter what the service environment says. Manual runs honor `CODEX_BYPASS=1` /
 
 Only one run (core lab or any slot) is active at a time — see the global run
 lock in `src/pi-pulse/server/run-lock.js`.
+
+Every run gets the same short **operating rules**: own one problem end to end
+(investigate, change, verify, report), report only what was verified, decide
+product questions without waiting for a person, and put anything no run can do
+(credentials, hardware, a service restart) in one `**Needs human:**` line.
+
+**Recovery mode** answers the newest steering note only (the last
+`## <timestamp>` section of `reports/USER_FEEDBACK.md`; `## Seed` is the idea,
+not feedback). A critical note puts the next runs in recovery; a later note
+without a complaint ends it. Older notes stay in the prompt as context.
 
 ---
 
@@ -99,11 +110,18 @@ receipt when it does not.
 **Quality rating:** 3/5
 **Evidence confidence:** 4/5
 **Next move:** Next concrete action
+**Needs human:** none
 ```
 
 Header: `## Run <N> — <date> — <TYPE>` (em dash or hyphen). See
 `INCUBATOR_QUALITY.md` for the full quality contract. App evidence (headless
 browser checks for web apps) can only lower a self-reported gate or rating.
+
+`**Needs human:**` is the one field a run uses to ask for something only a
+person can do. Anything other than `none` is stored as `status.lastNeedsHuman`
+and shown as a **Needs you** badge and banner on the dashboard. The loop keeps
+running meanwhile. The request clears when a later run reports `none`; a failed
+run leaves it open, since that run never got to answer.
 
 ---
 

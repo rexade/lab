@@ -13,6 +13,7 @@ import {
   checkClaudeModel,
   checkPath,
   firstRunnableClaudeModel,
+  latestSteeringNote,
   resolveClaudeModel,
   resolveClaudePermissionMode,
 } from '../server-core.js'
@@ -342,8 +343,7 @@ export function projectFeedbackPath(cfg) {
 // latest note is the last section's body, never the header text.
 export function readLatestProjectFeedback(filePath, maxChars = 900) {
   try {
-    const sections = fs.readFileSync(filePath, 'utf8').split(/^## .*$/m).slice(1)
-    const latest = sections.map(section => section.trim()).filter(Boolean).pop()
+    const latest = latestSteeringNote(fs.readFileSync(filePath, 'utf8'))
     return latest ? latest.slice(-maxChars) : null
   } catch {
     return null

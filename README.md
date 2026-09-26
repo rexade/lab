@@ -130,7 +130,7 @@ lab/
     │   ├── server/              ← config, security, incubator store/runs, core lab, AI, stats
     │   ├── server-core.js       ← pure RUN_LOG parsing + preflight (unit-tested)
     │   ├── scripts/run-incubator.sh  ← the one incubator runner (Codex + Claude)
-    │   └── src/                 ← React UI (Pulse / Lab / Project tabs)
+    │   └── src/                 ← React UI (Lab / System / Services tabs)
     ├── ghost/                   ← ghost/whisper/oracle quartet (dormant)
     └── narrator/                ← ambient narrator (ports 3031 area)
 ```
@@ -197,7 +197,7 @@ Do not switch `.mcp.json` to `mempalace-mcp` until that executable exists on the
 
 ## Incubator slots
 
-Pi Pulse hosts any number of **incubator slots** (`projects/incubators.json`). Each slot points at `projects/<slug>/status.json`, which names the project repo (under `/home/admin/<slug>/`), its run log, prompts, runner (`codex` or `claude`), and last-run quality state. The Project tab lists every slot with its history, schedule, runner switch, feedback box, and AI strip.
+Pi Pulse hosts any number of **incubator slots** (`projects/incubators.json`). Each slot points at `projects/<slug>/status.json`, which names the project repo (under `/home/admin/<slug>/`), its run log, prompts, runner (`codex` or `claude`), and last-run quality state. The Lab tab shows the loop at a glance (what is incubating, what fires next, what needs you) and, per slot, its history, autopilot schedule, runner switch, steering box, and local critic.
 
 Every slot launches through a generated `projects/<slug>/run-<slug>.sh`, which execs the unified runner `src/pi-pulse/scripts/run-incubator.sh`. The runner picks the agent from `status.runner`, builds the prompt, runs the agent under a timeout, writes RUN_LOG receipts and `reports/stdout/<agent>-run-N.log`, runs app evidence, and updates `status.json`.
 

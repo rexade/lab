@@ -132,6 +132,18 @@ export function resolveClaudePermissionMode(saved, env = process.env) {
   return [saved, env.CLAUDE_PERMISSION_MODE].find(mode => CLAUDE_PERMISSION_MODES.includes(mode)) || DEFAULT_CLAUDE_PERMISSION_MODE
 }
 
+// The UI appends each steering note as a `## <ISO timestamp>` section; `## Seed`
+// holds the original idea, not feedback. Other `## ` lines belong to a note's
+// own markdown. Returns the newest note's body, or '' when there is none.
+export function latestSteeringNote(text = '') {
+  let latest = ''
+  for (const chunk of String(text).split(/^(?=## (?:Seed\s*$|\d{4}-\d{2}-\d{2}))/im)) {
+    const match = chunk.match(/^## (.*)\n([\s\S]*)$/)
+    if (match && !/^seed$/i.test(match[1].trim()) && match[2].trim()) latest = match[2].trim()
+  }
+  return latest
+}
+
 export function checkClaudeModel(model, allowCliDefault = false) {
   if (!model && allowCliDefault) {
     return readinessCheck('model', 'Claude model', true, 'Claude CLI default')

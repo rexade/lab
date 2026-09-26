@@ -74,6 +74,11 @@ export function slotState(slot = {}, { preflight = null, now = Date.now() } = {}
   if (!slot.enabled && slot.schedulePauseReason) {
     return { kind: 'paused', tone: 'warn', label: 'Autopilot paused', detail: clip(slot.schedulePauseReason.replace(/^schedule paused:\s*/i, ''), 160) }
   }
+  // The agent asked for something only a person can do; the loop keeps running.
+  const ask = String(slot.lastNeedsHuman || '').trim()
+  if (ask) {
+    return { kind: 'needs-human', tone: 'warn', label: 'Needs you', detail: clip(ask, 160), ask, nextRunAt: slot.enabled ? timeValue(slot.nextRunAt) : 0 }
+  }
   if (slot.enabled) {
     const at = timeValue(slot.nextRunAt)
     const due = at ? at - now : 0
@@ -141,7 +146,7 @@ export function upcomingSchedule(slots = [], now = Date.now(), windowMs = 6 * 36
 // The one sentence at the top of the dashboard.
 export function loopHeadline(slots = [], { preflightBySlot = {}, now = Date.now() } = {}) {
   const states = slots.map(slot => ({ slot, state: slotState(slot, { preflight: preflightBySlot[slot.id], now }) }))
-  const attention = states.filter(({ state }) => ['blocked', 'failed', 'paused'].includes(state.kind))
+  const attention = states.filter(({ state }) => ['blocked', 'failed', 'paused', 'needs-human'].includes(state.kind))
   const running = states.find(({ state }) => state.kind === 'running')
   const autopilot = slots.filter(slot => slot.enabled).length
   const next = states

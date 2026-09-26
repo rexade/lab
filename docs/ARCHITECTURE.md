@@ -23,7 +23,7 @@ project repos).
                                    │ bash projects/<slug>/run-<slug>.sh <status.json> [type]
                                    ▼
                        src/pi-pulse/scripts/run-incubator.sh   one runner for both agents
-                         ├ lib/incubator-run.mjs    config · recent-runs · repair-block ·
+                         ├ lib/incubator-run.mjs    config · latest-note · recent-runs · repair-block ·
                          │                          quality-fallback · update-status · harvest-learning
                          ├ lib/godot-ai-bridge.sh   optional Godot MCP bridge (Codex)
                          └ app-evidence.mjs         headless-browser evidence for web apps
@@ -47,6 +47,19 @@ project repos).
 | `server/run-logs.js` | Cached (mtime+size) RUN_LOG parsing, steering-note appends |
 | `server-core.js` | Pure parsers + preflight checks (unit-tested directly by `trust-fixtures.mjs`) |
 
+## Dashboard
+
+`src/` is layered so behavior can be tested without a browser:
+
+| Layer | Owns |
+|-------|------|
+| `lib/` | Pure view models: `incubator.js` (one state per slot, most urgent first: running, blocked, failed, paused, needs you, scheduled, manual; hero sentence; six-hour schedule), `runHistory.js` (timeline order, pinned unrecovered failure, failure headlines), `critic.js`, `api.js` (JSON guard: HTML responses become explicit errors), `format.js` |
+| `hooks/` | Data: `useIncubators` (SSE + 30s poll, actions), `useSystemStats` (last real sample, never simulated), `useNow` |
+| `components/` | `TopBar`, `LoopHero` + `LoopDial` (what runs now, what fires next, what needs you), `Roster`, `IncubatorDetail`, `RunTimeline`, `Critic`, `PulsePanel` (System tab), `ServicesView` |
+
+`npm run preview:lab` serves the real server against a seeded throwaway lab
+(port 8090) with one slot in each state, for design work off the Pi.
+
 ## Invariants
 
 - **RUN_LOG.md format is an API.** `## Run N — DATE — TYPE` headers and
@@ -63,8 +76,16 @@ project repos).
 - **One run at a time** across core + slots (`GLOBAL_RUN_LOCK_ACTIVE`).
 - **Quality is evidence-capped.** App evidence can only lower a self-reported
   gate or rating; missing fields produce a conservative fallback block.
-- `npm run build` runs `test:trust` first: `trust-fixtures.mjs` (unit, source
-  contracts, runner behavior with fake agents) and `trust-smoke.mjs` (live server).
+- **Unattended Claude runs name a permission mode.** `-p` cannot answer
+  prompts, so the runner passes `--permission-mode` (`claudePermissionMode`,
+  default `auto`) unless a manual run is bypassed.
+- **A run asks for a person in one place.** `**Needs human:**` becomes
+  `status.lastNeedsHuman` and the dashboard's "Needs you" state; the loop keeps
+  running. Recovery mode reads only the newest steering note.
+- `npm run build` runs `test:trust` first: `trust-fixtures.mjs` (units and
+  runner behavior with fake agents), `trust-ui.mjs` (the real JSX rendered to
+  markup and checked for what a person must see), and `trust-smoke.mjs` (the
+  live server against a temp lab).
 
 ## Cleanup log
 
@@ -98,6 +119,21 @@ project repos).
      agree on the lab root.
    - `run-lab.sh`'s post-run build check now also watches `server/`,
      `server-core.js`, and `scripts/`.
+
+5. **2026-09 review** (each fix has a fixture that fails without it)
+   - Scheduled runs never fired: every registry read, the scheduler tick's
+     own included, pushed an overdue slot a full interval forward before the
+     tick could see it. Only boot moves overdue slots now.
+   - Headless Claude runs passed no permission mode, so edits were denied
+     unless the Pi's own Claude settings allowed them; the retired-model list
+     also rewrote the valid `fable` alias to `sonnet`.
+   - Successful transcripts that quoted an error were counted as FAILED (33
+     rows on the real core log, 19 after); only leading failure lines count.
+   - Stop did not reach runs recovered from the lock after a restart; spawn
+     errors leaked the global lock; a busy lock counted as a slot failure.
+   - `/play/*` served dotfiles (`.git/config`); same-site-only writes are now
+     enforced with `Sec-Fetch-Site`; the admin token compare is constant-time.
+   - The dashboard was rebuilt around the loop (see Dashboard above).
 
 ## Proposed next steps (not done)
 

@@ -137,7 +137,10 @@ if [ -f "$FEEDBACK_FILE" ]; then
   FEEDBACK_TEXT=$(tail -n 80 "$FEEDBACK_FILE" || true)
   if [ -n "$FEEDBACK_TEXT" ]; then
     FEEDBACK_BLOCK=$(printf '\n\nUSER FEEDBACK / STEERING NOTES:\n%s' "$FEEDBACK_TEXT")
-    if printf '%s\n' "$FEEDBACK_TEXT" | grep -Eiq "ugly|confus|broken|crash|not working|insufficient|worse|terrible|abomination|1/10|degraded|clutter|bloat|cant understand|cannot understand|can't understand|does nothing|nothing happened|not great|better off|better of"; then
+    # Recovery answers the newest note only: an old complaint the person has
+    # since replied to must not keep every later run in recovery mode.
+    LATEST_NOTE=$(node "$RUN_HELPER" latest-note "$FEEDBACK_FILE" || true)
+    if printf '%s\n' "$LATEST_NOTE" | grep -Eiq "ugly|confus|broken|crash|not working|insufficient|worse|terrible|abomination|1/10|degraded|clutter|bloat|cant understand|cannot understand|can't understand|does nothing|nothing happened|not great|better off|better of"; then
       RECOVERY_REQUIRED=1
       RECOVERY_BLOCK=$(printf '\n\nQUALITY RECOVERY MODE TRIGGERED:\n- Latest feedback is negative about product quality or usability.\n- Do not add features, modes, panels, lore, or extra explanation before fixing the complaint.\n- Identify the smallest user-visible failure in the first screen or main workflow.\n- Prefer deletion, simplification, restyling, or rebuilding the failing path.\n- For UI/app work, verify open path, first-screen clarity, primary action, and visible main-workflow state change.\n- Do not write Quality gate: PASS unless evidence explicitly proves the complaint path is fixed.\n- The RUN_LOG entry must include **Recovery mode:** yes - [complaint addressed].')
     fi
@@ -145,6 +148,15 @@ if [ -f "$FEEDBACK_FILE" ]; then
 fi
 
 APP_EVIDENCE_REPAIR_BLOCK=$(node "$RUN_HELPER" repair-block "$STATUS_PATH")
+
+# How every run works, whatever its type. The Needs human field is the one place
+# a run can ask for something only a person can do; the dashboard surfaces it.
+OPERATING_BLOCK=$(printf '
+
+OPERATING RULES (every run):
+- You own this run end to end: choose one problem, investigate it, change it, verify the change against the running app or its tests, then report.
+- Report only what you verified. Mark anything you could not check as unverified. Do not invent problems or passes.
+- Decide product questions yourself and keep going. Only if the next useful step needs something no run can do (credentials, hardware, a service restart, an install outside this project), write it once in your RUN_LOG entry as **Needs human:** [the one action] and spend this run on work you can finish. Otherwise write **Needs human:** none.')
 
 ROLE_BLOCK=""
 if [ "$INCUBATOR_ROLE" = "signal-feeder" ]; then
@@ -182,7 +194,7 @@ PI PULSE BENCHMARK SUITE:
   fi
 fi
 
-FULL_PROMPT=$(printf 'Run number: %s\nRun date: %s\nRun type: %s\n\n%s%s%s%s%s%s' "$RUN_NUMBER" "$TODAY" "$RUN_TYPE" "$(cat "$PROMPT_FILE")" "$ROLE_BLOCK" "$BENCHMARK_SUITE_BLOCK" "$GLOBAL_LEARNING_BLOCK" "$FEEDBACK_BLOCK" "$RECOVERY_BLOCK$APP_EVIDENCE_REPAIR_BLOCK")
+FULL_PROMPT=$(printf 'Run number: %s\nRun date: %s\nRun type: %s\n\n%s%s%s%s%s%s' "$RUN_NUMBER" "$TODAY" "$RUN_TYPE" "$(cat "$PROMPT_FILE")" "$OPERATING_BLOCK$ROLE_BLOCK" "$BENCHMARK_SUITE_BLOCK" "$GLOBAL_LEARNING_BLOCK" "$FEEDBACK_BLOCK" "$RECOVERY_BLOCK$APP_EVIDENCE_REPAIR_BLOCK")
 
 # --- Agent invocation --------------------------------------------------------
 if [ "$AGENT" = "claude" ]; then

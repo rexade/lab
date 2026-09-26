@@ -5,13 +5,15 @@
 //
 //   config          <status.json>                         -> KEY=value lines
 //   recent-runs     <RUN_LOG.md> <RECENT_RUNS.md>
+//   latest-note     <USER_FEEDBACK.md>                    -> the newest steering note
 //   repair-block    <status.json>                         -> prompt block or ''
 //   quality-fallback <log> <run#> <stdoutFile> <appEvidenceJson> <exitCode>
 //   update-status   <status.json> <runType> <today> <exitCode> <run#> <log> <recoveryRequired> <appEvidenceJson> <agent> <claudeModel>
 //   harvest-learning <status.json> <project> <run#> <today> <log> <globalLearningLog>
 import fs from 'node:fs'
 import path from 'node:path'
-import { resolveClaudeModel, resolveClaudePermissionMode } from '../../server-core.js'
+import { fileURLToPath } from 'node:url'
+import { latestSteeringNote, resolveClaudeModel, resolveClaudePermissionMode } from '../../server-core.js'
 
 const [command, ...args] = process.argv.slice(2)
 const DEFAULT_RUN_TYPES = ['mutate', 'research', 'mutate']
@@ -69,6 +71,22 @@ function writeJsonAtomic(filePath, value) {
   fs.renameSync(tmp, filePath)
 }
 
+// Recovery mode keys off the newest note. Files that predate `## <timestamp>`
+// sections are read as one legacy note.
+export function feedbackForRecovery(text = '') {
+  const note = latestSteeringNote(text)
+  if (note) return note.slice(-1200)
+  return /^## (?:Seed\s*$|\d{4}-\d{2}-\d{2})/im.test(text) ? '' : String(text).trim().slice(-1200)
+}
+
+// `none` (or no/n/a/nothing, optionally followed by punctuation and a reason)
+// means nothing is waiting on a person. "No SSH key on the Pi" is a request.
+export function needsHuman(value = '') {
+  const text = String(value || '').replace(/^[\s[`*_"']+|[\s\]`*_"']+$/g, '')
+  if (!text || /^(none|no|n\/a|nothing|nothing needed|not needed|-)\s*([.,:;|(\-\u2013\u2014]|$)/i.test(text)) return null
+  return text.slice(0, 400)
+}
+
 function resolveAgent(status) {
   const requested = process.env.PI_PULSE_AGENT
   if (requested === 'codex' || requested === 'claude') return requested
@@ -121,6 +139,13 @@ const commands = {
       godotAiLog: godot.log || path.join(status.repo, 'reports', 'godot-ai', 'editor.log'),
     }
     for (const [key, value] of Object.entries(values)) console.log(`${key}=${oneLine(value)}`)
+  },
+
+  'latest-note'([feedbackPath]) {
+    let text = ''
+    try { text = fs.readFileSync(feedbackPath, 'utf8') } catch {}
+    const note = feedbackForRecovery(text)
+    if (note) console.log(note)
   },
 
   'recent-runs'([logPath, recentPath]) {
@@ -243,6 +268,8 @@ const commands = {
       status.lastExpectedQualityDelta = (fields['Expected quality delta'] || '').slice(0, 500) || null
       status.lastActualQualityDelta = (fields['Actual quality delta'] || '').slice(0, 500) || null
       status.lastPlateauRegressionVerdict = (fields['Plateau/regression verdict'] || '').slice(0, 300) || null
+      // A failed run never got to answer, so an open request stays open.
+      status.lastNeedsHuman = runnerOk ? needsHuman(fields['Needs human']) : (status.lastNeedsHuman ?? null)
       status.lastRecoveryRequired = recoveryRequired === '1'
       status.lastRecoveryMode = fields['Recovery mode'] || (status.lastRecoveryRequired ? 'yes - negative feedback trigger' : null)
       status.lastAppEvidencePath = appEvidence?.summaryMdPath || appEvidence?.summaryPath || null
@@ -295,8 +322,16 @@ const commands = {
   },
 }
 
-if (!Object.hasOwn(commands, command)) {
-  console.error(`usage: incubator-run.mjs <${Object.keys(commands).join('|')}> ...`)
-  process.exit(64)
+// Run as a CLI only when executed directly; tests import the pure helpers.
+// Node reports the main module by its real path, so compare real paths.
+function invokedDirectly() {
+  try { return fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url) } catch { return false }
 }
-commands[command](args)
+
+if (invokedDirectly()) {
+  if (!Object.hasOwn(commands, command)) {
+    console.error(`usage: incubator-run.mjs <${Object.keys(commands).join('|')}> ...`)
+    process.exit(64)
+  }
+  commands[command](args)
+}

@@ -389,6 +389,12 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
                 {state.detail}
               </Banner>
             )}
+            {slot.lastNeedsHuman && (
+              <Banner key="needs-human" tone="warn" title="The agent needs you" testId="needs-human">
+                <span className="text-fg2">{clip(slot.lastNeedsHuman, 400)}</span>
+                <p className="mt-2 text-[13px] text-fg4">Meanwhile the loop keeps working on what it can finish. This clears when a run reports nothing left for you.</p>
+              </Banner>
+            )}
             {quality.label === 'Recovery mode' && (
               <Banner key="recovery" tone="warn" title="Recovery mode" testId="recovery">
                 Your latest note was critical, so the next run fixes that complaint before adding anything.

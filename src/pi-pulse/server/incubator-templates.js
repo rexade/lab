@@ -132,6 +132,7 @@ Append these fields to reports/RUN_LOG.md every run:
 **Evidence confidence:** [0-5]/5
 **Risk / regression:** [what got worse, is unverified, or could break]
 **Next move:** [one small follow-up]
+**Needs human:** none | [the one action no run can do, such as credentials or a service restart]
 `
 }
 

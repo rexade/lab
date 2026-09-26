@@ -147,6 +147,28 @@ const tests = {
     includes(html, 'aria-pressed="true" data-incubator-row="failed"', 'the selected row is exposed to assistive tech')
   },
 
+  'a request only a person can handle is surfaced, and clears when answered'() {
+    const ask = 'Install ghost-trio.service and restart pi-pulse so the diary data goes live.'
+    const waiting = slot({ id: 'ghost', displayName: 'Ghost Trio', enabled: true, nextRunAt: NOW + 9 * 60000, lastNeedsHuman: ask })
+    const state = ui.incubator.slotState(waiting, { now: NOW })
+    assert.equal(state.kind, 'needs-human')
+    assert.equal(state.nextRunAt, NOW + 9 * 60000, 'the loop keeps its schedule while it waits on a person')
+    assert.equal(ui.incubator.slotState({ ...waiting, lastRunStatus: 'failed' }, { now: NOW }).kind, 'failed', 'a failure outranks a pending request')
+    assert.deepEqual(ui.incubator.loopHeadline([waiting], { now: NOW }).attention.map(item => item.id), ['ghost'], 'the hero counts it as needing you')
+
+    const row = render(ui.Roster, { slots: [waiting], selectedId: null, onSelect() {}, runsBySlot: {}, preflightBySlot: {}, now: NOW, onCreate() {} })
+    includes(row, 'data-incubator-state="needs-human"', 'the roster marks the row')
+    includes(row, 'Needs you', 'the row says a person is needed')
+
+    const detail = render(ui.IncubatorDetail, { slot: waiting, runs: [], preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
+    includes(detail, 'data-banner="needs-human"', 'the detail view leads with the request')
+    includes(detail, ask, 'the banner shows the one action, verbatim')
+
+    const answered = render(ui.IncubatorDetail, { slot: { ...waiting, lastNeedsHuman: null }, runs: [], preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
+    assert.ok(!answered.includes('data-banner="needs-human"'), 'a run that reports none clears the banner')
+    assert.equal(ui.incubator.slotState({ ...waiting, lastNeedsHuman: null }, { now: NOW }).kind, 'scheduled')
+  },
+
   'a blocked launch lists every failed check and still lets you try'() {
     const html = render(ui.IncubatorDetail, { slot: slot(), runs: [], preflight: blockedPreflight, now: NOW, actions: noopActions })
     includes(html, 'data-banner="blocked"', 'the blocked banner is shown')
