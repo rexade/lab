@@ -67,10 +67,18 @@ export function useIncubators() {
   }, [refresh, scheduleRefresh])
 
   const restartService = useCallback(async () => {
+    let refused = null
     try {
-      await fetch('/api/restart', { method: 'POST' })
+      const { response, data } = await postJson('/api/restart', {})
+      if (response.status === 409) refused = data
     } catch {
       // The process exits to restart; a cut-off response is expected.
+    }
+    if (refused) {
+      // A running session would be killed; the server refuses until it ends.
+      const err = new Error(refused.error || 'a session is running')
+      err.code = refused.code
+      throw err
     }
     const health = await waitForPulseHealthy()
     await refresh()

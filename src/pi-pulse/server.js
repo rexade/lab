@@ -749,7 +749,13 @@ app.post('/api/reboot', (req, res) => {
 
 // Restart only Pi Pulse so stale-source write gates can be cleared without a full host reboot.
 // The supervisor (systemd Restart=always) brings the process back.
+// Sessions run in this service's cgroup, so exiting now would kill an active one
+// half-way (its work is only stashed on the next run). Refuse unless forced.
 app.post('/api/restart', (req, res) => {
+  const busy = globalRunBusy()
+  if (busy && req.body?.force !== true) {
+    return res.status(409).json({ ok: false, code: 'RUN_ACTIVE', error: `a session for ${busy.id || busy.kind || 'a project'} is running; restart after it finishes` })
+  }
   res.json({ ok: true, restarting: true })
   setTimeout(() => process.exit(0), 500)
 })

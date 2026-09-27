@@ -1070,6 +1070,7 @@ function testStaleSourceMutationsAreWriteGated() {
   assertIncludes(server, "app.post('/api/reboot', (req, res) =>", 'reboot should stay available when source is stale')
   assertIncludes(server, "app.post('/api/restart', (req, res) =>", 'service restart should stay available when stale source blocks runner switching')
   assertIncludes(server, 'process.exit(0)', 'service restart should exit the Pi Pulse process for supervisor restart')
+  assertIncludes(server, "if (busy && req.body?.force !== true)", 'service restart must not kill a running session unless forced')
 }
 
 function testDependencyErrorPackageNamesDoNotCreateFailedRows() {
@@ -1697,6 +1698,38 @@ function testSchedulerChoosesOldestDueSlot() {
   assert.equal(out.id, 'older-due', 'registry position does not outrank time spent waiting')
 }
 
+// New steering outranks time spent waiting: the person is waiting on this slot,
+// so it goes next even before its interval is up. One priority launch per note.
+function testSchedulerRunsUnreadSteeringFirst() {
+  const lab = schedulerLab('scheduler-steering')
+  const registryPath = join(lab.projectsDir, 'incubators.json')
+  const data = JSON.parse(fs.readFileSync(registryPath, 'utf8'))
+  const first = data.slots[0]
+  const noted = join(lab.projectsDir, 'noted', 'status.json')
+  fs.mkdirSync(join(lab.projectsDir, 'noted'))
+  fs.writeFileSync(noted, JSON.stringify({ ...JSON.parse(fs.readFileSync(lab.statusPath, 'utf8')), project: 'noted', feedbackUpdatedAt: new Date(Date.now() - 60000).toISOString(), notesSeenAt: new Date(Date.now() - 3600000).toISOString() }))
+  // Not due for another hour, while 'proj' has been due for minutes.
+  data.slots[0].nextRunAt = Date.now() - 300000
+  data.slots.push({ ...first, id: 'noted', statusPath: noted, nextRunAt: Date.now() + 3600000 })
+  fs.writeFileSync(registryPath, JSON.stringify(data))
+  const out = runInLab(lab.dir, `
+    const runs = await import(${JSON.stringify(join(root, 'server', 'incubator-runs.js'))})
+    const lock = await import(${JSON.stringify(join(root, 'server', 'run-lock.js'))})
+    const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
+    runs.incubatorSchedulerTick()
+    const owner = lock.currentRunLock()
+    for (let i = 0; i < 150 && lock.globalRunBusy(); i += 1) await new Promise(r => setTimeout(r, 100))
+    const slot = store.readIncubators().slots.find(s => s.id === 'noted')
+    runs.incubatorSchedulerTick()
+    const second = lock.currentRunLock()
+    for (let i = 0; i < 150 && lock.globalRunBusy(); i += 1) await new Promise(r => setTimeout(r, 100))
+    console.log(JSON.stringify({ owner, slot, second }))
+  `, lab.env)
+  assert.equal(out.owner?.id, 'noted', 'unread steering jumps both the interval and the queue')
+  assert.ok(out.slot.nextRunAt > Date.now(), 'after its priority launch the slot returns to its interval')
+  assert.equal(out.second?.id, 'proj', 'a note buys one priority launch, not a monopoly')
+}
+
 function testOverdueSlotsAreSpacedOutOnlyAtBoot() {
   const lab = schedulerLab('scheduler-boot')
   const out = runInLab(lab.dir, `
@@ -2011,6 +2044,7 @@ const tests = [
   testCorruptIncubatorsFileIsNeverOverwritten,
   testDueScheduledSlotsActuallyFire,
   testSchedulerChoosesOldestDueSlot,
+  testSchedulerRunsUnreadSteeringFirst,
   testOverdueSlotsAreSpacedOutOnlyAtBoot,
   testSchedulerDefersBusySlotsWithoutRecountingFailures,
   testFailingSlotsBackOffAndRetryInsteadOfPausing,

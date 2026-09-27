@@ -191,13 +191,31 @@ function applyBackoffPlan(slot, plan) {
 
 // ─── Scheduler ────────────────────────────────────────────────────────────────
 
+// A note the person wrote after the last session that saw the notes, which the
+// scheduler has not launched for yet. It buys one priority launch, so a slot
+// whose sessions keep failing cannot monopolize the lab with it.
+function awaitsSteering(slot) {
+  let status = {}
+  try { status = readStatusAt(slot.statusPath) } catch { return false }
+  const noted = Date.parse(status.feedbackUpdatedAt || '')
+  if (!noted) return false
+  const seen = Date.parse(status.notesSeenAt || '') || 0
+  // A blocked preflight also spends it, or it would retry (and log) every minute.
+  const tried = Math.max(Date.parse(slot.lastScheduledRun || '') || 0, Date.parse(slot.lastScheduleBlockedAt || '') || 0)
+  return noted > seen && noted > tried
+}
+
 // One pass over every enabled slot whose nextRunAt is due. Called every 60s.
 export function incubatorSchedulerTick() {
   const data = readIncubators()
   let changed = false
-  // Oldest due first: registry order must not starve newer products.
-  for (const slot of [...data.slots].sort((a, b) => Number(a.nextRunAt || 0) - Number(b.nextRunAt || 0))) {
-    if (!slot.enabled || !slot.nextRunAt || Date.now() < slot.nextRunAt) continue
+  const steering = new Set(data.slots.filter(s => s.enabled && awaitsSteering(s)).map(s => s.id))
+  // Unread steering first (the person is waiting on it), then oldest due:
+  // registry order must not starve newer products.
+  const order = (a, b) => (steering.has(b.id) - steering.has(a.id)) || (Number(a.nextRunAt || 0) - Number(b.nextRunAt || 0))
+  for (const slot of [...data.slots].sort(order)) {
+    if (!slot.enabled || !slot.nextRunAt) continue
+    if (Date.now() < slot.nextRunAt && !steering.has(slot.id)) continue
     if (getIncubatorRun(slot.id).running) continue
     // Another run holds the lock: stay due and start on the first free tick. Judging
     // the slot now would count its last failure again on every blocked minute.

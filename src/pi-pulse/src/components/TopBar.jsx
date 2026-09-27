@@ -33,12 +33,13 @@ function Vital({ label, value, warn }) {
   )
 }
 
-function ServicePill({ connected, stale, restarting, onRestart }) {
+function ServicePill({ connected, stale, busy, restarting, onRestart }) {
   if (stale) {
+    // Restarting kills a running session, so the update waits for it.
     return (
-      <Button size="sm" variant="ghost" onClick={onRestart} disabled={restarting} title="New Pi Pulse code is on disk but not loaded" data-service-state="stale">
-        <Dot tone="warn" pulse={!restarting} size={7} />
-        {restarting ? 'Restarting…' : 'Restart to update'}
+      <Button size="sm" variant="ghost" onClick={onRestart} disabled={restarting || busy} title={busy ? 'New Pi Pulse code is waiting for the running session to finish' : 'New Pi Pulse code is on disk but not loaded'} data-service-state="stale">
+        <Dot tone="warn" pulse={!restarting && !busy} size={7} />
+        {restarting ? 'Restarting…' : busy ? 'Update after run' : 'Restart to update'}
       </Button>
     )
   }
@@ -72,7 +73,7 @@ export function TopBar({ tab, onTab, stats, connected, health, busy, restarting,
           <Vital label="cpu" value={cpu == null ? '—' : `${cpu}%`} warn={cpu > 80} />
           <Vital label="temp" value={temp == null ? '—' : `${temp.toFixed(0)}°`} warn={temp > 70} />
           <span className="num hidden font-mono text-[13px] text-fg3 lg:inline">{clock}</span>
-          <ServicePill connected={connected} stale={!!health?.source?.changedSinceStart} restarting={restarting} onRestart={onRestart} />
+          <ServicePill connected={connected} stale={!!health?.source?.changedSinceStart} busy={busy} restarting={restarting} onRestart={onRestart} />
         </div>
       </div>
     </header>
