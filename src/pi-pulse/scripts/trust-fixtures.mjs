@@ -317,6 +317,20 @@ function testFreshIncubatorsHaveGenericClaudeRunner() {
   assertIncludes(script, '${CLAUDE_BIN:-$(command -v claude || true)}', 'generic Claude runner should honor the same configured binary as preflight')
 }
 
+function testNewIncubatorInsideParentGetsOwnHistory() {
+  const dir = tempDir('new-project-history')
+  assert.equal(spawnSync('git', ['init', '-q', dir]).status, 0)
+  const created = runInLab(dir, `
+    const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
+    console.log(JSON.stringify(store.createIncubatorProjectFromIdea('A lasting calm game', 'Quiet Water')))
+  `)
+  assert.equal(created.ok, true)
+  assert.equal(created.status.lifecycle, 'product')
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: created.status.repo, encoding: 'utf8' })
+  assert.equal(top.stdout.trim(), created.status.repo, 'new projects never inherit the parent repository as their history')
+  assert.equal(spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: dir, encoding: 'utf8' }).status, 128, 'the parent repo is not committed or changed')
+}
+
 function testExistingIncubatorsNormalizeClaudeRelayState() {
   const server = serverSource()
 
@@ -1738,6 +1752,7 @@ const tests = [
   testClaudePreflightChecksLauncherBackedRelay,
   testRetiredClaudePinsFallThroughButAliasesStay,
   testFreshIncubatorsHaveGenericClaudeRunner,
+  testNewIncubatorInsideParentGetsOwnHistory,
   testExistingIncubatorsNormalizeClaudeRelayState,
   testStdoutOnlyApiErrorsBecomeFailedRows,
   testStdoutBoldFailedRowsDoNotNeedErrorText,

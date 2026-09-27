@@ -7,6 +7,7 @@
 // The slot record used to carry its own `runner` copy that drifted from
 // status.json; it is no longer written and is stripped on read.
 import fs from 'fs'
+import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve } from 'path'
 import {
   checkClaudeCommand,
@@ -510,6 +511,12 @@ export function createIncubatorProjectFromIdea(idea, requestedTitle = '') {
 
   fs.mkdirSync(reportsDir, { recursive: true })
   fs.mkdirSync(labProjectDir, { recursive: true })
+
+  // This is a freshly allocated project, not an imported working tree. Give
+  // it its own history even when the repository root lives inside another
+  // Git checkout. Otherwise the session safety ratchet must stay disabled.
+  const gitInit = spawnSync('git', ['init', '-q'], { cwd: repo, encoding: 'utf8', timeout: 10000 })
+  if (gitInit.status !== 0) console.warn(`[pi-pulse] ${slug}: isolated git init unavailable; runner will report version-control limits`)
 
   writeFileIfMissing(join(repo, 'README.md'), `# ${title}
 

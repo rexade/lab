@@ -15,6 +15,8 @@ Completion requires a successful, well-formed independent review, milestone outc
 
 Keep/revert behavior, one global writer, sandbox permissions, configured models, timeouts and owner controls remain unchanged. Due-time ordering prevents registry-order starvation. Healthy products retain their existing cadence; failed/no-progress attempts back off and revisit automatically rather than requiring owner approval.
 
+Newly created projects get their own Git repository, even under a parent checkout, so session commits and rollback do not operate on the parent or become disabled. Imported/existing folders are not automatically reinitialized.
+
 Prompt design keeps explicit initiative, constraints and useful product memory. It is informed by [OpenAI's Astra prompt guidance](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra), not a claim that any workflow is universally optimal.
 
 Verification: `npm run build` runs real-runner fixtures with fake agents and temporary Git repos, UI contracts, live HTTP/auth smoke tests, then Vite. Fixtures cover multi-session milestones, second milestones, restart persistence, repeated-goal protection, failed reviews, no-change completion, finite vs ongoing scheduling and fair due ordering.
