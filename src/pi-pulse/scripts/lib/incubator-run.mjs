@@ -15,6 +15,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { capturedFailureDetail, parseRunsFromLog, resolveClaudeModel, resolveClaudePermissionMode, resolveCodexReasoningEffort, summarizeRun } from '../../server-core.js'
 import { routeSlugForProject } from '../../server/util.js'
+import { LOCAL_SERVICES, probeService, projectServices } from '../../server/local-services.js'
 import {
   breakage,
   checksAllowCompletion,
@@ -273,7 +274,7 @@ const commands = {
     let baselineChecks = null
     if (ratchet.ratchet === 'on') {
       const known = status.lastChecks?.version === CHECKS_VERSION && status.lastGoodCommit === ratchet.baseline && !ratchet.adopted
-      baselineChecks = known ? status.lastChecks : runChecks({ repo, label: `${runNumber}-baseline`, appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
+      baselineChecks = known ? status.lastChecks : runChecks({ repo, label: `${runNumber}-baseline`, appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS, services: projectServices(status) })
     }
     status.stage = stage
     status.polishSessions = 0
@@ -328,6 +329,7 @@ const commands = {
       lastMilestone: status.lastMilestone,
       milestones: status.milestoneHistory,
       runtimeMinutes: Math.round(Number(process.env[resolveAgent(status) === 'claude' ? 'CLAUDE_TIMEOUT' : 'CODEX_TIMEOUT'] || 2400) / 60),
+      services: projectServices(status).map(name => ({ name, about: LOCAL_SERVICES[name].about, probe: probeService(name) })),
     }))
   },
 
@@ -366,9 +368,9 @@ const commands = {
     } else if (ratchetOn && !productChanged(repo, session.baseline)) {
       outcome = 'no-changes'
       // Fresh checks: unchanged files alone do not prove a milestone is complete.
-      checks = runChecks({ repo, label: String(run), appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
+      checks = runChecks({ repo, label: String(run), appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS, services: projectServices(status) })
     } else {
-      checks = runChecks({ repo, label: String(run), appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
+      checks = runChecks({ repo, label: String(run), appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS, services: projectServices(status) })
       const problems = breakage(session.baselineChecks, checks)
       if (problems.length && ratchetOn) {
         comparedVersion = saveRejectedVersion(repo, session.baseline, run)

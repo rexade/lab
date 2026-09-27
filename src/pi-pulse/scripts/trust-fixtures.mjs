@@ -31,7 +31,8 @@ import {
 } from '../src/lib/runSignals.js'
 import { incubatorLauncherScript } from '../server/incubator-templates.js'
 import { staleSourceRestartPlan, validateSourceForRestart } from '../server/service-health.js'
-import { breakage, checksAllowCompletion, checksLine, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview, milestoneSnapshot, runChecks, runFields, saveRejectedVersion } from './lib/session.mjs'
+import { breakage, checksAllowCompletion, checksLine, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview, milestoneSnapshot, runChecks, runFields, saveRejectedVersion, sessionPrompt } from './lib/session.mjs'
+import { generatedAppCsp } from '../server/security.js'
 import { compareRecordedRun, recordedVersions } from '../server/version-history.js'
 import { commitHeadline } from './lib/incubator-run.mjs'
 import { decodePng, showsSomething } from './lib/pixels.mjs'
@@ -1698,6 +1699,69 @@ function testSchedulerChoosesOldestDueSlot() {
   assert.equal(out.id, 'older-due', 'registry position does not outrank time spent waiting')
 }
 
+// Local services: a generated app reaches only the paths its project opted into,
+// never model management, never another project's services, never cross-site.
+function testLocalServiceProxyStaysInsideItsAllowlist() {
+  const script = `
+    import http from 'node:http'
+    const hits = []
+    const upstream = http.createServer((req, res) => {
+      let body = ''
+      req.on('data', c => { body += c })
+      req.on('end', () => { hits.push(req.method + ' ' + req.url + ' ' + body); res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"reply":"hi"}') })
+    })
+    await new Promise(r => upstream.listen(0, '127.0.0.1', r))
+    process.env.PI_PULSE_OLLAMA_URL = 'http://127.0.0.1:' + upstream.address().port
+    const svc = await import(${JSON.stringify(join(root, 'server', 'local-services.js'))})
+    const gateway = http.createServer((req, res) => {
+      const m = req.url.match(/^\\/_services\\/([a-z]+)(\\/[^?]*)?/)
+      svc.proxyServiceRequest(m[1], m[2] || '/', req, res)
+    })
+    await new Promise(r => gateway.listen(0, '127.0.0.1', r))
+    const base = 'http://127.0.0.1:' + gateway.address().port + '/_services/'
+    const call = async (path, init) => { const r = await fetch(base + path, init); return [r.status, await r.text()] }
+    const out = {
+      chat: await call('ollama/api/chat?x=1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"q":1}' }),
+      pull: await call('ollama/api/pull', { method: 'POST', body: '{}' }),
+      sneaky: await call('ollama/api/chat/../pull', { method: 'POST', body: '{}' }),
+      del: await call('ollama/api/tags', { method: 'DELETE' }),
+      unknown: await call('shell/run', { method: 'POST', body: '{}' }),
+      hits,
+      picked: svc.projectServices({ localServices: ['ollama', 'shell', 'ollama', 'constructor'] }),
+      src: [svc.serviceConnectSource('pulse.example.org', 'ai-os'), svc.serviceConnectSource('evil.org; script-src *', 'ai-os')],
+    }
+    gateway.close(); upstream.close()
+    console.log(JSON.stringify(out))
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 20000 })
+  assert.equal(result.status, 0, result.stderr)
+  const out = JSON.parse(result.stdout.trim().split('\n').pop())
+  assert.deepEqual(out.chat, [200, '{"reply":"hi"}'], 'an allowed call is relayed with its answer')
+  assert.deepEqual(out.hits, ['POST /api/chat?x=1 {"q":1}'], 'only the allowed call reached the service, body and query intact')
+  assert.equal(out.pull[0], 403, 'model management stays unreachable')
+  assert.equal(out.sneaky[0], 403, 'dot segments cannot escape the allowlist')
+  assert.equal(out.del[0], 405, 'only listed methods pass')
+  assert.equal(out.unknown[0], 404, 'unregistered services do not exist')
+  assert.deepEqual(out.picked, ['ollama'], 'a project can only opt into registered services')
+  assert.equal(out.src[0], 'pulse.example.org/ai-os/_services/', 'the CSP opening is scoped to the project service path')
+  assert.equal(out.src[1], null, 'a hostile Host header cannot inject CSP sources')
+
+  const server = serverSource()
+  assert.ok(server.indexOf('app.all(`/:slug/${SERVICE_PATH_SEGMENT}/:service/*`, requireTrustedServiceCall') > 0, 'every service call needs a trusted identity')
+  assert.ok(server.indexOf('app.all(`/:slug/${SERVICE_PATH_SEGMENT}') < server.indexOf("app.use(express.json("), 'bodies must stream to the service unparsed')
+  assert.ok(generatedAppCsp('h/p/_services/').includes('connect-src h/p/_services/'))
+  assert.ok(generatedAppCsp().includes("connect-src 'none'"), 'apps without services stay fully isolated')
+}
+
+function testSessionPromptNamesOnlyEnabledServices() {
+  const none = sessionPrompt({ runNumber: 2, briefExists: true })
+  assert.ok(!none.includes('_services/'), 'projects without services hear nothing about them')
+  const withOllama = sessionPrompt({ runNumber: 2, briefExists: true, services: [{ name: 'ollama', about: 'Local model.', probe: 'GET api/tags answered: {}' }] })
+  assert.ok(withOllama.includes("_services/ollama/"), 'the builder learns the relative path')
+  assert.ok(withOllama.includes('GET api/tags answered'), 'the builder sees the live probe')
+  assert.ok(withOllama.includes('no network'), 'the builder is told it cannot call the service itself')
+}
+
 // New steering outranks time spent waiting: the person is waiting on this slot,
 // so it goes next even before its interval is up. One priority launch per note.
 function testSchedulerRunsUnreadSteeringFirst() {
@@ -2046,6 +2110,8 @@ const tests = [
   testDueScheduledSlotsActuallyFire,
   testSchedulerChoosesOldestDueSlot,
   testSchedulerRunsUnreadSteeringFirst,
+  testLocalServiceProxyStaysInsideItsAllowlist,
+  testSessionPromptNamesOnlyEnabledServices,
   testOverdueSlotsAreSpacedOutOnlyAtBoot,
   testSchedulerDefersBusySlotsWithoutRecountingFailures,
   testFailingSlotsBackOffAndRetryInsteadOfPausing,

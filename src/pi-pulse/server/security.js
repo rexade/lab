@@ -68,8 +68,14 @@ export function requireTrustedWrite(req, res, next) {
   })
 }
 
+// A project with local services may also connect to its own service path
+// (res.locals.serviceConnectSrc); everything else stays unreachable.
+export function generatedAppCsp(connectSrc = null) {
+  return connectSrc ? GENERATED_APP_CSP.replace("connect-src 'none'", `connect-src ${connectSrc}`) : GENERATED_APP_CSP
+}
+
 export function generatedAppSecurityHeaders(req, res, next) {
-  res.setHeader('Content-Security-Policy', GENERATED_APP_CSP)
+  res.setHeader('Content-Security-Policy', generatedAppCsp(res.locals?.serviceConnectSrc))
   res.setHeader('X-Pi-Pulse-App-Isolation', 'restricted-csp')
   next()
 }
@@ -96,4 +102,15 @@ export function createGeneratedAppWriteGuard(isGeneratedAppPath) {
       error: 'generated app routes cannot call Pi Pulse control-plane writes',
     })
   }
+}
+
+// Local services cost Pi compute or expose the owner's data, so every call,
+// reads included, needs the same identity and same-site origin as a write.
+export function requireTrustedServiceCall(req, res, next) {
+  const site = String(req.get('sec-fetch-site') || '').toLowerCase()
+  if (site !== '' && site !== 'same-origin' && site !== 'none') {
+    return res.status(403).json({ ok: false, code: 'CROSS_SITE_SERVICE_FORBIDDEN', error: 'local services can only be called from the project page itself' })
+  }
+  if (hasTrustedWriteIdentity(req)) return next()
+  return res.status(401).json({ ok: false, code: 'SERVICE_AUTH_REQUIRED', error: 'local services require Cloudflare Access identity or PI_PULSE_ADMIN_TOKEN' })
 }

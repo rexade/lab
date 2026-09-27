@@ -61,7 +61,8 @@ import { globalRunBusy } from './server/run-lock.js'
 import { compareRecordedRun } from './server/version-history.js'
 import { appendSteeringNote, parsedRunsForLog, readLogContent } from './server/run-logs.js'
 import { appendManualPreflightFailure, nextCoreRunNum } from './server/run-receipts.js'
-import { createGeneratedAppWriteGuard, generatedAppSecurityHeaders, requireTrustedWrite } from './server/security.js'
+import { createGeneratedAppWriteGuard, generatedAppSecurityHeaders, requireTrustedServiceCall, requireTrustedWrite } from './server/security.js'
+import { SERVICE_PATH_SEGMENT, projectServices, proxyServiceRequest, serviceConnectSource } from './server/local-services.js'
 import { requireFreshSource, serviceHealth, staleSourceRestartPlan, validateSourceForRestart } from './server/service-health.js'
 import { buildStatsPayload, dayBufferEntries, startDayBuffer, startStatsSampler } from './server/system-stats.js'
 import { broadcastSse, clampScheduleInterval, hoursFromNow, openSseStream, routeSlugForProject, writeJsonAtomic } from './server/util.js'
@@ -79,7 +80,7 @@ function mountPlayRoute(cfg) {
   const route = `/${routeSlugForProject(cfg.project)}`
   if (mountedPlayRoutes.has(route)) return route
   if (!fs.existsSync(join(cfg.repo, 'index.html'))) return null
-  app.use(route, generatedAppSecurityHeaders, express.static(cfg.repo))
+  app.use(route, attachServiceConnectSrc, generatedAppSecurityHeaders, express.static(cfg.repo))
   mountedPlayRoutes.add(route)
   return route
 }
@@ -142,6 +143,36 @@ function resolvePlayRequest(requestPath) {
 }
 
 const rejectGeneratedAppControlWrite = createGeneratedAppWriteGuard(isGeneratedAppPath)
+
+function playCfgForSlug(slug) {
+  for (const slot of readIncubators().slots || []) {
+    try {
+      const cfg = readStatusAt(slot.statusPath)
+      if (routeSlugForProject(cfg.project) === slug) return cfg
+    } catch {
+      // A malformed slot must not hide the others.
+    }
+  }
+  return null
+}
+
+// Read per request, so opting a project in or out needs no restart.
+function attachServiceConnectSrc(req, res, next) {
+  const slug = String(req.originalUrl || '').split(/[/?#]/)[1] || ''
+  const cfg = slug ? playCfgForSlug(slug) : null
+  if (cfg && projectServices(cfg).length) res.locals.serviceConnectSrc = serviceConnectSource(req.get('host'), slug)
+  next()
+}
+
+// Same-origin gateway from a generated app to the local services its project
+// opted into. Registered before express.json so bodies stream through untouched.
+app.all(`/:slug/${SERVICE_PATH_SEGMENT}/:service/*`, requireTrustedServiceCall, (req, res) => {
+  const cfg = playCfgForSlug(req.params.slug)
+  if (!cfg || !projectServices(cfg).includes(req.params.service)) {
+    return res.status(404).json({ ok: false, code: 'SERVICE_NOT_ENABLED', error: `${req.params.service} is not enabled for this project` })
+  }
+  proxyServiceRequest(req.params.service, req.params[0], req, res)
+})
 
 // ─── Incubator view model ─────────────────────────────────────────────────────
 
@@ -830,6 +861,7 @@ app.get('*', (req, res) => {
   const play = resolvePlayRequest(req.path)
   if (play?.redirect) return res.redirect(301, play.redirect)
   if (play) {
+    attachServiceConnectSrc(req, res, () => {})
     generatedAppSecurityHeaders(req, res, () => {})
     if (!play.file) return res.status(404).type('text/plain').send('not found')
     return res.sendFile(play.file)

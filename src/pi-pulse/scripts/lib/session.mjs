@@ -185,6 +185,7 @@ export function sessionPrompt({
   lastMilestone = null,
   milestones = [],
   runtimeMinutes = 40,
+  services = [],
 }) {
   const standing = [
     `- Stage: ${STAGE_GUIDANCE[stage] || STAGE_GUIDANCE.building}`,
@@ -241,7 +242,9 @@ WHAT THE LAB DOES FOR YOU
 LIMITS
 - No sudo, no system services, nothing outside this project folder, no replies from anyone. When something is out of reach, design around it (for example, read a local file instead of calling a service) and note it under Constraints in BRIEF.md.
 - The lab serves this folder as static files${playPath ? ` at ${playPath}` : ''}. A web app needs an index.html at the folder root that works when served that way: no dev server, relative paths only.
-
+${services.length ? `- This project may call these local Pi services from the page, same-origin, at the relative path _services/<name>/ (for example fetch('_services/${services[0].name}/...') from index.html). Nothing else outside the folder is reachable. You cannot reach them from this session (it has no network): write the calls against the description below, keep a clear state for when a service is slow or down, and the lab's browser check will exercise the real thing.
+${services.map(service => `  - ${service.name}: ${service.about}${service.probe ? ` Just before this session, ${service.probe}` : ''}`).join('\n')}
+` : ''}
 ${briefExists ? '' : `BRIEF.md TEMPLATE
 ${BRIEF_TEMPLATE}
 
@@ -547,7 +550,7 @@ function checkCommands(repo) {
 // observation, or error counts from a different viewport collection strategy.
 export const CHECKS_VERSION = 2
 
-export function runChecks({ repo, label, appEvidenceScript = null, timeoutMs = 600000 }) {
+export function runChecks({ repo, label, appEvidenceScript = null, timeoutMs = 600000, services = [] }) {
   const result = { version: CHECKS_VERSION, at: new Date().toISOString(), check: { state: 'none', command: null, detail: '' }, app: { state: 'n/a', ran: false } }
   const plan = checkCommands(repo)
   if (plan) {
@@ -566,7 +569,7 @@ export function runChecks({ repo, label, appEvidenceScript = null, timeoutMs = 6
   }
   const isWeb = fs.existsSync(path.join(repo, 'index.html'))
   if (isWeb && appEvidenceScript && fs.existsSync(appEvidenceScript)) {
-    spawnSync(process.execPath, [appEvidenceScript, '--repo', repo, '--run', label, '--type', 'session'], { cwd: repo, encoding: 'utf8', timeout: 240000 })
+    spawnSync(process.execPath, [appEvidenceScript, '--repo', repo, '--run', label, '--type', 'session', ...(services.length ? ['--services', services.join(',')] : [])], { cwd: repo, encoding: 'utf8', timeout: 240000 })
     const dir = path.join(repo, 'reports', 'evidence', `run-${label}`)
     let summary = null
     try { summary = JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8')) } catch {}

@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 import { showsSomething } from './lib/pixels.mjs'
+import { proxyServiceRequest } from '../server/local-services.js'
 
 const args = parseArgs(process.argv.slice(2))
 const repo = path.resolve(args.repo || process.cwd())
@@ -50,9 +51,12 @@ function contentType(filePath) {
   return 'application/octet-stream'
 }
 
-function createStaticServer(root) {
+function createStaticServer(root, services = []) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1')
+    // The project's local services answer here exactly as on its play route.
+    const service = url.pathname.match(/^\/_services\/([a-z0-9_-]+)(\/.*)?$/i)
+    if (service && services.includes(service[1])) return proxyServiceRequest(service[1], service[2] || '/', req, res)
     const decoded = decodeURIComponent(url.pathname)
     const requested = decoded === '/' ? '/index.html' : decoded
     const filePath = path.resolve(root, `.${requested}`)
@@ -449,7 +453,7 @@ async function main() {
     summary.blank = blankObserved ? true : observed.length === 2 ? false : null
   }
   try {
-    const launched = await createStaticServer(repo)
+    const launched = await createStaticServer(repo, String(args.services || '').split(',').filter(Boolean))
     server = launched.server
     summary.url = launched.url
     browser = await playwright.chromium.launch({ headless: true })
