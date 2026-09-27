@@ -275,9 +275,14 @@ async function probePrimaryAction(page) {
         const rect = el.getBoundingClientRect()
         const style = getComputedStyle(el)
         const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true'
-        return !disabled && rect.width > 12 && rect.height > 12 && style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0
+        // Accessibility skip links can have a size while deliberately parked
+        // above the viewport. They are not a visible first-use action.
+        return !disabled && rect.width > 12 && rect.height > 12 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth && style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0
       })
-    const el = candidates[0]
+    // Prefer a product control in the main content over a brand/home link or
+    // a navigation item that simply reopens the current page.
+    const isControl = el => el.matches('button,[role="button"],input[type="button"],input[type="submit"]')
+    const el = candidates.find(el => isControl(el) && el.closest('main,[role="main"]')) || candidates.find(isControl) || candidates[0]
     if (!el) return { available: false, checked: false, changed: false, label: null, selector: null, source: 'degraded-selector', executionPath: 'visible-ui', reason: 'no visible action element' }
     if (!el.dataset.appEvidencePrimary) el.dataset.appEvidencePrimary = 'true'
     return {
@@ -344,7 +349,7 @@ function writeSummary(summary) {
     summary.mobileScreenshot ? `**Mobile screenshot:** ${summary.mobileScreenshot}` : null,
     `**Console errors:** ${summary.consoleErrorCount ?? 0}`,
     `**Page errors:** ${summary.pageErrorCount ?? 0}`,
-    `**Blank page:** ${summary.blank ? 'yes' : 'no'}`,
+    `**Blank page:** ${summary.blank == null ? 'not established' : summary.blank ? 'yes' : 'no'}`,
     `**Primary action:** ${summary.primaryAction?.checked ? summary.primaryAction.changed ? 'changed state' : 'no visible change' : summary.primaryAction?.available ? 'not checked' : 'not available'}`,
     success?.available ? `**Success contract:** ${success.passed ? 'passed' : 'failed'} (${success.source || 'semantic'})` : '**Success contract:** not available',
     summary.afterActionScreenshot ? `**After-action screenshot:** ${summary.afterActionScreenshot}` : null,
@@ -374,7 +379,8 @@ async function main() {
     afterActionScreenshot: null,
     consoleErrorCount: 0,
     pageErrorCount: 0,
-    blank: true,
+    blank: null,
+    inspectionComplete: false,
     evidenceMode: 'none',
     topTierEligible: false,
     semanticContract: { present: false, mode: 'degraded', topTierEligible: false, reason: 'not inspected' },
@@ -411,17 +417,44 @@ async function main() {
 
   let server
   let browser
+  const consoleEvents = []
+  const pageErrors = []
+  summary.pageState = {}
+  const observe = page => {
+    page.on('console', msg => consoleEvents.push({ type: msg.type(), text: msg.text(), timestamp: Date.now() }))
+    page.on('pageerror', err => pageErrors.push({ message: err.message, timestamp: Date.now() }))
+  }
+  const recordState = (viewport, state) => {
+    summary.pageState[viewport] = state
+    const observed = Object.values(summary.pageState)
+    const blankObserved = observed.some(s => s.textLength < 12 && s.visibleElements < 2)
+    // One observed blank viewport is evidence; one nonblank viewport does not
+    // establish that both opened successfully.
+    summary.blank = blankObserved ? true : observed.length === 2 ? false : null
+  }
   try {
     const launched = await createStaticServer(repo)
     server = launched.server
     summary.url = launched.url
     browser = await playwright.chromium.launch({ headless: true })
     const page = await browser.newPage({ viewport: { width: 1440, height: 960 } })
-    const consoleEvents = []
-    const pageErrors = []
-    page.on('console', msg => consoleEvents.push({ type: msg.type(), text: msg.text(), timestamp: Date.now() }))
-    page.on('pageerror', err => pageErrors.push({ message: err.message, timestamp: Date.now() }))
+    observe(page)
     await page.goto(launched.url, { waitUntil: 'networkidle', timeout: 20000 })
+    summary.evidenceMode = 'degraded'
+
+    recordState('desktop', await inspectPage(page))
+    await page.screenshot({ path: path.join(evidenceDir, 'desktop.png'), fullPage: true })
+    summary.desktopScreenshot = path.join(evidenceDir, 'desktop.png')
+
+    // A fresh context at phone size, not the desktop page after clicking into
+    // an editor. Both previews show the actual first-open state.
+    const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
+    observe(mobile)
+    await mobile.goto(launched.url, { waitUntil: 'networkidle', timeout: 20000 })
+    recordState('mobile', await inspectPage(mobile))
+    await mobile.screenshot({ path: path.join(evidenceDir, 'mobile.png'), fullPage: true })
+    summary.mobileScreenshot = path.join(evidenceDir, 'mobile.png')
+    await mobile.close()
 
     summary.semanticContract = await readSemanticContract(page)
     summary.evidenceMode = summary.semanticContract.present ? 'semantic' : 'degraded'
@@ -429,15 +462,22 @@ async function main() {
     if (summary.semanticContract.hasReset) summary.semanticReset = await resetSemanticContract(page)
     if (summary.semanticContract.hasSnapshot) summary.semanticSnapshots.push(await readSemanticSnapshot(page, 'before'))
 
-    await page.screenshot({ path: path.join(evidenceDir, 'desktop.png'), fullPage: true })
     const desktopState = await inspectPage(page)
     const primaryAction = await probePrimaryAction(page)
+    summary.primaryAction = primaryAction
     if (primaryAction.available) {
-      const actionResult = await executePrimaryAction(page, primaryAction)
+      let actionResult
+      try {
+        actionResult = await executePrimaryAction(page, primaryAction)
+      } catch (err) {
+        actionResult = { ok: false, path: primaryAction.executionPath, error: err.message }
+      }
       primaryAction.checked = actionResult.ok
       primaryAction.executionResult = actionResult
+      if (!actionResult.ok) summary.notes.push(`Primary action could not be exercised: ${actionResult.error}`)
       await page.waitForTimeout(500)
       const afterActionState = await inspectPage(page)
+      if (afterActionState.textLength < 12 && afterActionState.visibleElements < 2) summary.blank = true
       primaryAction.changed = stateChanged(desktopState, afterActionState)
       summary.semanticSuccess = await evaluateSuccessContract(page)
       if (summary.semanticContract.hasSnapshot) summary.semanticSnapshots.push(await readSemanticSnapshot(page, 'after'))
@@ -446,23 +486,9 @@ async function main() {
       summary.afterActionScreenshot = path.join(evidenceDir, 'after-action.png')
       summary.afterActionState = afterActionState
     }
-    await page.setViewportSize({ width: 390, height: 844 })
-    await page.waitForTimeout(250)
-    await page.screenshot({ path: path.join(evidenceDir, 'mobile.png'), fullPage: true })
-    const mobileState = await inspectPage(page)
-    fs.writeFileSync(path.join(evidenceDir, 'console.json'), JSON.stringify(consoleEvents, null, 2) + '\n')
-    fs.writeFileSync(path.join(evidenceDir, 'page-errors.json'), JSON.stringify(pageErrors, null, 2) + '\n')
-    fs.writeFileSync(path.join(evidenceDir, 'page-state.json'), JSON.stringify({ desktop: desktopState, mobile: mobileState }, null, 2) + '\n')
-    fs.writeFileSync(path.join(evidenceDir, 'semantic-contract.json'), JSON.stringify(summary.semanticContract, null, 2) + '\n')
-    fs.writeFileSync(path.join(evidenceDir, 'semantic-snapshots.json'), JSON.stringify(summary.semanticSnapshots, null, 2) + '\n')
-
-    summary.desktopScreenshot = path.join(evidenceDir, 'desktop.png')
-    summary.mobileScreenshot = path.join(evidenceDir, 'mobile.png')
     summary.consoleErrorCount = consoleEvents.filter(item => item.type === 'error').length
     summary.pageErrorCount = pageErrors.length
-    summary.blank = [desktopState, mobileState].some(state => state.textLength < 12 && state.visibleElements < 2)
-    summary.pageState = { desktop: desktopState, mobile: mobileState }
-    summary.primaryAction = primaryAction
+    summary.inspectionComplete = !primaryAction.available || primaryAction.checked
     summary.topTierEligible = summary.semanticContract.present &&
       primaryAction.source === 'semantic-selector' &&
       primaryAction.executionPath === 'visible-ui' &&
@@ -474,25 +500,33 @@ async function main() {
     if (summary.blank) summary.notes.push('Desktop or mobile viewport looked blank or nearly blank.')
     if (!summary.semanticContract.present) summary.notes.push('No window.__PI_PULSE_APP__ semantic contract was registered; evidence is degraded and not 4.5+ eligible.')
     if (summary.semanticContract.present && !summary.semanticContract.hasSuccessContract) summary.notes.push('Semantic contract is missing a success contract for the primary action.')
-    if (summary.primaryAction.available && !summary.primaryAction.changed) summary.notes.push('Primary visible action was exercised but no visible state change was detected.')
+    if (summary.primaryAction.checked && !summary.primaryAction.changed) summary.notes.push('Primary visible action was exercised but no visible state change was detected.')
     if (summary.semanticSuccess.available && !summary.semanticSuccess.passed) summary.notes.push('Semantic success contract failed after the primary action.')
     if (summary.primaryAction.source === 'semantic-function') summary.notes.push('Primary action used a semantic function; top-tier UI proof requires a visible selector path.')
     if (summary.consoleErrorCount > 0) summary.notes.push('Console errors were observed.')
     if (summary.pageErrorCount > 0) summary.notes.push('Uncaught page errors were observed.')
-    summary.ok = !summary.blank && (!summary.primaryAction.available || summary.primaryAction.changed) && summary.consoleErrorCount === 0 && summary.pageErrorCount === 0 && (!summary.semanticSuccess.available || summary.semanticSuccess.passed === true)
-    summary.gate = summary.ok ? 'PASS' : 'FAIL'
+    summary.ok = summary.inspectionComplete && summary.blank === false && (!summary.primaryAction.available || summary.primaryAction.changed) && summary.consoleErrorCount === 0 && summary.pageErrorCount === 0 && (!summary.semanticSuccess.available || summary.semanticSuccess.passed === true)
+    summary.gate = summary.ok ? 'PASS' : summary.inspectionComplete ? 'FAIL' : 'NEEDS-EVIDENCE'
   } catch (err) {
     if (isHarnessInfrastructureError(err)) {
       summary.gate = 'NEEDS-EVIDENCE'
-      summary.evidenceMode = 'unavailable'
-      summary.blank = false
+      if (!Object.keys(summary.pageState).length) summary.evidenceMode = 'unavailable'
       summary.notes.push(`Browser evidence unavailable: ${err.message}`)
       summary.notes.push('This is an evidence infrastructure failure, not proof that the app is broken.')
     } else {
-      summary.gate = 'FAIL'
-      summary.notes.push(`Browser evidence failed: ${err.message}`)
+      summary.gate = 'NEEDS-EVIDENCE'
+      summary.notes.push(`Browser inspection incomplete: ${err.message}`)
     }
   } finally {
+    summary.consoleErrorCount = consoleEvents.filter(item => item.type === 'error').length
+    summary.pageErrorCount = pageErrors.length
+    if (summary.blank === true || summary.consoleErrorCount || summary.pageErrorCount) {
+      summary.ok = false
+      summary.gate = 'FAIL'
+    }
+    for (const [file, data] of Object.entries({ 'console.json': consoleEvents, 'page-errors.json': pageErrors, 'page-state.json': summary.pageState, 'semantic-contract.json': summary.semanticContract, 'semantic-snapshots.json': summary.semanticSnapshots })) {
+      fs.writeFileSync(path.join(evidenceDir, file), JSON.stringify(data, null, 2) + '\n')
+    }
     await browser?.close().catch(() => {})
     await new Promise(resolve => server?.close(resolve) || resolve())
   }
@@ -505,7 +539,7 @@ main().catch(err => {
   const infra = isHarnessInfrastructureError(err)
   const summary = {
     ok: false,
-    gate: infra ? 'NEEDS-EVIDENCE' : 'FAIL',
+    gate: 'NEEDS-EVIDENCE',
     runNumber,
     runType,
     repo,
@@ -513,7 +547,8 @@ main().catch(err => {
     summaryPath,
     summaryMdPath,
     appType: 'unknown',
-    blank: !infra,
+    blank: null,
+    inspectionComplete: false,
     consoleErrorCount: 0,
     pageErrorCount: 0,
     evidenceMode: infra ? 'unavailable' : 'none',

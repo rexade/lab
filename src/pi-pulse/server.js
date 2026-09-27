@@ -4,7 +4,7 @@ import express from 'express'
 import fs from 'fs'
 import { spawn } from 'child_process'
 import { basename, dirname, join, resolve } from 'path'
-import { firstRunnableClaudeModel, preflightFailureDetail, runsWithPinnedLatestFailure } from './server-core.js'
+import { firstRunnableClaudeModel, preflightFailureDetail, resolveCodexReasoningEffort, runsWithPinnedLatestFailure } from './server-core.js'
 import { currentStage, sessionStage, lifecycleOf, parseBrief, milestoneSnapshot, STAGE_TYPE } from './scripts/lib/session.mjs'
 import {
   CORE_FEEDBACK_JSON,
@@ -219,6 +219,7 @@ function hydrateIncubator(slot) {
     repairedRunnerConfig: repaired ? 'claude' : null,
     claudeModel: firstRunnableClaudeModel(cfg.claudeModel) ?? null,
     codexModel: cfg.codexModel ?? null,
+    codexReasoningEffort: resolveCodexReasoningEffort(cfg.codexReasoningEffort),
     current_focus: cfg.current_focus ?? null,
     notes: cfg.notes ?? null,
     feedbackPath: projectFeedbackPath(cfg),

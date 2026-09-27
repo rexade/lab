@@ -205,6 +205,14 @@ const tests = {
     includes(running, '#6 · after the current session', 'the next-session number accounts for the one in flight')
   },
 
+  'the runner caption shows the configured Codex reasoning effort'() {
+    const html = render(ui.IncubatorDetail, {
+      slot: slot({ runner: 'codex', codexModel: 'gpt-6-astra', codexReasoningEffort: 'high' }),
+      runs: [], preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions,
+    })
+    includes(html, 'gpt-6-astra · high reasoning', 'the effective reasoning default is visible')
+  },
+
   'the runner caption tells you how Claude will run'() {
     const html = render(ui.IncubatorDetail, {
       slot: slot({ runner: 'claude', claudeModel: 'fable', runnerSetups: { claude: { ok: true, model: 'fable', permissionMode: 'acceptEdits', checks: [] } } }),

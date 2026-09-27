@@ -13,7 +13,11 @@ The controller records completed goal/outcome snapshots, count and recent histor
 
 Completion requires a successful, well-formed independent review, milestone outcomes met, no actionable blockers and no known failing checks. Reviewer failures and missing milestone definitions cannot finish work. No-change sessions get fresh checks/review and back off if still unresolved. Checks and reviews remain fallible; none of this proves real-world adoption or subjective quality.
 
-Keep/revert behavior, one global writer, sandbox permissions, configured models, timeouts and owner controls remain unchanged. Due-time ordering prevents registry-order starvation. Healthy products retain their existing cadence; failed/no-progress attempts back off and revisit automatically rather than requiring owner approval.
+One global writer, sandbox permissions, configured models, timeouts and owner controls remain unchanged. Due-time ordering prevents registry-order starvation. Healthy products retain their existing cadence; failed/no-progress attempts back off and revisit automatically rather than requiring owner approval.
+
+Codex builders and reviewers explicitly use `high` reasoning by default, independently of the operator's personal CLI configuration. `codexReasoningEffort` in a project's status overrides the service default `PI_PULSE_CODEX_REASONING_EFFORT`. Use `xhigh` for a demonstrated benefit on harder work, not as an unmeasured requirement for every bounded session. This follows [official effort guidance](https://developers.openai.com/api/docs/guides/reasoning#reasoning-effort); it is a starting choice, not a measured quality guarantee.
+
+Browser previews show fresh desktop and phone opening states; after-action screenshots are separate. Unobserved rendering remains unknown. A failed click or unavailable browser is not proof of a blank app and cannot cause a rollback by itself, nor can an incomplete inspection certify completion. Actual blank rendering, new runtime errors and failing checks still protect the last good version.
 
 Newly created projects get their own Git repository, even under a parent checkout, so session commits and rollback do not operate on the parent or become disabled. Imported/existing folders are not automatically reinitialized.
 

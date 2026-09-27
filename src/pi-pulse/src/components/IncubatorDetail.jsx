@@ -144,7 +144,7 @@ function ProductView({ slot }) {
           data-shot={`${shown.evidence}/${file}`}
         />
       </div>
-      <figcaption className="mt-2 text-[12px] text-fg4">Screenshot the lab took after session #{shown.run}{shown.at ? `, ${fmtRelativeDay(String(shown.at).slice(0, 10))}` : ''}.</figcaption>
+      <figcaption className="mt-2 text-[12px] text-fg4">Fresh-browser preview after session #{shown.run}{shown.at ? `, ${fmtRelativeDay(String(shown.at).slice(0, 10))}` : ''}{shown.rechecked ? ' · rechecked' : ''}. Your saved browser data may differ.</figcaption>
     </figure>
   )
 }
@@ -350,7 +350,7 @@ function RunnerDetails({ slot, preflight }) {
     ['Builder', runnerLabel(slot.runner)],
     ['Reviewer', slot.review === false ? 'off' : `${runnerLabel(slot.reviewer)} (fresh session, read-only)`],
     ['Command', preflight?.command],
-    slot.runner === 'claude' ? ['Model', `${slot.claudeModel || setup?.model || 'CLI default'} (falls back to sonnet)`] : ['Model', slot.codexModel || 'Codex default'],
+    slot.runner === 'claude' ? ['Model', `${slot.claudeModel || setup?.model || 'CLI default'} (falls back to sonnet)`] : ['Model', `${slot.codexModel || 'Codex default'} · ${slot.codexReasoningEffort || 'high'} reasoning`],
     slot.runner === 'claude' ? ['Permissions', setup?.permissionMode || 'auto'] : ['Sandbox', 'workspace-write (project only)'],
     ['Version control', slot.ratchet === 'off' ? `off: ${slot.ratchetReason || 'unavailable'}` : slot.lastGoodCommit ? `on · last good ${slot.lastGoodCommit}` : 'starts with the first session'],
     ['Launcher', slot.launcher ? shortPath(slot.launcher) : null],
@@ -412,7 +412,7 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
   const setup = slot.runnerSetups?.claude
   const runnerCaption = slot.runner === 'claude'
     ? `${slot.claudeModel || setup?.model || 'sonnet'} · ${setup?.permissionMode || 'auto'} permissions`
-    : slot.codexModel || 'sandboxed to the project'
+    : `${slot.codexModel || 'Codex default'} · ${slot.codexReasoningEffort || 'high'} reasoning`
 
   return (
     <article className="glass overflow-hidden" aria-label={`${name} incubator`} data-incubator-detail={slot.id}>

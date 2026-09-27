@@ -369,11 +369,20 @@ export function checksLine(checks = null) {
   const app = checks.app
   if (app?.ran) {
     const errors = (app.pageErrors || 0) + (app.consoleErrors || 0)
-    parts.push(`app opened${app.blank ? ' blank' : ''}${errors ? ` with ${errors} error${errors === 1 ? '' : 's'}` : ' cleanly'}`)
+    parts.push(`app opened${app.blank === true ? ' blank' : ''}${errors ? ` with ${errors} error${errors === 1 ? '' : 's'}` : app.blank === false ? ' cleanly' : '; render check incomplete'}`)
+    if (app.inspectionComplete === false) parts.push('browser inspection incomplete')
   } else if (app?.state === 'unavailable') {
     parts.push('browser unavailable')
   }
   return parts.join(' · ')
+}
+
+// An inconclusive browser probe must not cause a rollback, but it also cannot
+// certify milestone completion. Keep these decisions deliberately separate.
+export function checksAllowCompletion(checks) {
+  if (!checks || breakage(null, checks).length) return false
+  const app = checks.app
+  return app?.state !== 'unavailable' && app?.state !== 'NEEDS-EVIDENCE' && app?.inspectionComplete !== false && (!app?.ran || app.blank === false)
 }
 
 // ─── Git ──────────────────────────────────────────────────────────────────────
@@ -506,8 +515,12 @@ function checkCommands(repo) {
   return commands.length ? { label: labels.join(' + '), commands } : null
 }
 
+// Cached baselines from the old checker may contain the false blank-page
+// observation, or error counts from a different viewport collection strategy.
+export const CHECKS_VERSION = 2
+
 export function runChecks({ repo, label, appEvidenceScript = null, timeoutMs = 600000 }) {
-  const result = { at: new Date().toISOString(), check: { state: 'none', command: null, detail: '' }, app: { state: 'n/a', ran: false } }
+  const result = { version: CHECKS_VERSION, at: new Date().toISOString(), check: { state: 'none', command: null, detail: '' }, app: { state: 'n/a', ran: false } }
   const plan = checkCommands(repo)
   if (plan) {
     result.check.command = plan.label
@@ -533,7 +546,8 @@ export function runChecks({ repo, label, appEvidenceScript = null, timeoutMs = 6
     result.app = {
       state: !summary ? 'unavailable' : summary.evidenceMode === 'unavailable' ? 'unavailable' : summary.gate || 'NEEDS-EVIDENCE',
       ran: Boolean(ran),
-      blank: Boolean(ran && summary.blank),
+      blank: ran && typeof summary.blank === 'boolean' ? summary.blank : null,
+      inspectionComplete: Boolean(ran && summary.inspectionComplete !== false),
       pageErrors: ran ? Number(summary.pageErrorCount || 0) : 0,
       consoleErrors: ran ? Number(summary.consoleErrorCount || 0) : 0,
       notes: clip((summary?.notes || []).join(' '), 400),

@@ -13,10 +13,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { capturedFailureDetail, parseRunsFromLog, resolveClaudeModel, resolveClaudePermissionMode, summarizeRun } from '../../server-core.js'
+import { capturedFailureDetail, parseRunsFromLog, resolveClaudeModel, resolveClaudePermissionMode, resolveCodexReasoningEffort, summarizeRun } from '../../server-core.js'
 import { routeSlugForProject } from '../../server/util.js'
 import {
   breakage,
+  checksAllowCompletion,
+  CHECKS_VERSION,
   checksLine,
   diffStat,
   ideaFor,
@@ -172,7 +174,7 @@ function advanceSession(status, session, review = null) {
   const milestone = milestoneSnapshot(status.repo)
   const newMilestone = Boolean(milestone && milestone.key !== status.lastMilestone?.key && !(status.milestoneHistory || []).some(m => m.key === milestone.key))
   const checks = status.lastSessionChecks
-  const canComplete = checks && !breakage(null, checks).length
+  const canComplete = checksAllowCompletion(checks)
   const next = nextStage({
     stage: session.stage, outcome: session.outcome, briefExists: Boolean(milestone), newMilestone,
     review: review?.ok && canComplete ? review : null,
@@ -217,6 +219,7 @@ const commands = {
       runCount: Math.max(0, Math.floor(Number(status.runCount) || 0)),
       bypass: bypassFor(agent),
       codexModel: status.codexModel || process.env.CODEX_MODEL || '',
+      codexReasoningEffort: resolveCodexReasoningEffort(status.codexReasoningEffort),
       claudeModel: agent === 'claude' || reviewerFor(status, agent) === 'claude' ? resolveClaudeModel(status.claudeModel) : '',
       claudePermissionMode: agent === 'claude' ? resolveClaudePermissionMode(status.claudePermissionMode) : '',
       godotAiEnabled: godot.enabled ? '1' : '',
@@ -252,7 +255,7 @@ const commands = {
     const ratchet = prepareRatchet({ repo, lastGoodCommit: status.lastGoodCommit || null, runNumber })
     let baselineChecks = null
     if (ratchet.ratchet === 'on') {
-      const known = status.lastChecks && status.lastGoodCommit === ratchet.baseline && !ratchet.adopted
+      const known = status.lastChecks?.version === CHECKS_VERSION && status.lastGoodCommit === ratchet.baseline && !ratchet.adopted
       baselineChecks = known ? status.lastChecks : runChecks({ repo, label: `${runNumber}-baseline`, appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
     }
     status.stage = stage
