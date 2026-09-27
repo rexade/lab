@@ -440,6 +440,18 @@ async function main() {
     const sessionStatus = JSON.parse(fs.readFileSync(fixture.freshStatusPath, 'utf8'))
     assert.equal(sessionStatus.lastOutcome, 'no-changes')
     assert.equal(sessionStatus.ratchet, 'on', 'the lab adopted the project folder as a git repo it can revert')
+    assert.match(freshRun.Versions || '', /^[a-f0-9]{40,64}\.\.[a-f0-9]{40,64}$/)
+    const sourceDiff = await fetchJson(baseUrl, '/api/incubators/fresh-slot/runs/1/diff')
+    assert.equal(sourceDiff.response.status, 200)
+    assert.equal(sourceDiff.data.ok, true)
+    assert.equal(sourceDiff.data.patch, '', 'a no-change session has a real empty diff')
+    assert.equal(sourceDiff.data.before, sourceDiff.data.after)
+    assert.equal(sourceDiff.response.headers.get('cache-control'), 'private, no-store')
+    for (const run of ['HEAD', '-1', '0', '1%3Btouch%20tmp', '1..2']) {
+      const invalid = await fetchJson(baseUrl, `/api/incubators/fresh-slot/runs/${run}/diff`)
+      assert.equal(invalid.response.status, 400, 'only a recorded numeric run can select a comparison')
+    }
+    assert.equal((await fetchJson(baseUrl, '/api/incubators/fresh-slot/runs/999/diff')).response.status, 404)
     assert.equal(sessionStatus.stage, 'shaping', 'without a brief the project is still shaping')
     const shapedSlot = (await fetchJson(baseUrl, '/api/incubators')).data.slots.find(slot => slot.id === 'fresh-slot')
     assert.equal(shapedSlot.stage, 'shaping')

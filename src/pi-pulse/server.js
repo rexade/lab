@@ -58,6 +58,7 @@ import {
 } from './server/incubator-store.js'
 import { aiTargetForIncubator, analyzeAiTarget, localLlmStatus, readCachedAiFeedback } from './server/local-ai.js'
 import { globalRunBusy } from './server/run-lock.js'
+import { compareRecordedRun } from './server/version-history.js'
 import { appendSteeringNote, parsedRunsForLog, readLogContent } from './server/run-logs.js'
 import { appendManualPreflightFailure, nextCoreRunNum } from './server/run-receipts.js'
 import { createGeneratedAppWriteGuard, generatedAppSecurityHeaders, requireTrustedWrite } from './server/security.js'
@@ -196,6 +197,7 @@ function hydrateIncubator(slot) {
     lastSession: cfg.lastSession ?? null,
     ratchet: cfg.ratchet ?? null,
     ratchetReason: cfg.ratchetReason ?? null,
+    versionHistoryStartedAt: cfg.versionHistoryStartedAt ?? null,
     lastGoodCommit: cfg.lastGoodCommit ? String(cfg.lastGoodCommit).slice(0, 7) : null,
     lastOutcome: cfg.lastOutcome ?? null,
     lastOutcomeReason: cfg.lastOutcomeReason ?? null,
@@ -450,6 +452,22 @@ app.get('/api/incubators/:id/runs', (req, res) => {
       error: err.message,
       statusPath: slot.statusPath,
     })
+  }
+})
+
+app.get('/api/incubators/:id/runs/:run/diff', (req, res) => {
+  const slot = readIncubators().slots.find(s => s.id === req.params.id)
+  if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  if (!/^[1-9][0-9]{0,8}$/.test(req.params.run)) return res.status(400).json({ ok: false, error: 'invalid run number' })
+  try {
+    const cfg = readStatusAt(slot.statusPath)
+    const run = parsedRunsForLog(cfg.runLog).findLast(item => Number(item.num) === Number(req.params.run))
+    if (!run) return res.status(404).json({ ok: false, error: 'iteration not found' })
+    const result = compareRecordedRun(cfg.repo, run)
+    res.set('Cache-Control', 'private, no-store')
+    res.status(result.ok ? 200 : 404).json(result)
+  } catch {
+    res.status(500).json({ ok: false, error: 'iteration history unavailable' })
   }
 })
 

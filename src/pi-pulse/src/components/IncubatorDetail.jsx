@@ -353,6 +353,7 @@ function RunnerDetails({ slot, preflight }) {
     slot.runner === 'claude' ? ['Model', `${slot.claudeModel || setup?.model || 'CLI default'} (falls back to sonnet)`] : ['Model', `${slot.codexModel || 'Codex default'} · ${slot.codexReasoningEffort || 'high'} reasoning`],
     slot.runner === 'claude' ? ['Permissions', setup?.permissionMode || 'auto'] : ['Sandbox', 'workspace-write (project only)'],
     ['Version control', slot.ratchet === 'off' ? `off: ${slot.ratchetReason || 'unavailable'}` : slot.lastGoodCommit ? `on · last good ${slot.lastGoodCommit}` : 'starts with the first session'],
+    ['Local history', slot.versionHistoryStartedAt ? `Baseline recorded ${new Date(slot.versionHistoryStartedAt).toLocaleDateString()}; separate from GitHub promotion` : null],
     ['Launcher', slot.launcher ? shortPath(slot.launcher) : null],
     ['Repo', slot.repo],
     ['Run log', slot.runLog ? shortPath(slot.runLog) : null],

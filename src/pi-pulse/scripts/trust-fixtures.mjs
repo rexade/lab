@@ -30,7 +30,8 @@ import {
 } from '../src/lib/runSignals.js'
 import { incubatorLauncherScript } from '../server/incubator-templates.js'
 import { staleSourceRestartPlan, validateSourceForRestart } from '../server/service-health.js'
-import { breakage, checksAllowCompletion, checksLine, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview, milestoneSnapshot, runChecks } from './lib/session.mjs'
+import { breakage, checksAllowCompletion, checksLine, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview, milestoneSnapshot, runChecks, runFields, saveRejectedVersion } from './lib/session.mjs'
+import { compareRecordedRun, recordedVersions } from '../server/version-history.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
@@ -1402,6 +1403,58 @@ function testCodexReasoningEffortOverrides() {
   }
 }
 
+function testIterationVersionsPreserveKeptAndRejectedWork() {
+  const fx = runnerFixture('iteration-versions')
+  fs.writeFileSync(join(fx.repo, '.env'), 'secret-that-must-not-be-committed')
+  session(fx)
+  const kept = { num: 4, ...runFields(fs.readFileSync(fx.runLog, 'utf8'), 4) }
+  assert.ok(recordedVersions(kept))
+  const good = compareRecordedRun(fx.repo, kept)
+  assert.equal(good.ok, true)
+  assert.match(good.patch, /Harbor v1/)
+  assert.ok(!good.patch.includes('secret-that-must-not-be-committed'))
+  assert.ok(!good.patch.includes('reports/RUN_LOG.md'))
+  assert.ok(fx.status().versionHistoryStartedAt)
+  const oldStyle = compareRecordedRun(fx.repo, { num: 4, Outcome: `kept · ${good.after.slice(0, 7)}` })
+  assert.equal(oldStyle.ok, true, 'old kept commits remain inspectable')
+  assert.equal(oldStyle.patch, good.patch)
+
+  session(fx, { FAKE_MODE: 'break' })
+  const rejected = { num: 5, ...runFields(fs.readFileSync(fx.runLog, 'utf8'), 5) }
+  const broken = compareRecordedRun(fx.repo, rejected)
+  assert.equal(fx.status().lastOutcome, 'reverted')
+  assert.equal(broken.ok, true)
+  assert.match(broken.patch, /oops/)
+  assert.match(broken.patch, /stray.txt/, 'new untracked candidate files survive in the source snapshot')
+  assert.equal(fx.git('rev-parse', 'HEAD'), good.after, 'capturing rejected work does not change the kept product')
+  assert.equal(fx.git('rev-parse', 'refs/pi-pulse/candidates/run-5'), broken.after, 'rejected source remains reachable after rollback')
+  assert.ok(!fs.existsSync(join(fx.repo, 'stray.txt')))
+
+  session(fx, { FAKE_MODE: 'fail' })
+  const failed = compareRecordedRun(fx.repo, { num: 6, ...runFields(fs.readFileSync(fx.runLog, 'utf8'), 6) })
+  assert.equal(failed.ok, true)
+  assert.match(failed.patch, /half-done/)
+  assert.equal(fx.git('rev-parse', 'HEAD'), good.after)
+  session(fx, { FAKE_MODE: 'idle' })
+  const idle = compareRecordedRun(fx.repo, { num: 7, ...runFields(fs.readFileSync(fx.runLog, 'utf8'), 7) })
+  assert.equal(idle.ok, true)
+  assert.equal(idle.patch, '')
+
+  assert.equal(recordedVersions({ Versions: 'HEAD..--output=/tmp/no' }), null)
+  assert.equal(compareRecordedRun(fx.repo, { num: 1, Outcome: 'kept' }).ok, false, 'missing history is not invented')
+  const child = join(fx.repo, 'nested')
+  fs.mkdirSync(child)
+  assert.equal(compareRecordedRun(child, kept).ok, false, 'a parent repository is never exposed')
+  const head = fx.git('rev-parse', 'HEAD')
+  fs.writeFileSync(join(fx.repo, 'new.txt'), 'unverified')
+  const beforeIndex = fx.git('diff', '--cached')
+  const candidate = saveRejectedVersion(fx.repo, head, 8)
+  assert.ok(candidate)
+  assert.equal(fx.git('rev-parse', 'HEAD'), head)
+  assert.equal(fx.git('diff', '--cached'), beforeIndex, 'snapshotting never modifies the real index')
+  assert.equal(fs.readFileSync(join(fx.repo, 'new.txt'), 'utf8'), 'unverified', 'snapshotting is not a rollback')
+}
+
 function testLegacyBrowserBaselinesAreRechecked() {
   const fx = runnerFixture('legacy-browser-baseline')
   session(fx)
@@ -1871,6 +1924,7 @@ const tests = [
   testProjectsMoveFromShapingToDone,
   testSessionPureRules,
   testCodexReasoningEffortOverrides,
+  testIterationVersionsPreserveKeptAndRejectedWork,
   testLegacyBrowserBaselinesAreRechecked,
   testUnifiedRunnerFailsVisiblyOnBadInput,
   testCorruptIncubatorsFileIsNeverOverwritten,

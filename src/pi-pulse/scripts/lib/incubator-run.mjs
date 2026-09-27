@@ -34,6 +34,7 @@ import {
   reviewLine,
   reviewPrompt,
   revertSession,
+  saveRejectedVersion,
   runChecks,
   runFields,
   sessionPrompt,
@@ -262,6 +263,7 @@ const commands = {
     status.polishSessions = 0
     status.ratchet = ratchet.ratchet
     status.ratchetReason = ratchet.reason || null
+    if (ratchet.ratchet === 'on' && !status.versionHistoryStartedAt) status.versionHistoryStartedAt = new Date().toISOString()
     status.session = {
       run: Number(runNumber),
       startedAt: new Date().toISOString(),
@@ -335,11 +337,13 @@ const commands = {
     let reason = ''
     let checks = null
     let commit = null
+    let comparedVersion = null
 
     if (!agentOk) {
       outcome = 'failed'
       reason = agentExit === '124' || agentExit === '137' ? `${agent} ran out of time` : `${agent} exited ${agentExit}`
       if (ratchetOn && productChanged(repo, session.baseline)) {
+        comparedVersion = saveRejectedVersion(repo, session.baseline, run)
         const reverted = revertSession(repo, session.baseline)
         reason += reverted.ok ? '; its changes were discarded' : `; its changes could not be discarded (${reverted.error})`
       }
@@ -351,6 +355,7 @@ const commands = {
       checks = runChecks({ repo, label: String(run), appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
       const problems = breakage(session.baselineChecks, checks)
       if (problems.length && ratchetOn) {
+        comparedVersion = saveRejectedVersion(repo, session.baseline, run)
         const reverted = revertSession(repo, session.baseline)
         outcome = 'reverted'
         reason = problems.join('; ') + (reverted.ok ? '' : ` (revert incomplete: ${reverted.error})`)
@@ -367,10 +372,14 @@ const commands = {
     const outcomeText = outcome === 'kept'
       ? `kept${commit ? ` · ${commit.slice(0, 7)}` : ''}${reason ? ` — ${reason}` : ''}`
       : outcome === 'no-changes' ? 'no changes' : `${outcome} — ${reason}`
+    if (ratchetOn) comparedVersion ||= commit || (outcome === 'no-changes' ? session.baseline : null)
     try {
       writeTextAtomic(status.runLog, insertIntoRunSection(readText(status.runLog), run, [
         checks ? `**Checks:** ${checksLine(checks)}` : null,
         `**Outcome:** ${outcomeText}`,
+        comparedVersion ? `**Versions:** ${session.baseline}..${comparedVersion}` : null,
+        comparedVersion && session.baselineChecks?.app?.evidence ? `**Before preview:** ${session.baselineChecks.app.evidence}` : null,
+        comparedVersion && checks?.app?.evidence ? `**After preview:** ${checks.app.evidence}` : null,
         `**Ended:** ${new Date().toISOString()}`,
       ], { date: today, type: agentOk ? session.type : 'FAILED' }))
     } catch (err) {

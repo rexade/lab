@@ -21,6 +21,12 @@ Browser previews show fresh desktop and phone opening states; after-action scree
 
 Newly created projects get their own Git repository, even under a parent checkout, so session commits and rollback do not operate on the parent or become disabled. Imported/existing folders are not automatically reinitialized.
 
+Local iteration history is not GitHub promotion. Each experiment may keep a private local repository without publishing anything; only products the owner selects for promotion get a remote. The Pi Pulse repository contains the platform, not the generated app sources. Git on the Pi is not an off-device backup.
+
+Sessions record baseline/candidate commit IDs in `RUN_LOG.md`. Run history exposes a read-only **Compare changes** view with the source diff and available before/after browser captures. Old kept commits remain comparable using their actual parent; missing historical versions are explicitly unavailable. A baseline created later does not reconstruct earlier iterations.
+
+Rejected/failed candidates get a source snapshot under `refs/pi-pulse/candidates/run-N` before rollback. Snapshotting uses a temporary Git index, does not move HEAD, and retains new candidate files for inspection. Reports, browser artifacts, dependencies and common credential files are omitted from source comparisons. No automatic push or remote creation occurs. Backup tooling must include all refs if rejected candidates are to be retained off-device.
+
 Prompt design keeps explicit initiative, constraints and useful product memory. It is informed by [OpenAI's Astra prompt guidance](https://developers.openai.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra), not a claim that any workflow is universally optimal.
 
 Verification: `npm run build` runs real-runner fixtures with fake agents and temporary Git repos, UI contracts, live HTTP/auth smoke tests, then Vite. Fixtures cover multi-session milestones, second milestones, restart persistence, repeated-goal protection, failed reviews, no-change completion, finite vs ongoing scheduling and fair due ordering.

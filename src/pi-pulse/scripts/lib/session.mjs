@@ -10,6 +10,7 @@
 // helpers shell out and never throw (a broken repo turns the ratchet off).
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 
@@ -23,7 +24,7 @@ export const projectRests = (status = {}) => status.stage === 'done' && lifecycl
 const LAB_GIT = ['-c', 'user.name=Pi Pulse lab', '-c', 'user.email=lab@pi-pulse.local', '-c', 'commit.gpgsign=false']
 // Caches and lab artifacts stay out of commits (local .git/info/exclude only;
 // the project's own .gitignore is never edited).
-const LAB_EXCLUDES = ['reports/stdout/', 'reports/evidence/', 'node_modules/', '__pycache__/', '*.pyc', '.venv/', 'venv/', '.pytest_cache/', '.mypy_cache/', '.cache/', '.DS_Store']
+const LAB_EXCLUDES = ['reports/stdout/', 'reports/evidence/', 'reports/screenshots/', 'node_modules/', '__pycache__/', '*.pyc', '.venv/', 'venv/', '.pytest_cache/', '.mypy_cache/', '.cache/', '.tmp/', 'test-results/', 'playwright-report/', '.DS_Store', '.env', '.env.*', '.npmrc', '*.pem', '*.key']
 // reports/ holds the lab's own history (run log, notes, reviews): it survives reverts.
 const OUTSIDE_REPORTS = ['--', '.', ':(exclude)reports']
 
@@ -388,7 +389,7 @@ export function checksAllowCompletion(checks) {
 // ─── Git ──────────────────────────────────────────────────────────────────────
 
 function git(repo, args, options = {}) {
-  const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8', timeout: options.timeout ?? 60000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+  const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8', timeout: options.timeout ?? 60000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', ...options.env } })
   return {
     ok: result.status === 0,
     out: String(result.stdout || '').trim(),
@@ -484,6 +485,27 @@ export function diffStat(repo, baseline) {
 export function keepSession(repo, message) {
   if (!commitAll(repo, message)) return null
   return headCommit(repo)
+}
+
+// Preserve rejected work for inspection without moving HEAD, changing the
+// real index or treating it as a kept product version. A private local ref
+// keeps the object reachable after rollback and garbage collection.
+export function saveRejectedVersion(repo, baseline, runNumber) {
+  if (!Number.isSafeInteger(Number(runNumber)) || Number(runNumber) < 1 || !/^[a-f0-9]{40,64}$/.test(baseline || '')) return null
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-pulse-candidate-index-'))
+  const env = { GIT_INDEX_FILE: path.join(dir, 'index') }
+  const run = args => git(repo, args, { env })
+  try {
+    if (!run(['read-tree', baseline]).ok || !run(['add', '-A', ...OUTSIDE_REPORTS]).ok) return null
+    const tree = run(['write-tree'])
+    if (!tree.ok) return null
+    const snapshot = run([...LAB_GIT, 'commit-tree', tree.out, '-p', baseline, '-m', `Rejected candidate for run ${runNumber} (not the kept product)`])
+    if (!snapshot.ok) return null
+    const retained = run(['update-ref', `refs/pi-pulse/candidates/run-${runNumber}`, snapshot.out])
+    return retained.ok ? snapshot.out : null
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 // Back to the baseline, except reports/: the lab's history of the session

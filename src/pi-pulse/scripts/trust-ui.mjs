@@ -88,6 +88,20 @@ const failedRuns = [
 ]
 
 const tests = {
+  'iteration comparisons distinguish real snapshots from missing history'() {
+    const runs = [
+      { num: 1, type: 'BUILD', Outcome: 'kept', 'What changed': 'Legacy work' },
+      { num: 2, type: 'BUILD', Outcome: 'kept · abc1234', 'What changed': 'Saved work' },
+      { num: 3, type: 'BUILD', Outcome: 'reverted — failed check', Versions: `${'a'.repeat(40)}..${'b'.repeat(40)}` },
+    ]
+    const html = render(ui.RunTimeline, { slotId: 'proj', runs })
+    includes(html, 'data-source-comparison="2"', 'a kept commit can be inspected')
+    includes(html, 'data-source-comparison="3"', 'a rejected snapshot can be inspected')
+    assert.ok(!html.includes('data-source-comparison="1"'))
+    includes(html, 'No source snapshot recorded for this iteration.', 'historical gaps are explicit')
+    includes(html, 'Compare changes', 'comparison is directly accessible in run history')
+  },
+
   'the newest failure is open by default and shows the command error'() {
     const html = render(ui.RunTimeline, { runs: failedRuns, slotId: 'proj' })
     includes(html, 'data-run-type="FAILED" data-detail-open="true"', 'the newest FAILED row must not need a click')

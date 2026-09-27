@@ -46,6 +46,10 @@ export function runAttemptText(run = {}) {
   return run.attemptTotal > 1 && run.attempt ? `attempt ${run.attempt}/${run.attemptTotal}` : ''
 }
 
+export function hasSourceComparison(run = {}) {
+  return /^[a-f0-9]{40,64}\.\.[a-f0-9]{40,64}$/i.test(String(run.Versions || '').trim()) || /^kept\s*·\s*[a-f0-9]{7,64}(?:\s|$)/i.test(String(run.Outcome || ''))
+}
+
 // The most telling line of a failure: the command error when there is one.
 export function failureSignal(detail = '') {
   const lines = String(detail).split('\n').map(line => line.trim()).filter(Boolean)

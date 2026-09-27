@@ -2,9 +2,11 @@ import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { clip, fmtRelativeDay } from '../lib/format.js'
 import { OUTCOME } from '../lib/incubator.js'
+import { fetchApiJson } from '../lib/api.js'
 import {
   defaultOpenRunKey,
   failureHeadline,
+  hasSourceComparison,
   RUN_TYPE_COLOR,
   runAttemptText,
   runHistorySummary,
@@ -13,7 +15,7 @@ import {
   timelineRuns,
 } from '../lib/runHistory.js'
 import { runHistoryKey } from '../lib/runSignals.js'
-import { Chip, Eyebrow } from './ui.jsx'
+import { Chip, Eyebrow, Segmented } from './ui.jsx'
 
 const GATE_TONE = { PASS: 'ok', 'NEEDS-EVIDENCE': 'warn', FAIL: 'fail' }
 
@@ -25,7 +27,57 @@ function gateOf(run) {
   return null
 }
 
-export function RunRow({ run, runKey, open, onToggle, last }) {
+export function SourceComparison({ slotId, run }) {
+  const [open, setOpen] = useState(false)
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [viewport, setViewport] = useState('desktop')
+  const toggle = async () => {
+    setOpen(!open)
+    if (open || result || loading) return
+    setLoading(true)
+    setError(null)
+    try {
+      const { response, data } = await fetchApiJson(`/api/incubators/${encodeURIComponent(slotId)}/runs/${run.num}/diff`)
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Source comparison unavailable')
+      setResult(data)
+    } catch (err) { setError(err.message) }
+    finally { setLoading(false) }
+  }
+  const previews = Object.entries(result?.previews || {}).filter(([, value]) => value)
+  return (
+    <div className="mt-3" data-source-comparison={run.num}>
+      <button type="button" className="focus-ring rounded-lg border border-white/10 px-3 py-1.5 text-[12px] text-fg2 hover:bg-white/5" onClick={toggle} aria-expanded={open}>
+        {open ? 'Hide comparison' : 'Compare changes'}
+      </button>
+      {open && <div className="mt-3 rounded-xl border border-white/10 bg-black/25 p-3">
+        {loading && <p className="text-[13px] text-fg3" role="status">Reading saved versions…</p>}
+        {error && <p className="text-[13px] text-fail" role="alert">{error}</p>}
+        {result && <>
+          <p className="text-[12px] text-fg3">Local source history · <span className="font-mono">{result.before.slice(0, 7)} → {result.after.slice(0, 7)}</span></p>
+          <p className="mt-1 text-[12px] text-fg4">{result.outcome}. Changed lines show what happened, not whether it was valuable.</p>
+          {previews.length > 0 && <div className="my-3">
+            <Segmented size="sm" ariaLabel={`Preview size for run ${run.num}`} options={[{ value: 'desktop', label: 'Desktop' }, { value: 'mobile', label: 'Phone' }]} value={viewport} onChange={setViewport} />
+            <div className="mt-2 grid gap-3 sm:grid-cols-2">
+              {previews.map(([side, preview]) => preview.shots.includes(`${viewport}.png`) && <figure key={side}>
+                <figcaption className="mb-1 text-[12px] text-fg3">{side === 'before' ? 'Before' : /^(failed|reverted)/.test(result.outcome) ? 'Rejected candidate' : 'After'} · fresh browser</figcaption>
+                <a href={`/api/incubators/${encodeURIComponent(slotId)}/evidence/${preview.evidence}/${viewport}.png`} target="_blank" rel="noreferrer">
+                  <img alt={`${side} run ${run.num} (${viewport})`} src={`/api/incubators/${encodeURIComponent(slotId)}/evidence/${preview.evidence}/${viewport}.png`} className="max-h-80 w-full rounded-lg object-cover object-top" loading="lazy" />
+                </a>
+              </figure>)}
+            </div>
+          </div>}
+          <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap break-words text-[12px] text-fg3">{result.summary || 'No product source changes between these versions.'}</pre>
+          {result.patch && <pre className="mt-3 max-h-[440px] overflow-auto rounded-lg bg-black/40 p-3 font-mono text-[11px] leading-relaxed text-fg2" data-source-patch={run.num}>{result.patch}</pre>}
+          {result.truncated && <p className="mt-2 text-[12px] text-warn">Large comparison shortened for display. Full source versions remain in the local repository.</p>}
+        </>}
+      </div>}
+    </div>
+  )
+}
+
+export function RunRow({ run, runKey, open, onToggle, last, slotId }) {
   const failed = run.type === 'FAILED'
   const color = RUN_TYPE_COLOR[run.type] || 'rgba(148,163,184,0.7)'
   const summary = failed ? failureHeadline(runHistorySummary(run)) : runHistorySummary(run)
@@ -78,6 +130,9 @@ export function RunRow({ run, runKey, open, onToggle, last }) {
             </AnimatePresence>
           </div>
         )}
+        {slotId && (hasSourceComparison(run)
+          ? <SourceComparison slotId={slotId} run={run} />
+          : <p className="mt-2 text-[12px] text-fg4">No source snapshot recorded for this iteration.</p>)}
       </div>
     </li>
   )
@@ -111,10 +166,9 @@ export function RunTimeline({ runs = [], slotId, error = null, limit = 8 }) {
       <ol>
         {visible.map((run, index) => {
           const key = runHistoryKey(slotId, run, index)
-          return <RunRow key={key} run={run} runKey={key} open={isOpen(key)} onToggle={() => toggle(key)} last={index === visible.length - 1} />
+          return <RunRow key={key} run={run} runKey={key} slotId={slotId} open={isOpen(key)} onToggle={() => toggle(key)} last={index === visible.length - 1} />
         })}
       </ol>
     </div>
   )
 }
-
