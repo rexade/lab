@@ -30,6 +30,7 @@ import {
 import { incubatorLauncherScript } from '../server/incubator-templates.js'
 import { staleSourceRestartPlan, validateSourceForRestart } from '../server/service-health.js'
 import { breakage, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview } from './lib/session.mjs'
+import { commitHeadline } from './lib/incubator-run.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
@@ -1320,6 +1321,12 @@ function testSessionPureRules() {
   const log = '# Run Log\n\n## Run 4 - d - BUILD\n\n**Goal:** g\n\n## User Feedback - x\n\n**Steering:** s\n'
   assert.match(insertIntoRunSection(log, 4, ['**Outcome:** kept']), /\*\*Goal:\*\* g\n\*\*Outcome:\*\* kept\n\n## User Feedback/, "harness fields land in the session's own section")
   assert.deepEqual(parseBrief('# X\n## What it is\nA game.\n## Done means\n- [x] one\n- [ ] two\n').done, [{ text: 'one', checked: true }, { text: 'two', checked: false }])
+  // From a real session's "What changed", which used to become a title cut mid-sentence.
+  assert.equal(commitHeadline('Created the project from scratch (folder only had reports/ before this): wrote BRIEF.md, a self-contained index.html'), 'Created the project from scratch')
+  assert.equal(commitHeadline('The Anchor Guard now shows its wind-up a turn early, with what to do about it and why that matters for new players.'), 'The Anchor Guard now shows its wind-up a turn early, with what…')
+  assert.equal(commitHeadline('good pass on the harbor'), 'good pass on the harbor')
+  assert.equal(commitHeadline('Polish: tightened the copy on the first screen'), 'Polish: tightened the copy on the first screen', 'a short lead-in is not the whole title')
+  assert.equal(commitHeadline('Added hints on the first screen, e.g. what to press. Also fixed the timer.'), 'Added hints on the first screen, e.g. what to press')
 }
 
 function testUnifiedRunnerFailsVisiblyOnBadInput() {
