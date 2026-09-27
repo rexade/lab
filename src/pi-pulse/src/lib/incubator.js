@@ -30,12 +30,14 @@ export function preflightProblems(preflight) {
 // A project's life: the lab moves it forward, nobody has to.
 export const STAGE_STEPS = [
   { key: 'shaping', label: 'Shaping', type: 'SHAPE', blurb: 'turning the idea into a brief and a first version' },
-  { key: 'building', label: 'Building', type: 'BUILD', blurb: 'working toward what the brief says done means' },
+  { key: 'building', label: 'Building', type: 'BUILD', blurb: 'working toward the current milestone across as many sessions as needed' },
   { key: 'polishing', label: 'Polishing', type: 'POLISH', blurb: 'no new features: clearer, sturdier, simpler' },
-  { key: 'done', label: 'Done', type: 'POLISH', blurb: 'meets its brief; resting until a note wakes it' },
+  { key: 'done', label: 'Milestone complete', type: 'DEVELOP', blurb: 'reviewed milestone complete; the next session develops the next worthwhile improvement' },
 ]
 
 export function stageOf(slot = {}) {
+  if (slot.stage === 'advancing') return { key: 'advancing', label: 'Next milestone', type: 'DEVELOP', index: 0 }
+  if (slot.stage === 'done' && slot.lifecycle === 'finite') return { key: 'done', label: 'Done', type: 'POLISH', index: 3 }
   const index = Math.max(0, STAGE_STEPS.findIndex(step => step.key === slot.stage))
   return { ...STAGE_STEPS[index], index }
 }
@@ -89,7 +91,7 @@ export function slotState(slot = {}, { preflight = null, now = Date.now() } = {}
   if (!slot.enabled && slot.schedulePauseReason) {
     return { kind: 'paused', tone: 'warn', label: 'Autopilot paused', detail: clip(slot.schedulePauseReason.replace(/^schedule paused:\s*/i, ''), 160) }
   }
-  if (slot.stage === 'done') {
+  if (slot.stage === 'done' && slot.lifecycle === 'finite') {
     return { kind: 'resting', tone: 'ok', label: 'Done', detail: 'resting until a note wakes it' }
   }
   if (slot.enabled) {
@@ -151,7 +153,7 @@ export function runsOnDay(runsBySlot = {}, day = localDay()) {
 export function upcomingSchedule(slots = [], now = Date.now(), windowMs = 6 * 3600 * 1000) {
   const out = []
   for (const slot of slots) {
-    if (!slot.enabled || slot.stage === 'done') continue
+    if (!slot.enabled || (slot.stage === 'done' && slot.lifecycle === 'finite')) continue
     const intervalMs = Math.max(0.25, Number(slot.intervalHours) || 0.5) * 3600 * 1000
     let at = Math.max(timeValue(slot.nextRunAt) || now, now)
     let first = true
@@ -185,7 +187,7 @@ export function awayDigest(slots = [], runsBySlot = {}, since = 0) {
   }
   items.sort((a, b) => b.ended - a.ended)
   const count = key => items.filter(item => item.outcome === key).length
-  const finished = slots.filter(slot => slot.stage === 'done' && timeValue(slot.lastOutcomeAt) > since).map(slotName)
+  const finished = slots.filter(slot => slot.stage === 'done' && slot.lifecycle === 'finite' && timeValue(slot.lastOutcomeAt) > since).map(slotName)
   return { items, total: items.length, kept: count('kept'), reverted: count('reverted'), failed: count('failed'), finished }
 }
 

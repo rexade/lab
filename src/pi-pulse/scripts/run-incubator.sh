@@ -60,6 +60,7 @@ RECENT_FILE=${CFG[recentRuns]}
 BYPASS=${CFG[bypass]}
 CLAUDE_MODEL=${CFG[claudeModel]}
 CODEX_MODEL=${CFG[codexModel]}
+CODEX_REASONING_EFFORT=${CFG[codexReasoningEffort]}
 
 # Refuse to run when the disk is nearly full — a wedged run can otherwise fill
 # the SD card and take down every service on the Pi.
@@ -156,6 +157,7 @@ if [ "$AGENT" = "claude" ]; then
   AGENT_ARGS=("${CLAUDE_ARGS[@]}")
 else
   CODEX_ARGS=(exec -C "$PROJECT_DIR" --color never)
+  CODEX_ARGS+=(-c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"")
   if [ -n "$BYPASS" ]; then
     CODEX_ARGS+=("--dangerously-bypass-approvals-and-sandbox")
   else
@@ -242,6 +244,7 @@ if [ "${END[review]:-0}" = "1" ]; then
     REVIEW_OUTPUT=$(timeout -k 30 "$REVIEW_TIMEOUT" "$REVIEW_BIN" "${REVIEW_ARGS[@]}" 2>>"$REVIEW_LOG") || REVIEW_EXIT=$?
   elif [ "$REVIEWER" = "codex" ] && REVIEW_BIN=$(resolve_codex_bin); then
     REVIEW_ARGS=(exec -C "$PROJECT_DIR" --color never --sandbox read-only)
+    REVIEW_ARGS+=(-c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"")
     [ -n "$CODEX_MODEL" ] && REVIEW_ARGS+=(--model "$CODEX_MODEL")
     REVIEW_OUTPUT=$(timeout -k 30 "$REVIEW_TIMEOUT" "$REVIEW_BIN" "${REVIEW_ARGS[@]}" "$REVIEW_PROMPT" 2>>"$REVIEW_LOG") || REVIEW_EXIT=$?
   else

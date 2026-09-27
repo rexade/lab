@@ -4,8 +4,8 @@ import express from 'express'
 import fs from 'fs'
 import { spawn } from 'child_process'
 import { basename, dirname, join, resolve } from 'path'
-import { firstRunnableClaudeModel, preflightFailureDetail, runsWithPinnedLatestFailure } from './server-core.js'
-import { currentStage, parseBrief, STAGE_TYPE } from './scripts/lib/session.mjs'
+import { firstRunnableClaudeModel, preflightFailureDetail, resolveCodexReasoningEffort, runsWithPinnedLatestFailure } from './server-core.js'
+import { currentStage, sessionStage, lifecycleOf, parseBrief, milestoneSnapshot, STAGE_TYPE } from './scripts/lib/session.mjs'
 import {
   CORE_FEEDBACK_JSON,
   CORE_FEEDBACK_MD,
@@ -164,7 +164,8 @@ function hydrateIncubator(slot) {
   const claudeRelayScript = claudeSetup.script || claudeSetup.expectedScript || cfg.claudeRunScript || null
   const brief = readBrief(cfg.repo)
   const stage = currentStage(cfg, brief.exists)
-  const nextStage = stage === 'done' ? 'polishing' : stage
+  const nextStage = sessionStage(cfg, brief.exists)
+  const milestone = milestoneSnapshot(cfg.repo)
   return {
     ...slot,
     project: cfg.project,
@@ -187,6 +188,10 @@ function hydrateIncubator(slot) {
     polishSessions: cfg.polishSessions ?? 0,
     nextRunType: STAGE_TYPE[nextStage],
     brief,
+    lifecycle: lifecycleOf(cfg),
+    milestone: milestone ? { ...milestone, ...parseBrief(fs.readFileSync(join(cfg.repo, milestone.source), 'utf8')) } : null,
+    milestoneCount: Number(cfg.milestoneCount || 0),
+    milestoneHistory: (cfg.milestoneHistory || []).slice(-5),
     session: cfg.session ? { run: cfg.session.run, stage: cfg.session.stage, type: cfg.session.type, startedAt: cfg.session.startedAt, ratchet: cfg.session.ratchet } : null,
     lastSession: cfg.lastSession ?? null,
     ratchet: cfg.ratchet ?? null,
@@ -214,6 +219,7 @@ function hydrateIncubator(slot) {
     repairedRunnerConfig: repaired ? 'claude' : null,
     claudeModel: firstRunnableClaudeModel(cfg.claudeModel) ?? null,
     codexModel: cfg.codexModel ?? null,
+    codexReasoningEffort: resolveCodexReasoningEffort(cfg.codexReasoningEffort),
     current_focus: cfg.current_focus ?? null,
     notes: cfg.notes ?? null,
     feedbackPath: projectFeedbackPath(cfg),
@@ -587,7 +593,7 @@ app.post('/api/incubators/:id/feedback', requireFreshSource, (req, res) => {
     cfg.feedbackUpdatedAt = stamp
     // A note on a finished project is a new request: it goes back to building.
     if (cfg.stage === 'done' || cfg.stage === 'polishing') {
-      cfg.stage = 'building'
+      cfg.stage = cfg.stage === 'done' && lifecycleOf(cfg) !== 'finite' ? 'advancing' : 'building'
       cfg.polishSessions = 0
     }
     slot.restingSince = null

@@ -2,6 +2,7 @@ import { runHistoryKey } from './runSignals.js'
 
 export const RUN_TYPE_COLOR = {
   SHAPE: '#22d3ee',
+  DEVELOP: '#34d399',
   BUILD: '#a78bfa',
   POLISH: '#fbbf24',
   CREATE: '#22d3ee',
@@ -11,7 +12,7 @@ export const RUN_TYPE_COLOR = {
   FAILED: '#f87171',
 }
 
-const SESSION_TYPES = ['SHAPE', 'BUILD', 'POLISH']
+const SESSION_TYPES = ['SHAPE', 'DEVELOP', 'BUILD', 'POLISH']
 
 const SUMMARY_FIELDS = [
   'Failure',

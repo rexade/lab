@@ -467,7 +467,7 @@ async function main() {
       body: JSON.stringify({ feedback: 'add a night mode' }),
     })
     assert.equal(woke.response.status, 200)
-    assert.equal(woke.data.slot.stage, 'building', 'a note wakes a finished project back into building')
+    assert.equal(woke.data.slot.stage, 'advancing', 'a note on a completed product milestone steers its next milestone')
     assert.equal(JSON.parse(fs.readFileSync(fixture.freshStatusPath, 'utf8')).polishSessions, 0)
 
     fs.writeFileSync(join(fixture.freshRepo, 'index.html'), '<!doctype html><title>Fresh Slot Play</title><h1>fresh static app</h1>\n')

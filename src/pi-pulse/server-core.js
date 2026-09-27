@@ -124,6 +124,11 @@ export function firstRunnableClaudeModel(...candidates) {
   return candidates.find(model => isRunnableClaudeModel(model)) || null
 }
 
+export function resolveCodexReasoningEffort(saved, env = process.env) {
+  const value = saved || env.PI_PULSE_CODEX_REASONING_EFFORT || 'high'
+  return ['low', 'medium', 'high', 'xhigh', 'max'].includes(value) ? value : 'high'
+}
+
 export function resolveClaudeModel(saved, env = process.env) {
   return firstRunnableClaudeModel(saved, env.CLAUDE_MODEL, env.DEFAULT_CLAUDE_MODEL, env.PI_PULSE_DEFAULT_CLAUDE_MODEL, SAFE_CLAUDE_MODEL)
 }
@@ -691,7 +696,7 @@ export function parseRunsFromLog(content, options = {}) {
 function isRecoveredAfterFailure(run) {
   if (!run || run.type === 'FAILED') return false
   const gate = String(run['Quality gate'] || '').toUpperCase()
-  return gate === 'PASS' || ['CREATE', 'MUTATE', 'RESEARCH', 'HARVEST', 'SHAPE', 'BUILD', 'POLISH'].includes(run.type)
+  return gate === 'PASS' || ['CREATE', 'MUTATE', 'RESEARCH', 'HARVEST', 'SHAPE', 'DEVELOP', 'BUILD', 'POLISH'].includes(run.type)
 }
 
 function shouldPinFailure(runs = [], failure, recent) {

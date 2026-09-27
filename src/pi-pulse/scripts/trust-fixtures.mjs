@@ -16,6 +16,7 @@ import {
   qualityStateFromRun,
   resolveClaudeModel,
   resolveClaudePermissionMode,
+  resolveCodexReasoningEffort,
   runsWithPinnedLatestFailure,
 } from '../server-core.js'
 import {
@@ -29,7 +30,7 @@ import {
 } from '../src/lib/runSignals.js'
 import { incubatorLauncherScript } from '../server/incubator-templates.js'
 import { staleSourceRestartPlan, validateSourceForRestart } from '../server/service-health.js'
-import { breakage, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview } from './lib/session.mjs'
+import { breakage, checksAllowCompletion, checksLine, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview, milestoneSnapshot, runChecks } from './lib/session.mjs'
 import { commitHeadline } from './lib/incubator-run.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -316,6 +317,20 @@ function testFreshIncubatorsHaveGenericClaudeRunner() {
   assertIncludes(script, 'Full stdout saved to $STDOUT_FILE', 'generic Claude runner should preserve stdout for run history detail')
   assertIncludes(script, 'CLAUDE_ARGS=(-p "$FULL_PROMPT")', 'generic Claude runner should build model args from repaired status')
   assertIncludes(script, '${CLAUDE_BIN:-$(command -v claude || true)}', 'generic Claude runner should honor the same configured binary as preflight')
+}
+
+function testNewIncubatorInsideParentGetsOwnHistory() {
+  const dir = tempDir('new-project-history')
+  assert.equal(spawnSync('git', ['init', '-q', dir]).status, 0)
+  const created = runInLab(dir, `
+    const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
+    console.log(JSON.stringify(store.createIncubatorProjectFromIdea('A lasting calm game', 'Quiet Water')))
+  `)
+  assert.equal(created.ok, true)
+  assert.equal(created.status.lifecycle, 'product')
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: created.status.repo, encoding: 'utf8' })
+  assert.equal(top.stdout.trim(), created.status.repo, 'new projects never inherit the parent repository as their history')
+  assert.equal(spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { cwd: dir, encoding: 'utf8' }).status, 128, 'the parent repo is not committed or changed')
 }
 
 function testExistingIncubatorsNormalizeClaudeRelayState() {
@@ -869,6 +884,54 @@ function testAppEvidenceHarnessWritesSummaryArtifact() {
 }
 
 
+function testBrowserEvidenceSeparatesObservationFromProbeFailures() {
+  const checkHtml = html => {
+    const dir = tempDir('browser-observation')
+    fs.writeFileSync(join(dir, 'index.html'), html)
+    const checks = runChecks({ repo: dir, label: 'test', appEvidenceScript: join(root, 'scripts', 'app-evidence.mjs') })
+    const summary = JSON.parse(fs.readFileSync(join(dir, 'reports/evidence/run-test/summary.json'), 'utf8'))
+    return { checks, summary }
+  }
+  const shell = '<!doctype html><style>.skip {position:absolute;top:-100px}button {padding:15px}</style><a class="skip" href="#main">Skip to content</a><nav><a href="./">Home</a><button>Current section</button></nav><main id="main"><h1>Equipment inventory</h1><button onclick="document.querySelector(\'output\').textContent=\'Equipment editor open\'">Add equipment</button><output>No equipment yet</output></main>'
+  const initial = checkHtml(shell)
+  if (initial.summary.evidenceMode === 'unavailable') {
+    assert.equal(initial.summary.blank, null, 'missing browser tooling is unknown, never blank or confirmed nonblank')
+    assert.equal(checksAllowCompletion(initial.checks), false)
+    return
+  }
+  assert.equal(initial.summary.gate, 'PASS')
+  assert.equal(initial.summary.primaryAction.label, 'Add equipment', 'offscreen accessibility links must not be selected')
+  assert.equal(initial.summary.blank, false)
+  assert.equal(initial.summary.pageState.desktop.bodyHash, initial.summary.pageState.mobile.bodyHash, 'phone opens the initial state, not the editor left by the desktop action')
+  assert.notEqual(initial.summary.afterActionState.bodyHash, initial.summary.pageState.mobile.bodyHash)
+  assert.equal(checksAllowCompletion(initial.checks), true)
+
+  const timeout = checkHtml(shell + '<script>window.__PI_PULSE_APP__={primaryAction:".skip"}</script>')
+  assert.equal(timeout.summary.blank, false, 'an explicit action timeout must preserve actual render observations')
+  assert.equal(timeout.summary.gate, 'NEEDS-EVIDENCE')
+  assert.equal(timeout.summary.primaryAction.checked, false)
+  assert.match(timeout.summary.primaryAction.executionResult.error, /Timeout/)
+  assert.ok(timeout.summary.desktopScreenshot && timeout.summary.mobileScreenshot, 'partial artifacts survive a probe failure')
+  assert.deepEqual(breakage(null, timeout.checks), [], 'a failed probe alone must not roll back working code')
+  assert.equal(checksAllowCompletion(timeout.checks), false, 'incomplete inspection cannot certify a milestone')
+  assert.match(checksLine(timeout.checks), /inspection incomplete/)
+
+  const thrown = checkHtml(shell + '<script>window.__PI_PULSE_APP__={primaryAction(){throw Error("action failed")}}</script>')
+  assert.equal(thrown.summary.blank, false)
+  assert.equal(thrown.summary.inspectionComplete, false)
+  assert.equal(checksAllowCompletion(thrown.checks), false)
+  const blank = checkHtml('<!doctype html><title>Empty app</title>')
+  assert.equal(blank.summary.blank, true)
+  assert.equal(blank.summary.gate, 'FAIL')
+  assert.deepEqual(breakage(null, blank.checks), ['the app now renders a blank page'])
+  const errors = checkHtml(shell + '<script>throw Error("real app failure")</script>')
+  assert.equal(errors.summary.gate, 'FAIL')
+  assert.ok(errors.checks.app.pageErrors > 0)
+  assert.ok(breakage(null, errors.checks).some(reason => reason.includes('uncaught page error')))
+  const crashAfterClick = checkHtml(shell.replace("document.querySelector('output').textContent='Equipment editor open'", "document.body.innerHTML=''"))
+  assert.equal(crashAfterClick.summary.blank, true, 'an action that really blanks the app is still detected')
+}
+
 function testAppEvidenceSemanticContractCanBeTopTierEligible() {
   const dir = tempDir('semantic-app-evidence')
   fs.writeFileSync(join(dir, 'index.html'), `<!doctype html>
@@ -1074,8 +1137,10 @@ for a in "$@"; do case "$a" in *"You are "*) PROMPT="$a" ;; esac; done
 if printf '%s' "$PROMPT" | grep -q '^You are an independent reviewer'; then
   printf '%s\\n' "$@" > "$FAKE_ARGS_OUT.review"
   if [ "\${FAKE_REVIEW:-no}" = garbage ]; then echo "I looked around."; exit 0; fi
-  printf 'Checked it.\\n\\n**Verdict:** better — clearer\\n**Rating:** 3.5/5 — solid start\\n**Done:** %s — see brief\\n**Top problems:**\\n1. No sound on hits\\n2. Buttons too small\\n**Cut:** nothing\\n' "\${FAKE_REVIEW:-no}"
-  exit 0
+  printf 'Checked it.\\n\\n**Verdict:** better — clearer\\n**Rating:** 3.5/5 — solid start\\n**Done:** %s — see milestone\\n**Top problems:**\\n' "\${FAKE_REVIEW:-no}"
+  if [ "\${FAKE_PROBLEMS:-some}" = none ]; then printf 'none\\n'; else printf '1. No sound on hits\\n2. Buttons too small\\n'; fi
+  printf '**Cut:** nothing\\n'
+  exit "\${FAKE_REVIEW_EXIT:-0}"
 fi
 printf '%s\\n' "$@" > "$FAKE_ARGS_OUT"
 HEADER=$(printf '%s\\n' "$PROMPT" | grep -m1 -E '^## Run [0-9]+ — ')
@@ -1084,6 +1149,8 @@ case "\${FAKE_MODE:-good}" in
         printf '<!doctype html><title>harbor</title><h1>Harbor v1</h1>\\n' > index.html
         printf '#!/usr/bin/env bash\\ngrep -q Harbor index.html\\n' > check.sh ;;
   improve) printf '<!doctype html><title>harbor</title><h1>Harbor v%s</h1>\\n' "$RANDOM" > index.html ;;
+  milestone) printf '# Next milestone\\n## Goal\\nA harbor worth returning to.\\n## Done means\\n- [ ] Progress survives a reload\\n' > MILESTONE.md
+        printf '<!doctype html><title>harbor</title><h1>Harbor returns</h1>\\n' > index.html ;;
   break) printf '<!doctype html><title>oops</title>\\n' > index.html; echo junk > stray.txt ;;
   fail) echo half-done > index.html; echo "fixture api error"; exit 3 ;;
 esac
@@ -1133,6 +1200,7 @@ function testSessionsBuildKeepAndReviewWithEitherAgent() {
   assertIncludes(codexArgs, 'exec\n-C\n' + fx.repo + '\n--color\nnever', 'Codex should run in the project workspace')
   assert.ok(!codexArgs.includes('--add-dir'), 'an incubator sandbox must not get write access to the lab control plane')
   assertIncludes(codexArgs, '--sandbox\nworkspace-write', 'scheduled Codex runs should stay sandboxed')
+  assertIncludes(codexArgs, '-c\nmodel_reasoning_effort="high"', 'the builder pins effort instead of inheriting a personal CLI default')
   assert.ok(!codexArgs.includes('--dangerously-bypass-approvals-and-sandbox'), 'scheduled Codex runs should ignore CODEX_BYPASS')
   assertIncludes(codexArgs, 'You are the builder of "Harbor"', 'the session prompt names what the agent owns')
   assertIncludes(codexArgs, 'A pocket harbor raid game.', 'the idea reaches the builder verbatim')
@@ -1158,6 +1226,7 @@ function testSessionsBuildKeepAndReviewWithEitherAgent() {
   assert.ok(!('lastQualityGate' in status) && !('lastNorthStar' in status), 'retired self-grades are dropped')
   const reviewArgs = fs.readFileSync(`${fx.argsPath}.review`, 'utf8')
   assertIncludes(reviewArgs, 'exec\n-C\n' + fx.repo + '\n--color\nnever\n--sandbox\nread-only', 'the reviewer cannot change the product')
+  assertIncludes(reviewArgs, '-c\nmodel_reasoning_effort="high"', 'the reviewer gets the same explicit reasoning default')
   assertIncludes(fx.git('log', '--format=%an|%s'), 'Pi Pulse lab|Run 4 (SHAPE): good pass on the harbor', 'the lab commits the session under its own name')
   assertIncludes(fx.git('log', '--format=%an|%s'), 'Pi Pulse lab|Baseline: the project before autonomous sessions', 'a folder that was not a repo yet is adopted as the baseline')
   assertIncludes(fx.git('show', 'HEAD~1:index.html'), 'Harbor v0', 'existing work is committed as the baseline, never discarded')
@@ -1177,7 +1246,7 @@ function testSessionsBuildKeepAndReviewWithEitherAgent() {
   assert.ok(claudeArgs.includes('--dangerously-skip-permissions'), 'manual Claude runs honor CLAUDE_BYPASS')
   assert.ok(!claudeArgs.includes('--permission-mode'), 'bypass and an explicit permission mode are mutually exclusive')
   const claudePrompt = claudeArgs.join('\n')
-  assertIncludes(claudePrompt, 'Stage: Building. Move the product toward', 'the next session builds toward the brief')
+  assertIncludes(claudePrompt, 'Stage: Building. Continue the current milestone', 'the next session builds toward the current milestone')
   assertIncludes(claudePrompt, 'Your brief is BRIEF.md: read it first.', 'the builder is pointed at its own brief')
   assertIncludes(claudePrompt, '1. No sound on hits', "the last review's top problem steers the next session")
   assert.ok(!claudePrompt.includes('BRIEF.md TEMPLATE'), 'the template is only for a project without a brief')
@@ -1287,31 +1356,90 @@ function testNotesComeFirstAndAreNewUntilASessionKeepsThem() {
   assertIncludes(fx.prompt(), 'the music is too loud', 'a note written later is new again')
 }
 
-// A project is done when the reviewer says the brief is met and polishing
-// finds nothing more worth doing; then it rests.
+// A product keeps developing after each independently reviewed milestone.
 function testProjectsMoveFromShapingToDone() {
   const fx = runnerFixture('stages')
   session(fx, { FAKE_REVIEW: 'yes' })
   assert.equal(fx.status().stage, 'polishing', 'a reviewer who finds the brief met moves the project to polishing')
-  session(fx, { FAKE_MODE: 'idle' })
-  assertIncludes(fx.prompt(), 'Stage: Polishing. The reviewer found the "Done means" list met. Add no new features.', 'polishing forbids new features')
+  session(fx, { FAKE_MODE: 'idle', FAKE_REVIEW: 'yes' })
+  assertIncludes(fx.prompt(), 'Polishing the current milestone.', 'polishing is milestone-scoped')
   assert.equal(fx.status().stage, 'polishing')
-  assert.equal(fx.status().polishSessions, 1)
+  assert.equal(fx.status().polishSessions, 0)
   session(fx, { FAKE_MODE: 'improve', FAKE_REVIEW: 'yes' })
-  assert.equal(fx.status().stage, 'done', 'after its polish passes the project is done')
-  session(fx, { FAKE_MODE: 'improve', FAKE_REVIEW: 'no' })
-  assert.equal(fx.status().stage, 'building', 'a manual run whose review finds the brief unmet sends it back to building')
+  assert.equal(fx.status().stage, 'polishing', 'run count alone never finishes a milestone')
+  session(fx, { FAKE_MODE: 'idle', FAKE_REVIEW: 'yes', FAKE_PROBLEMS: 'none', FAKE_REVIEW_EXIT: '3' })
+  assert.equal(fx.status().stage, 'polishing', 'a failed reviewer cannot finish work even with a valid-looking verdict')
+  assert.equal(fx.status().milestoneCount, undefined)
+  session(fx, { FAKE_MODE: 'idle', FAKE_REVIEW: 'yes', FAKE_PROBLEMS: 'none' })
+  assert.equal(fx.status().stage, 'done', 'a fresh independent review can finish unchanged but verified work')
+  assert.equal(fx.status().milestoneCount, 1)
+  const first = fx.status().lastMilestone
+  session(fx, { FAKE_MODE: 'idle', FAKE_REVIEW: 'yes', FAKE_PROBLEMS: 'none' })
+  assert.equal(fx.status().stage, 'advancing', 'the next session chooses a new milestone without asking the owner')
+  assert.equal(fx.status().milestoneCount, 1, 'the same goal is never repeatedly counted')
+  assertIncludes(fx.prompt(), first.goal, 'completed work survives fresh processes and is supplied as history')
+  session(fx, { FAKE_MODE: 'milestone', FAKE_REVIEW: 'no' })
+  assert.equal(fx.status().stage, 'building', 'the second milestone may need many sessions')
+  assert.equal(fx.status().milestoneCount, 1)
+  session(fx, { FAKE_MODE: 'improve', FAKE_REVIEW: 'yes', FAKE_PROBLEMS: 'none' })
+  assert.equal(fx.status().stage, 'done')
+  assert.equal(fx.status().milestoneCount, 2)
+  assert.deepEqual(fx.status().milestoneHistory.map(m => m.goal), [first.goal, 'A harbor worth returning to.'])
   session(fx, { FAKE_MODE: 'improve', FAKE_REVIEW: 'garbage' })
-  assert.equal(fx.status().stage, 'building', 'a reply without a verdict changes nothing')
+  assert.equal(fx.status().stage, 'advancing', 'a reply without a verdict cannot complete another milestone')
   assertIncludes(fx.status().lastReviewError, 'no verdict', 'and says why')
   assert.equal(fx.status().lastReview.verdict, 'better', 'the last real review stays')
 }
 
+function testCodexReasoningEffortOverrides() {
+  assert.equal(resolveCodexReasoningEffort(null, {}), 'high')
+  assert.equal(resolveCodexReasoningEffort(null, { PI_PULSE_CODEX_REASONING_EFFORT: 'medium' }), 'medium')
+  assert.equal(resolveCodexReasoningEffort('xhigh', { PI_PULSE_CODEX_REASONING_EFFORT: 'medium' }), 'xhigh')
+  assert.equal(resolveCodexReasoningEffort('invalid', {}), 'high')
+  const fx = runnerFixture('codex-effort', { status: { codexModel: 'gpt-6-astra', codexReasoningEffort: 'xhigh' } })
+  session(fx)
+  for (const file of [fx.argsPath, `${fx.argsPath}.review`]) {
+    const args = fs.readFileSync(file, 'utf8')
+    assertIncludes(args, '--model\ngpt-6-astra', 'the explicit model choice is preserved')
+    assertIncludes(args, '-c\nmodel_reasoning_effort="xhigh"', 'a deliberate per-incubator override reaches both CLI invocations')
+  }
+}
+
+function testLegacyBrowserBaselinesAreRechecked() {
+  const fx = runnerFixture('legacy-browser-baseline')
+  session(fx)
+  const status = fx.status()
+  status.lastChecks = { version: 1, check: { state: 'pass' }, app: { ran: true, blank: true } }
+  fs.writeFileSync(fx.statusPath, JSON.stringify(status))
+  const result = spawnSync(process.execPath, [join(root, 'scripts/lib/incubator-run.mjs'), 'session-begin', fx.statusPath, '5'], {
+    encoding: 'utf8', env: { ...process.env, APP_EVIDENCE_SCRIPT: '/nonexistent/app-evidence.mjs' },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  const baseline = fx.status().session.baselineChecks
+  assert.equal(baseline.version, 2)
+  assert.equal(baseline.check.state, 'pass')
+  assert.notEqual(baseline.app.blank, true, 'an old false-blank receipt must not mask a future real regression')
+}
+
 function testSessionPureRules() {
+  const repo = tempDir('milestone-identity')
+  const milestone = '# Goal\n## Goal\nLasting value.\n## Done means\n- [ ] ' + 'x'.repeat(220) + ' A\n'
+  fs.writeFileSync(join(repo, 'MILESTONE.md'), milestone)
+  const key = milestoneSnapshot(repo).key
+  fs.writeFileSync(join(repo, 'MILESTONE.md'), milestone.replace('[ ]', '[x]'))
+  assert.equal(milestoneSnapshot(repo).key, key, 'checking an outcome is not a new milestone')
+  fs.writeFileSync(join(repo, 'MILESTONE.md'), milestone.replace(' A\n', ' B\n'))
+  assert.notEqual(milestoneSnapshot(repo).key, key, 'identity uses full outcomes, not UI-truncated text')
+  const complete = '**Verdict:** same — sound\n**Rating:** 4/5\n**Done:** yes\n**Top problems:**\nnone\n**Cut:** nothing'
+  assert.equal(parseReview(complete).ok, true)
+  assert.equal(parseReview(complete.replaceAll('\n', '\n\n')).ok, true, 'blank lines in a complete review are harmless')
+  assert.equal(parseReview(complete.replace('**Top problems:**\nnone', '**Top problems:** none')).ok, true, 'inline none is explicit too')
+  assert.equal(parseReview(complete + '\n**Verdict:** same — interrupted').ok, false, 'a truncated final review cannot borrow older fields')
+  assert.equal(parseReview(complete.replace('none\n', 'Storage loses data\n')).problems.length, 1, 'unnumbered problems are not silently treated as approval')
   assert.deepEqual(nextStage({ stage: 'shaping', outcome: 'kept', briefExists: false }), { stage: 'shaping', polishSessions: 0 }, 'no brief, no building')
   assert.deepEqual(nextStage({ stage: 'building', outcome: 'reverted', briefExists: true, review: null }), { stage: 'building', polishSessions: 0 })
   assert.equal(isUnproductive({ lastRunStatus: 'no-changes', stage: 'building' }), true, 'a building session that changed nothing backs off')
-  assert.equal(isUnproductive({ lastRunStatus: 'no-changes', stage: 'polishing' }), false, 'in polishing, nothing left to change is progress')
+  assert.equal(isUnproductive({ lastRunStatus: 'no-changes', stage: 'polishing' }), true, 'unresolved polishing with no change backs off')
   assert.equal(isUnproductive({ lastRunStatus: 'ok' }), false)
   assert.equal(parseReview('**Verdict:** better | same | worse — <one sentence>\n**Rating:** <0-5>/5\n**Done:** yes | no').ok, false, 'an echoed template is not a verdict')
   assert.deepEqual(breakage({ app: { ran: true, consoleErrors: 0 } }, { check: { state: 'none' }, app: { ran: true, state: 'FAIL', consoleErrors: 0, pageErrors: 0, blank: false } }), [], "the harness's soft FAIL heuristics never revert a session")
@@ -1425,6 +1553,26 @@ function testDueScheduledSlotsActuallyFire() {
   assert.notEqual(out.slot.lastScheduleBlockedCode, 'STALE_SCHEDULE_RECONCILED', 'ordinary reads must not reschedule due slots')
 }
 
+function testSchedulerChoosesOldestDueSlot() {
+  const lab = schedulerLab('scheduler-fair')
+  const registryPath = join(lab.projectsDir, 'incubators.json')
+  const data = JSON.parse(fs.readFileSync(registryPath, 'utf8'))
+  const first = data.slots[0]
+  // Shared fixture repo is intentional: only one launch is permitted. The lock
+  // owner and schedule receipt identify which slot actually won the tick.
+  data.slots.push({ ...first, id: 'older-due', nextRunAt: first.nextRunAt - 60000 })
+  fs.writeFileSync(registryPath, JSON.stringify(data))
+  const out = runInLab(lab.dir, `
+    const runs = await import(${JSON.stringify(join(root, 'server', 'incubator-runs.js'))})
+    const lock = await import(${JSON.stringify(join(root, 'server', 'run-lock.js'))})
+    runs.incubatorSchedulerTick()
+    const owner = lock.currentRunLock()
+    for (let i = 0; i < 150 && lock.globalRunBusy(); i += 1) await new Promise(r => setTimeout(r, 100))
+    console.log(JSON.stringify(owner))
+  `, lab.env)
+  assert.equal(out.id, 'older-due', 'registry position does not outrank time spent waiting')
+}
+
 function testOverdueSlotsAreSpacedOutOnlyAtBoot() {
   const lab = schedulerLab('scheduler-boot')
   const out = runInLab(lab.dir, `
@@ -1511,7 +1659,7 @@ function testFailingSlotsBackOffAndRetryInsteadOfPausing() {
 // A finished project rests: autopilot stays on, but no sessions run until a
 // note (or a manual Run) gives it something new to do.
 function testFinishedProjectsRestUntilWoken() {
-  const lab = schedulerLab('scheduler-rest', { slotStatus: { runCount: 9, stage: 'done', lastRunStatus: 'ok' } })
+  const lab = schedulerLab('scheduler-rest', { slotStatus: { runCount: 9, stage: 'done', lifecycle: 'finite', lastRunStatus: 'ok' } })
   const tick = () => runInLab(lab.dir, `
     const runs = await import(${JSON.stringify(join(root, 'server', 'incubator-runs.js'))})
     const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
@@ -1526,9 +1674,9 @@ function testFinishedProjectsRestUntilWoken() {
   assert.ok(!fs.existsSync(lab.agentRan), 'a finished project does not launch sessions')
   assert.equal(slot.enabled, true, 'resting is not switching autopilot off')
   assert.equal(typeof slot.restingSince, 'string', 'the rest is recorded')
-  fs.writeFileSync(lab.statusPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(lab.statusPath, 'utf8')), stage: 'building' }, null, 2))
+  fs.writeFileSync(lab.statusPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(lab.statusPath, 'utf8')), lifecycle: 'product' }, null, 2))
   slot = tick()
-  assert.ok(fs.existsSync(lab.agentRan), 'once woken (a note moved it to building) it runs again')
+  assert.ok(fs.existsSync(lab.agentRan), 'ongoing products launch after a completed milestone without owner input')
   assert.equal(slot.restingSince, null)
 }
 
@@ -1694,6 +1842,7 @@ const tests = [
   testClaudePreflightChecksLauncherBackedRelay,
   testRetiredClaudePinsFallThroughButAliasesStay,
   testFreshIncubatorsHaveGenericClaudeRunner,
+  testNewIncubatorInsideParentGetsOwnHistory,
   testExistingIncubatorsNormalizeClaudeRelayState,
   testStdoutOnlyApiErrorsBecomeFailedRows,
   testStdoutBoldFailedRowsDoNotNeedErrorText,
@@ -1718,6 +1867,7 @@ const tests = [
   testClaudeRunnerSwitchWarnsFromLaunchPreflight,
   testAppEvidenceHarnessWritesSummaryArtifact,
   testAppEvidenceSemanticContractCanBeTopTierEligible,
+  testBrowserEvidenceSeparatesObservationFromProbeFailures,
   testCoreLabQualityContractIsWired,
   testTrustHarnessRunsBeforeBuild,
   testPublicWriteSafetyAndLoopFusesAreWired,
@@ -1729,9 +1879,12 @@ const tests = [
   testNotesComeFirstAndAreNewUntilASessionKeepsThem,
   testProjectsMoveFromShapingToDone,
   testSessionPureRules,
+  testCodexReasoningEffortOverrides,
+  testLegacyBrowserBaselinesAreRechecked,
   testUnifiedRunnerFailsVisiblyOnBadInput,
   testCorruptIncubatorsFileIsNeverOverwritten,
   testDueScheduledSlotsActuallyFire,
+  testSchedulerChoosesOldestDueSlot,
   testOverdueSlotsAreSpacedOutOnlyAtBoot,
   testSchedulerDefersBusySlotsWithoutRecountingFailures,
   testFailingSlotsBackOffAndRetryInsteadOfPausing,
