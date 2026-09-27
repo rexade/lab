@@ -2,6 +2,7 @@
 import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
+import { showsSomething } from './lib/pixels.mjs'
 
 const args = parseArgs(process.argv.slice(2))
 const repo = path.resolve(args.repo || process.cwd())
@@ -111,6 +112,19 @@ async function inspectPage(page) {
       bodyHash: Array.from((document.body?.innerText || '').trim()).reduce((hash, char) => ((hash << 5) - hash + char.charCodeAt(0)) | 0, 0),
     }
   })
+}
+
+// Blank means a person would see nothing. Little text and fewer than two
+// visible elements is only a hint: a full-screen canvas game looks like that
+// too. When the DOM looks empty, the viewport's pixels decide.
+async function looksBlank(page, state) {
+  if (state.textLength >= 12 || state.visibleElements >= 2) return false
+  try {
+    const seen = showsSomething(await page.screenshot())
+    return seen === null ? true : !seen
+  } catch {
+    return true
+  }
 }
 
 async function readSemanticContract(page) {
@@ -424,10 +438,12 @@ async function main() {
     page.on('console', msg => consoleEvents.push({ type: msg.type(), text: msg.text(), timestamp: Date.now() }))
     page.on('pageerror', err => pageErrors.push({ message: err.message, timestamp: Date.now() }))
   }
-  const recordState = (viewport, state) => {
+  const recordState = async (viewport, page) => {
+    const state = await inspectPage(page)
+    state.blank = await looksBlank(page, state)
     summary.pageState[viewport] = state
     const observed = Object.values(summary.pageState)
-    const blankObserved = observed.some(s => s.textLength < 12 && s.visibleElements < 2)
+    const blankObserved = observed.some(s => s.blank)
     // One observed blank viewport is evidence; one nonblank viewport does not
     // establish that both opened successfully.
     summary.blank = blankObserved ? true : observed.length === 2 ? false : null
@@ -442,7 +458,7 @@ async function main() {
     await page.goto(launched.url, { waitUntil: 'networkidle', timeout: 20000 })
     summary.evidenceMode = 'degraded'
 
-    recordState('desktop', await inspectPage(page))
+    await recordState('desktop', page)
     await page.screenshot({ path: path.join(evidenceDir, 'desktop.png'), fullPage: true })
     summary.desktopScreenshot = path.join(evidenceDir, 'desktop.png')
 
@@ -451,7 +467,7 @@ async function main() {
     const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true })
     observe(mobile)
     await mobile.goto(launched.url, { waitUntil: 'networkidle', timeout: 20000 })
-    recordState('mobile', await inspectPage(mobile))
+    await recordState('mobile', mobile)
     await mobile.screenshot({ path: path.join(evidenceDir, 'mobile.png'), fullPage: true })
     summary.mobileScreenshot = path.join(evidenceDir, 'mobile.png')
     await mobile.close()
@@ -477,7 +493,7 @@ async function main() {
       if (!actionResult.ok) summary.notes.push(`Primary action could not be exercised: ${actionResult.error}`)
       await page.waitForTimeout(500)
       const afterActionState = await inspectPage(page)
-      if (afterActionState.textLength < 12 && afterActionState.visibleElements < 2) summary.blank = true
+      if (await looksBlank(page, afterActionState)) summary.blank = true
       primaryAction.changed = stateChanged(desktopState, afterActionState)
       summary.semanticSuccess = await evaluateSuccessContract(page)
       if (summary.semanticContract.hasSnapshot) summary.semanticSnapshots.push(await readSemanticSnapshot(page, 'after'))
