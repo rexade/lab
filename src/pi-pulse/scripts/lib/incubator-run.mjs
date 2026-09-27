@@ -352,7 +352,9 @@ const commands = {
     status.lastOutcomeAt = new Date().toISOString()
     status.lastSessionChecks = checks
     if (outcome === 'failed') {
-      status.lastRunFailure = `[run failed - ${agent} exited ${agentExit}] ${capturedFailureDetail(stdoutFile, 900) || reason}`.trim()
+      // The transcript already starts with the runner's own marker; keep one.
+      const detail = capturedFailureDetail(stdoutFile, 900)
+      status.lastRunFailure = detail.startsWith('[run failed') ? detail : `[run failed - ${agent} exited ${agentExit}] ${detail || reason}`.trim()
       status.lastRunFailureSource = 'agent exit'
     } else {
       delete status.lastRunFailure

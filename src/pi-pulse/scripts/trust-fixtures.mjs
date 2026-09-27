@@ -1212,6 +1212,8 @@ function testSessionsBuildKeepAndReviewWithEitherAgent() {
   assert.equal(status.lastRunStatus, 'failed')
   assert.equal(status.lastRunnerStatus, 'failed')
   assertIncludes(status.lastOutcomeReason, 'its changes were discarded', 'a failed session leaves no half-done edits behind')
+  assert.equal(status.lastRunFailure.split('[run failed').length - 1, 1, 'the failure names its marker once')
+  assertIncludes(status.lastRunFailure, 'fixture api error', 'and carries the real error')
   assert.ok(!fs.readFileSync(join(fx.repo, 'index.html'), 'utf8').includes('half-done'))
   assert.equal(fx.git('rev-parse', 'HEAD'), head, 'a failed session adds no commit')
 }
