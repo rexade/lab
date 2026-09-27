@@ -7,6 +7,7 @@ import { notifyIncubatorClients } from './events.js'
 import { readIncubators, readStatusAt, repairClaudeRunnerStatusIfNeeded, writeIncubators } from './incubator-store.js'
 import { acquireRunLock, currentRunLock, globalRunBusy, spawnTrackedRun } from './run-lock.js'
 import { appendIncubatorPreflightFailure, markIncubatorProcessFailure, nextIncubatorRunNum } from './run-receipts.js'
+import { isUnproductive } from '../scripts/lib/session.mjs'
 import { hoursFromNow, shellQuote } from './util.js'
 
 const activeIncubatorRuns = new Map()
@@ -88,11 +89,9 @@ export function preflightIncubatorRun(slot, runType = null) {
     repo: cfg.repo,
     runLog: cfg.runLog,
     statusPath: slot.statusPath,
-    promptDir: cfg.promptDir,
-    runTypes: cfg.runTypes,
-    runType,
     claudeModel,
     allowClaudeDefaultModel: selected === 'claude',
+    sessionRun: true,
   })
   return {
     ...preflight,
@@ -146,10 +145,6 @@ export function startIncubatorRun(slot, runType = null, options = {}) {
 // before the next attempt (capped), and the first good run resets it. A
 // person is never required to resume anything.
 
-export function isFailingRunStatus(status = {}) {
-  const runStatus = String(status.lastRunStatus || '').toLowerCase()
-  return runStatus === 'failed' || runStatus === 'quality-failed' || String(status.lastQualityGate || '').toUpperCase() === 'FAIL'
-}
 
 // Pure: what the scheduler should do with a due slot given its last result.
 //   { action: 'run' }                     healthy, or a backoff that has elapsed
@@ -157,7 +152,7 @@ export function isFailingRunStatus(status = {}) {
 // A failure is counted once per run (keyed by runCount), so re-reading the
 // same result on later ticks never grows the streak.
 export function backoffPlan({ slot = {}, status = {}, now = Date.now() }) {
-  if (!isFailingRunStatus(status)) {
+  if (!isUnproductive(status)) {
     return { action: 'run', reset: Boolean(slot.failStreak || slot.backoffForRun != null || slot.backoffReason) }
   }
   const runCount = Number(status.runCount || 0)
@@ -171,7 +166,7 @@ export function backoffPlan({ slot = {}, status = {}, now = Date.now() }) {
     streak,
     runCount,
     until,
-    reason: `${streak} failed run${streak === 1 ? '' : 's'} in a row; retrying on its own`,
+    reason: `${streak} session${streak === 1 ? '' : 's'} in a row without progress; retrying on its own`,
   }
 }
 
@@ -208,6 +203,12 @@ export function incubatorSchedulerTick() {
     if (globalRunBusy()) continue
     let status = {}
     try { status = readStatusAt(slot.statusPath) } catch {}
+    // A finished project rests: no sessions until a note (or a manual Run) wakes it.
+    if (status.stage === 'done') {
+      if (!slot.restingSince) { slot.restingSince = new Date().toISOString(); changed = true }
+      continue
+    }
+    if (slot.restingSince) { slot.restingSince = null; changed = true }
     const plan = backoffPlan({ slot, status })
     if (applyBackoffPlan(slot, plan)) changed = true
     if (plan.action === 'wait') {

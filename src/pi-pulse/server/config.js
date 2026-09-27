@@ -52,7 +52,6 @@ export const INCUBATOR_RUNNER_SCRIPT = process.env.PI_PULSE_INCUBATOR_RUNNER_SCR
 export const GENERIC_CLAUDE_INCUBATOR_SCRIPT = process.env.PI_PULSE_CLAUDE_INCUBATOR_SCRIPT || join(PI_PULSE_ROOT, 'scripts', 'run-claude-incubator.sh')
 export const CODEX_INCUBATOR_SCRIPT = process.env.PI_PULSE_CODEX_INCUBATOR_SCRIPT || join(LAB_ROOT, 'scripts', 'run-codex-incubator.sh')
 export const DEFAULT_LAB_RUNNER = 'codex'
-export const DEFAULT_RUN_TYPES = ['mutate', 'research', 'mutate']
 
 // Local critic (Ollama/Qwen via hailo-ollama). Disabled by default because CPU
 // fallback saturates the Pi; opt in only for deliberate local inference sessions.

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import { IncubatorDetail } from './components/IncubatorDetail.jsx'
 import { LoopHero } from './components/LoopHero.jsx'
@@ -10,8 +10,7 @@ import { useIncubators } from './hooks/useIncubators.js'
 import { useNow } from './hooks/useNow.js'
 import { useSystemStats } from './hooks/useSystemStats.js'
 import { fetchApiJson } from './lib/api.js'
-import { localDay, loopHeadline, runsOnDay } from './lib/incubator.js'
-import { latestCompletedRunSignature } from './lib/runSignals.js'
+import { awayDigest, localDay, loopHeadline, runsOnDay } from './lib/incubator.js'
 
 const AMBIENT = {
   cool: { accent: '#22d3ee', glow: 'rgba(34,211,238,0.32)' },
@@ -64,23 +63,21 @@ function useTab() {
   return [tab, select]
 }
 
-// A newly completed run bumps that slot's trigger so its critic refreshes once.
-function useCriticTriggers(runsBySlot) {
-  const [triggers, setTriggers] = useState({})
-  const seen = useRef({})
+// When you last looked: the moment the page was last hidden or closed. The
+// hero summarises what the lab did since then.
+function useLastVisit() {
+  const [since] = useState(() => Number(readStored('pi-pulse.lastVisit', 0)) || Date.now() - 24 * 3600 * 1000)
   useEffect(() => {
-    const bumps = {}
-    for (const [id, runs] of Object.entries(runsBySlot)) {
-      const signature = latestCompletedRunSignature(runs)
-      const previous = seen.current[id]
-      if (previous != null && previous !== signature) bumps[id] = true
-      seen.current[id] = signature
+    const mark = () => writeStored('pi-pulse.lastVisit', String(Date.now()))
+    const onVisibility = () => { if (document.visibilityState === 'hidden') mark() }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', mark)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', mark)
     }
-    if (Object.keys(bumps).length) {
-      setTriggers(prev => Object.fromEntries([...Object.entries(prev), ...Object.keys(bumps).map(id => [id, (prev[id] || 0) + 1])]))
-    }
-  }, [runsBySlot])
-  return triggers
+  }, [])
+  return since
 }
 
 export default function App() {
@@ -91,10 +88,11 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(() => readStored('pi-pulse.selected', null))
   const [restarting, setRestarting] = useState(false)
   const now = useNow(1000)
-  const criticTriggers = useCriticTriggers(runsBySlot)
+  const lastVisit = useLastVisit()
 
   const headline = useMemo(() => loopHeadline(slots, { preflightBySlot, now }), [slots, preflightBySlot, now])
   const today = useMemo(() => runsOnDay(runsBySlot, localDay(new Date(now))), [runsBySlot, now])
+  const away = useMemo(() => awayDigest(slots, runsBySlot, lastVisit), [slots, runsBySlot, lastVisit])
   const selected = slots.find(slot => slot.id === selectedId) || slots.find(slot => slot.id === headline.focusId) || slots[0] || null
 
   const select = id => {
@@ -161,7 +159,7 @@ export default function App() {
             {tab === 'lab' && (
               <>
                 {loaded
-                  ? <LoopHero slots={slots} headline={headline} today={today} now={now} onFocus={select} />
+                  ? <LoopHero slots={slots} headline={headline} today={today} away={away} now={now} onFocus={select} />
                   : <div className="glass h-[340px] animate-pulse" aria-label="Loading the lab" />}
                 <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-5 lg:grid-cols-[360px_minmax(0,1fr)]">
                   <div className="min-w-0 lg:sticky lg:top-[84px]">
@@ -182,7 +180,7 @@ export default function App() {
                   {selected ? (
                     <IncubatorDetail
                       key={selected.id}
-                      slot={{ ...selected, criticTrigger: criticTriggers[selected.id] || 0 }}
+                      slot={selected}
                       runs={runsBySlot[selected.id] || []}
                       preflight={preflightBySlot[selected.id]}
                       historyError={historyErrors[selected.id]}

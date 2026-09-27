@@ -67,10 +67,9 @@ function seedLabFixture() {
   fs.mkdirSync(stalePrompts, { recursive: true })
   fs.mkdirSync(staleReports, { recursive: true })
   fs.mkdirSync(staleProjectDir, { recursive: true })
-  fs.mkdirSync(blockedRepo, { recursive: true })
-  fs.mkdirSync(blockedReports, { recursive: true })
+  // A repo path that is a file: no session can run there, so launch is blocked.
+  fs.writeFileSync(blockedRepo, 'not a project directory\n')
   fs.mkdirSync(blockedProjectDir, { recursive: true })
-  fs.writeFileSync(blockedPrompts, 'not a prompt directory\n')
   fs.writeFileSync(join(freshPrompts, 'create.md'), 'fixture create prompt\n')
   fs.writeFileSync(join(stalePrompts, 'mutate.md'), 'fixture mutate prompt\n')
   fs.writeFileSync(staleExistingClaudeRunner, '#!/usr/bin/env bash\necho stale fresh claude runner\n')
@@ -88,7 +87,6 @@ echo fake codex launcher
   fs.chmodSync(freshLauncher, 0o755)
   fs.writeFileSync(freshRunLog, '# Run Log\n\n')
   fs.writeFileSync(staleRunLog, '# Run Log\n\n')
-  fs.writeFileSync(blockedRunLog, '# Run Log\n\n')
   fs.writeFileSync(sourceProbe, 'boot source probe\n')
   fs.writeFileSync(join(labRoot, 'DAILY_SEED.md'), '# Daily Seed\n\nTrust fixture.\n')
   fs.writeFileSync(runLogPath, [
@@ -410,7 +408,7 @@ async function main() {
     assert.equal(blockedSwitch.data.ok, true)
     assert.equal(blockedSwitch.data.slot.runner, 'claude', 'blocked Claude switches should still persist the selected relay')
     assert.equal(blockedSwitch.data.preflight?.ok, false, 'blocked Claude switches should return the failed launch preflight')
-    assert.match(blockedSwitch.data.warning || '', /prompt/i, 'blocked Claude switch warning should include the failed check')
+    assert.match(blockedSwitch.data.warning || '', /repo directory/i, 'blocked Claude switch warning should include the failed check')
     assert.ok(
       blockedSwitch.data.preflight.checks.some(check => !check.ok && /not a dir/.test(check.detail)),
       'the switch response should carry the exact failed check'
@@ -430,13 +428,47 @@ async function main() {
       child,
       output,
       '/api/incubators/fresh-slot/runs',
-      data => Array.isArray(data.runs) && data.runs.some(run => run.num === 1 && run.type === 'CREATE' && /fake claude/.test(run['Output excerpt'] || run['What I changed'] || '')),
+      data => Array.isArray(data.runs) && data.runs.some(run => run.num === 1 && run.type === 'SHAPE' && /fake claude/.test(run['Output excerpt'] || run['What I changed'] || '') && run.Outcome),
       'fresh Claude incubator history row'
     )
     const freshRun = freshHistory.runs.find(run => run.num === 1)
-    assert.equal(freshRun.type, 'CREATE', 'fresh Claude run should use the first configured run type')
+    assert.equal(freshRun.type, 'SHAPE', 'a project without a brief starts with a shaping session')
+    assert.equal(freshRun.Outcome, 'no changes', 'a session that changed nothing is recorded as such')
     assert.match(freshRun['Output excerpt'] || freshRun['What I changed'] || '', /fake claude/, 'fresh Claude run history should expose useful captured stdout')
     assert.match(freshRun.Output || '', /Full stdout saved to .*claude-run-1\.log/, 'fresh Claude run history should point to the saved stdout file')
+
+    const sessionStatus = JSON.parse(fs.readFileSync(fixture.freshStatusPath, 'utf8'))
+    assert.equal(sessionStatus.lastOutcome, 'no-changes')
+    assert.equal(sessionStatus.ratchet, 'on', 'the lab adopted the project folder as a git repo it can revert')
+    assert.equal(sessionStatus.stage, 'shaping', 'without a brief the project is still shaping')
+    const shapedSlot = (await fetchJson(baseUrl, '/api/incubators')).data.slots.find(slot => slot.id === 'fresh-slot')
+    assert.equal(shapedSlot.stage, 'shaping')
+    assert.equal(shapedSlot.nextRunType, 'SHAPE')
+    assert.equal(shapedSlot.brief?.exists, false)
+
+    // Screenshots from the lab's browser check are served from reports/evidence only.
+    const evidenceDir = join(fixture.freshRepo, 'reports', 'evidence', 'run-1')
+    fs.mkdirSync(evidenceDir, { recursive: true })
+    const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex')
+    fs.writeFileSync(join(evidenceDir, 'desktop.png'), png)
+    const shot = await fetch(baseUrl + '/api/incubators/fresh-slot/evidence/run-1/desktop.png')
+    assert.equal(shot.status, 200, 'a session screenshot is served')
+    assert.match(shot.headers.get('content-type') || '', /image\/png/)
+    for (const bad of ['/api/incubators/fresh-slot/evidence/run-1/..%2F..%2FUSER_FEEDBACK.md', '/api/incubators/fresh-slot/evidence/..%2Freports/desktop.png', '/api/incubators/fresh-slot/evidence/run-1/summary.json']) {
+      const res = await fetch(baseUrl + bad)
+      assert.ok([400, 404].includes(res.status), `${bad} must not be served (got ${res.status})`)
+    }
+
+    // A note on a finished project is a new request: it wakes the project.
+    fs.writeFileSync(fixture.freshStatusPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(fixture.freshStatusPath, 'utf8')), stage: 'done', polishSessions: 2 }, null, 2))
+    const woke = await fetchJson(baseUrl, '/api/incubators/fresh-slot/feedback', {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ feedback: 'add a night mode' }),
+    })
+    assert.equal(woke.response.status, 200)
+    assert.equal(woke.data.slot.stage, 'building', 'a note wakes a finished project back into building')
+    assert.equal(JSON.parse(fs.readFileSync(fixture.freshStatusPath, 'utf8')).polishSessions, 0)
 
     fs.writeFileSync(join(fixture.freshRepo, 'index.html'), '<!doctype html><title>Fresh Slot Play</title><h1>fresh static app</h1>\n')
     const incubatorsAfterStaticApp = await fetchJson(baseUrl, '/api/incubators')

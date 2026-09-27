@@ -1,80 +1,90 @@
 #!/usr/bin/env node
-// Node side of scripts/run-incubator.sh. Each subcommand is one step of a run;
-// the shell script owns process control, this file owns JSON and RUN_LOG.md
-// parsing so the two agents (Codex, Claude) share one implementation.
+// Node side of scripts/run-incubator.sh. The shell script owns process control
+// (agents, timeouts, transcripts); this file owns JSON, git and RUN_LOG.md so
+// both agents (Codex, Claude) share one implementation. See lib/session.mjs.
 //
-//   config          <status.json>                         -> KEY=value lines
-//   recent-runs     <RUN_LOG.md> <RECENT_RUNS.md>
-//   latest-note     <USER_FEEDBACK.md>                    -> the newest steering note
-//   repair-block    <status.json>                         -> prompt block or ''
-//   quality-fallback <log> <run#> <stdoutFile> <appEvidenceJson> <exitCode>
-//   update-status   <status.json> <runType> <today> <exitCode> <run#> <log> <recoveryRequired> <appEvidenceJson> <agent> <claudeModel>
+//   config         <status.json>                               -> KEY=value lines
+//   recent-runs    <RUN_LOG.md> <RECENT_RUNS.md>
+//   session-begin  <status.json> <run#>                        -> KEY=value lines
+//   session-prompt <status.json> <run#> <today>                -> the builder's prompt
+//   session-end    <status.json> <run#> <today> <agentExit> <agent> <claudeModel> <stdoutFile>  -> KEY=value lines
+//   review-prompt  <status.json> <run#>                        -> the reviewer's prompt
+//   review-apply   <status.json> <run#> <reviewExit> <reviewer>   (review text on stdin)
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { latestSteeringNote, resolveClaudeModel, resolveClaudePermissionMode, rotationFor } from '../../server-core.js'
+import { capturedFailureDetail, parseRunsFromLog, resolveClaudeModel, resolveClaudePermissionMode, summarizeRun } from '../../server-core.js'
+import { routeSlugForProject } from '../../server/util.js'
+import {
+  breakage,
+  checksLine,
+  diffStat,
+  ideaFor,
+  insertIntoRunSection,
+  keepSession,
+  newNotes,
+  nextStage,
+  POLISH_SESSIONS,
+  prepareRatchet,
+  productChanged,
+  parseReview,
+  reviewLine,
+  reviewPrompt,
+  revertSession,
+  runChecks,
+  runFields,
+  sessionPrompt,
+  sessionStage,
+  STAGE_TYPE,
+  steeringNotes,
+} from './session.mjs'
 
 const [command, ...args] = process.argv.slice(2)
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const APP_EVIDENCE_SCRIPT = process.env.APP_EVIDENCE_SCRIPT || path.join(HERE, '..', 'app-evidence.mjs')
+const CHECK_TIMEOUT_MS = Number(process.env.CHECK_TIMEOUT || 600) * 1000
+
+// Fields of the retired self-graded quality contract. Sessions are judged by
+// the lab's checks and an independent review instead, so a stale self-grade
+// must not linger in status.json and steer the scheduler.
+const LEGACY_FIELDS = [
+  'lastQualityGate', 'lastEvidenceConfidence', 'lastQualitySummary', 'lastNorthStar', 'lastRunStrategy',
+  'lastWhyRunType', 'lastExpectedQualityDelta', 'lastActualQualityDelta', 'lastPlateauRegressionVerdict',
+  'lastRecoveryRequired', 'lastRecoveryMode', 'lastNeedsHuman', 'lastAppEvidencePath', 'lastAppEvidenceGate',
+  'lastAppEvidenceTopTier', 'lastAppEvidenceMode', 'lastAppEvidencePrimaryAction', 'lastAppEvidenceSemanticSuccess',
+  'lastAppEvidenceSummary',
+]
+
+const RUN_STATUS = { kept: 'ok', 'no-changes': 'no-changes', reverted: 'reverted', regressed: 'regressed', failed: 'failed' }
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+}
+
+function readText(filePath) {
+  try { return fs.readFileSync(filePath, 'utf8') } catch { return '' }
 }
 
 function oneLine(value) {
   return String(value ?? '').replace(/[\r\n]+/g, ' ').trim()
 }
 
-// The runner appends `## Run N - DATE - TYPE`; agents may append their own
-// block with the same number. The last matching section is authoritative.
-function latestRunBlock(text, runNumber) {
-  const sections = text.split(/(?=^## Run \d+)/m).filter(section => section.trimStart().startsWith(`## Run ${runNumber} `))
-  return sections[sections.length - 1] || ''
-}
-
-function latestRunFields(logPath, runNumber) {
-  try {
-    const block = latestRunBlock(fs.readFileSync(logPath, 'utf8'), runNumber)
-    const fields = {}
-    for (const line of block.split('\n')) {
-      const match = line.match(/^\*\*(.+?):\*\*\s*(.*)$/)
-      if (match) fields[match[1].trim()] = match[2].trim()
-    }
-    return fields
-  } catch { return {} }
-}
-
-function readEvidence(filePath) {
-  if (!filePath) return null
-  try { return readJson(filePath) } catch { return null }
-}
-
-function gate(value) {
-  const raw = String(value || '').trim().toUpperCase().replace(/[_.\s]+/g, '-')
-  if (raw.startsWith('PASS')) return 'PASS'
-  if (raw.startsWith('FAIL')) return 'FAIL'
-  if (raw.includes('NEEDS-EVIDENCE') || raw.includes('NEED-EVIDENCE') || raw.includes('INSUFFICIENT-EVIDENCE')) return 'NEEDS-EVIDENCE'
-  return null
-}
-
-function score(value) {
-  const match = String(value || '').match(/(\d+(?:\.\d+)?)\s*\/\s*5/)
-  return match ? Math.max(0, Math.min(5, Number(match[1]))) : null
+function printValues(values) {
+  for (const [key, value] of Object.entries(values)) console.log(`${key}=${oneLine(value)}`)
 }
 
 // Pi Pulse reads status.json while runs are in flight; a torn write would read
-// as corrupt and pause the slot's schedule, so replace it atomically.
+// as corrupt, so replace it atomically.
 function writeJsonAtomic(filePath, value) {
   const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.tmp`)
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n')
   fs.renameSync(tmp, filePath)
 }
 
-// Recovery mode keys off the newest note. Files that predate `## <timestamp>`
-// sections are read as one legacy note.
-export function feedbackForRecovery(text = '') {
-  const note = latestSteeringNote(text)
-  if (note) return note.slice(-1200)
-  return /^## (?:Seed\s*$|\d{4}-\d{2}-\d{2})/im.test(text) ? '' : String(text).trim().slice(-1200)
+function writeTextAtomic(filePath, text) {
+  const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.tmp`)
+  fs.writeFileSync(tmp, text)
+  fs.renameSync(tmp, filePath)
 }
 
 function resolveAgent(status) {
@@ -88,6 +98,73 @@ function bypassFor(agent) {
   if (process.env.PI_PULSE_SCHEDULED_RUN === '1') return ''
   const flag = agent === 'claude' ? process.env.CLAUDE_BYPASS : process.env.CODEX_BYPASS
   return flag === '1' ? '1' : ''
+}
+
+function feedbackPathFor(status) {
+  return status.feedbackPath || path.join(status.repo, 'reports', 'USER_FEEDBACK.md')
+}
+
+function briefExists(repo) {
+  return fs.existsSync(path.join(repo, 'BRIEF.md'))
+}
+
+function reviewerFor(status, agent) {
+  return status.reviewer === 'codex' || status.reviewer === 'claude' ? status.reviewer : agent
+}
+
+function reviewEnabled(status) {
+  return process.env.PI_PULSE_REVIEW !== '0' && status.review !== false
+}
+
+function recentSessions(logPath) {
+  try {
+    return parseRunsFromLog(readText(logPath)).slice(-3).map(run => ({
+      num: run.num,
+      type: run.type,
+      outcome: String(run.Outcome || '').split(/\s[·—]\s|\s-\s/)[0] || '',
+      summary: run['What changed'] || summarizeRun(run) || '',
+    }))
+  } catch {
+    return []
+  }
+}
+
+function lastOutcomeSentence(status) {
+  const num = Number(status.runCount || 0)
+  if (!num || !status.lastOutcome) return ''
+  const reason = status.lastOutcomeReason ? ` (${status.lastOutcomeReason})` : ''
+  switch (status.lastOutcome) {
+    case 'kept': return `The last session (#${num}) was kept.`
+    case 'reverted': return `The last session (#${num}) was reverted${reason}; the product is back to the last good version, so try a different approach.`
+    case 'regressed': return `The last session (#${num}) made the product worse${reason}, and version control is off, so it could not be reverted: fix that first.`
+    case 'failed': return `The last session (#${num}) failed${reason}; its changes were discarded.`
+    case 'no-changes': return `The last session (#${num}) changed nothing.`
+    default: return ''
+  }
+}
+
+function commitMessage({ runNumber, type, fields, agent }) {
+  const headline = oneLine(fields['What changed'] || fields.Goal || 'session changes').slice(0, 72)
+  const body = [
+    fields.Goal ? `Goal: ${oneLine(fields.Goal)}` : null,
+    fields.Verified ? `Verified: ${oneLine(fields.Verified)}` : null,
+    `Autonomous session by ${agent} via Pi Pulse.`,
+  ].filter(Boolean).join('\n')
+  return `Run ${runNumber} (${type}): ${headline}\n\n${body}`
+}
+
+function finishSession(status, extra = {}) {
+  const session = status.session || {}
+  status.lastSession = {
+    run: session.run ?? null,
+    stage: session.stage ?? null,
+    type: session.type ?? null,
+    startedAt: session.startedAt ?? null,
+    endedAt: new Date().toISOString(),
+    outcome: session.outcome ?? status.lastOutcome ?? null,
+    ...extra,
+  }
+  delete status.session
 }
 
 const commands = {
@@ -105,41 +182,29 @@ const commands = {
       process.exit(2)
     }
     const agent = resolveAgent(status)
-    const runTypes = rotationFor(status)
     const godot = status.godotAi || {}
-    const values = {
+    printValues({
       agent,
+      reviewer: reviewerFor(status, agent),
       project: status.project,
       repo: status.repo,
       runLog: status.runLog,
-      promptDir: status.promptDir || path.join(status.repo, 'prompts'),
       recentRuns: status.recentRuns || path.join(path.dirname(status.runLog), 'RECENT_RUNS.md'),
-      feedbackPath: status.feedbackPath || path.join(status.repo, 'reports', 'USER_FEEDBACK.md'),
-      runTypes: runTypes.join(' '),
       runCount: Math.max(0, Math.floor(Number(status.runCount) || 0)),
       bypass: bypassFor(agent),
       codexModel: status.codexModel || process.env.CODEX_MODEL || '',
-      claudeModel: agent === 'claude' ? resolveClaudeModel(status.claudeModel) : '',
+      claudeModel: agent === 'claude' || reviewerFor(status, agent) === 'claude' ? resolveClaudeModel(status.claudeModel) : '',
       claudePermissionMode: agent === 'claude' ? resolveClaudePermissionMode(status.claudePermissionMode) : '',
       godotAiEnabled: godot.enabled ? '1' : '',
       godotAiMcpUrl: godot.mcpUrl || '',
       godotAiStatusUrl: godot.statusUrl || 'http://127.0.0.1:8020/godot-ai/status',
       godotAiVersion: godot.serverVersion || '',
       godotAiLog: godot.log || path.join(status.repo, 'reports', 'godot-ai', 'editor.log'),
-    }
-    for (const [key, value] of Object.entries(values)) console.log(`${key}=${oneLine(value)}`)
-  },
-
-  'latest-note'([feedbackPath]) {
-    let text = ''
-    try { text = fs.readFileSync(feedbackPath, 'utf8') } catch {}
-    const note = feedbackForRecovery(text)
-    if (note) console.log(note)
+    })
   },
 
   'recent-runs'([logPath, recentPath]) {
-    let text = ''
-    try { text = fs.readFileSync(logPath, 'utf8') } catch {}
+    const text = readText(logPath)
     const runs = text.split(/(?=^## Run \d)/m).map(s => s.trim()).filter(s => s.startsWith('## Run'))
     const recent = runs.slice(-4)
     fs.mkdirSync(path.dirname(recentPath), { recursive: true })
@@ -150,132 +215,236 @@ const commands = {
     ].join(''))
   },
 
-  'repair-block'([statusPath]) {
-    try {
-      const status = readJson(statusPath)
-      const gate = String(status.lastAppEvidenceGate || '').toUpperCase()
-      const mode = status.lastAppEvidenceMode || null
-      const topTier = status.lastAppEvidenceTopTier === true
-      const primary = status.lastAppEvidencePrimaryAction || {}
-      const success = status.lastAppEvidenceSemanticSuccess || {}
-      const summary = status.lastAppEvidenceSummary || ''
-      const evidencePath = status.lastAppEvidencePath || ''
-      const evidenceUnavailable = mode === 'unavailable'
-      const applies = gate && !evidenceUnavailable && (gate !== 'PASS' || mode === 'degraded' || !topTier)
-      if (!applies) return
-
-      const lines = [
-        '',
-        'APP EVIDENCE REPAIR REQUIRED:',
-        `- Previous app evidence gate: ${gate || 'unknown'}.`,
-        mode ? `- Previous evidence mode: ${mode}; top-tier eligible: ${topTier ? 'yes' : 'no'}.` : null,
-        evidencePath ? `- Evidence summary: ${evidencePath}.` : null,
-        summary ? `- Evidence note: ${summary.slice(0, 500)}` : null,
-        primary?.source ? `- Previous primary action source: ${primary.source}; selector: ${primary.selector || 'none'}; changed: ${primary.changed ? 'yes' : 'no'}; visible/available: ${primary.available ? 'yes' : 'no'}.` : null,
-        success?.available ? `- Previous semantic success contract: ${success.passed ? 'passed' : 'failed'}.` : '- Previous semantic success contract: missing.',
-        '- Before adding features, fix the app evidence failure/degraded state.',
-        '- For web/static/React apps, register window.__PI_PULSE_APP__ with a visible primaryAction.selector, a machine-checkable expect success contract, and reset/snapshot where practical.',
-        '- If a hidden or secondary control was selected as primary, make the real first user action explicit with data-primary-action and keep hidden/debug controls out of the primary path.',
-        '- If contrast/readability feedback exists, fix visible color contrast before tuning content or adding UI.',
-        '- Do not claim Quality gate: PASS unless app evidence passes. Do not claim 4.5+ unless top-tier eligible semantic evidence passes.',
-      ].filter(Boolean)
-      console.log(lines.join('\n'))
-    } catch {}
+  // Pins the stage, the git baseline, and the baseline checks the session is
+  // judged against. Never fails the run: without git the ratchet is just off.
+  'session-begin'([statusPath, runNumber]) {
+    const status = readJson(statusPath)
+    const repo = status.repo
+    const wasDone = status.stage === 'done'
+    const stage = sessionStage(status, briefExists(repo))
+    const ratchet = prepareRatchet({ repo, lastGoodCommit: status.lastGoodCommit || null, runNumber })
+    let baselineChecks = null
+    if (ratchet.ratchet === 'on') {
+      const known = status.lastChecks && status.lastGoodCommit === ratchet.baseline && !ratchet.adopted
+      baselineChecks = known ? status.lastChecks : runChecks({ repo, label: `${runNumber}-baseline`, appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
+    }
+    status.stage = stage
+    // A run on a finished project is one more polish pass, then it rests again.
+    if (wasDone) status.polishSessions = Math.max(Number(status.polishSessions) || 0, POLISH_SESSIONS - 1)
+    status.ratchet = ratchet.ratchet
+    status.ratchetReason = ratchet.reason || null
+    status.session = {
+      run: Number(runNumber),
+      startedAt: new Date().toISOString(),
+      stage,
+      type: STAGE_TYPE[stage],
+      ratchet: ratchet.ratchet,
+      baseline: ratchet.baseline,
+      baselineChecks,
+      leftovers: ratchet.leftovers,
+    }
+    writeJsonAtomic(statusPath, status)
+    const note = ratchet.ratchet === 'off'
+      ? `version control off: ${ratchet.reason}`
+      : ratchet.adopted ? 'existing work committed as the baseline'
+        : ratchet.leftovers === 'stashed' ? "an interrupted session's changes were set aside (git stash)"
+          : ratchet.leftovers === 'committed' ? "an interrupted session's changes were committed as a checkpoint" : ''
+    printValues({ stage, type: STAGE_TYPE[stage], ratchet: ratchet.ratchet, baseline: ratchet.baseline || '', note })
   },
 
-  // Agents sometimes skip the required quality fields; append a conservative
-  // block so the UI and scheduler never read a missing gate as success.
-  'quality-fallback'([logPath, runNumber, stdoutFile, appEvidencePath, exitCode]) {
-    try {
-      const text = fs.readFileSync(logPath, 'utf8')
-      const block = latestRunBlock(text, runNumber)
-      if (!block || /^\*\*Quality gate:\*\*/m.test(block)) return
-      const evidence = readEvidence(appEvidencePath)
-      const evidenceGate = String(evidence?.gate || '').toUpperCase()
-      const fallbackGate = exitCode === '0'
-        ? evidenceGate === 'FAIL' ? 'FAIL' : 'NEEDS-EVIDENCE'
-        : 'FAIL'
-      const rating = fallbackGate === 'FAIL' ? '2/5' : evidenceGate === 'PASS' ? '3/5' : '1/5'
-      const confidence = evidence ? (evidenceGate === 'PASS' ? '3/5' : '4/5') : '1/5'
-      const appEvidenceLine = evidence?.summaryMdPath || evidence?.summaryPath || appEvidencePath || 'not available'
-      const risk = fallbackGate === 'FAIL'
-        ? 'Runner fallback found missing quality fields and app evidence failed or the runner failed.'
-        : 'Runner fallback found missing quality fields; product quality cannot be trusted until the next run reports acceptance evidence.'
-      fs.appendFileSync(logPath, [
-        '',
-        '**Acceptance check:** Runner fallback - required quality fields were missing from this run summary.',
-        `**Evidence:** Full stdout saved to ${stdoutFile}; app evidence: ${appEvidenceLine}`,
-        '**North star:** UNCLEAR - runner fallback could not read a first-class north star.',
-        '**Strategy:** Repair the missing run contract before trusting product-quality claims.',
-        '**Why this run type:** Fallback generated after the selected runner omitted required fields.',
-        '**Expected quality delta:** Restore measurable run strategy and evidence fields.',
-        '**Actual quality delta:** none measured - required fields were missing.',
-        '**Plateau/regression verdict:** UNCLEAR - missing strategy and quality fields.',
-        `**Quality gate:** ${fallbackGate}`,
-        `**Quality rating:** ${rating}`,
-        `**Evidence confidence:** ${confidence}`,
-        `**Risk / regression:** ${risk}`,
-        '**Next move:** Run a focused mutate pass that addresses the app evidence failure and writes the required quality fields.',
-        '',
-      ].join('\n'))
-    } catch (err) {
-      console.error(`[incubator] warning: could not append missing quality fallback: ${err.message}`)
-    }
+  'session-prompt'([statusPath, runNumber, today]) {
+    const status = readJson(statusPath)
+    const repo = status.repo
+    const feedbackText = readText(feedbackPathFor(status))
+    const session = status.session || {}
+    const stage = session.stage || sessionStage(status, briefExists(repo))
+    const lastOutcome = [
+      lastOutcomeSentence(status),
+      session.leftovers === 'stashed' ? "An interrupted session's unverified changes were set aside with git stash; the project is at its last good version." : '',
+      session.ratchet === 'off' ? `Version control is off for this project (${status.ratchetReason || 'unavailable'}): nothing can be reverted, so keep the product working at every step.` : '',
+    ].filter(Boolean).join(' ')
+    process.stdout.write(sessionPrompt({
+      name: status.displayName || status.incubatorTitle || status.project,
+      idea: ideaFor(status, feedbackText, readText(path.join(repo, 'README.md'))),
+      stage,
+      type: STAGE_TYPE[stage],
+      runNumber: Number(runNumber),
+      today,
+      briefExists: briefExists(repo),
+      lastOutcome,
+      review: status.lastReview?.ok ? status.lastReview : null,
+      notes: newNotes(steeringNotes(feedbackText), status.notesSeenAt || null),
+      recent: recentSessions(status.runLog),
+      playPath: `/${routeSlugForProject(status.project)}/`,
+    }))
   },
 
-  // Process health (lastRunnerStatus) and product quality (lastQualityGate) are
-  // recorded separately; app evidence can only lower a self-reported gate/rating.
-  'update-status'([statusPath, runType, today, exitCode, runNumber, logPath, recoveryRequired, appEvidencePath, agent, model]) {
-    try {
-      const status = readJson(statusPath)
-      const runnerOk = exitCode === '0'
-      const fields = latestRunFields(logPath, runNumber)
-      const appEvidence = readEvidence(appEvidencePath)
-      const appEvidenceGate = gate(appEvidence?.gate)
-      const appEvidenceApplies = !!appEvidence && appEvidence.appType && appEvidence.appType !== 'unknown'
-      let qualityGate = runnerOk ? (gate(fields['Quality gate']) || 'NEEDS-EVIDENCE') : 'FAIL'
-      if (runnerOk && appEvidenceApplies && appEvidenceGate === 'FAIL') qualityGate = 'FAIL'
-      if (runnerOk && appEvidenceApplies && qualityGate === 'PASS' && appEvidenceGate !== 'PASS') qualityGate = 'NEEDS-EVIDENCE'
-      status.runner = status.runner || agent
-      status.runCount = Number(runNumber)
-      status.lastRun = today
-      status.lastRunType = runType.toUpperCase()
-      status.lastRunnerStatus = runnerOk ? 'ok' : 'failed'
-      status.lastQualityGate = qualityGate
-      status.lastQualityRating = score(fields['Quality rating'])
-      if (status.lastQualityRating != null && appEvidenceApplies && appEvidenceGate !== 'PASS') {
-        status.lastQualityRating = Math.min(status.lastQualityRating, appEvidenceGate === 'FAIL' ? 2 : 3)
-      }
-      if (status.lastQualityRating != null && appEvidenceApplies && appEvidenceGate === 'PASS' && appEvidence?.topTierEligible !== true) {
-        status.lastQualityRating = Math.min(status.lastQualityRating, 4)
-      }
-      status.lastEvidenceConfidence = score(fields['Evidence confidence'])
-      status.lastQualitySummary = (fields['Evidence'] || fields['Acceptance check'] || fields['Risk / regression'] || (runnerOk ? 'Latest run did not report a quality gate.' : fields['Failure']) || '').slice(0, 360) || null
-      status.lastNorthStar = (fields['North star'] || '').slice(0, 500) || null
-      status.lastRunStrategy = (fields['Strategy'] || '').slice(0, 500) || null
-      status.lastWhyRunType = (fields['Why this run type'] || '').slice(0, 500) || null
-      status.lastExpectedQualityDelta = (fields['Expected quality delta'] || '').slice(0, 500) || null
-      status.lastActualQualityDelta = (fields['Actual quality delta'] || '').slice(0, 500) || null
-      status.lastPlateauRegressionVerdict = (fields['Plateau/regression verdict'] || '').slice(0, 300) || null
-      delete status.lastNeedsHuman
-      status.lastRecoveryRequired = recoveryRequired === '1'
-      status.lastRecoveryMode = fields['Recovery mode'] || (status.lastRecoveryRequired ? 'yes - negative feedback trigger' : null)
-      status.lastAppEvidencePath = appEvidence?.summaryMdPath || appEvidence?.summaryPath || null
-      status.lastAppEvidenceGate = appEvidenceGate
-      status.lastAppEvidenceTopTier = appEvidence?.topTierEligible === true
-      status.lastAppEvidenceMode = appEvidence?.evidenceMode || null
-      status.lastAppEvidencePrimaryAction = appEvidence?.primaryAction || null
-      status.lastAppEvidenceSemanticSuccess = appEvidence?.semanticSuccess || null
-      status.lastAppEvidenceSummary = appEvidence?.notes?.join(' ').slice(0, 360) || null
-      status.lastRunStatus = runnerOk ? (qualityGate === 'PASS' ? 'ok' : qualityGate === 'FAIL' ? 'quality-failed' : 'needs-evidence') : 'failed'
-      if (agent === 'claude') {
-        if (model) status.claudeModel = model
-        else delete status.claudeModel
-      }
-      writeJsonAtomic(statusPath, status)
-    } catch (err) {
-      console.error(`[${agent || 'incubator'}-incubator] warning: could not update status: ${err.message}`)
+  // Judges the session: checks, then keep (commit) or revert, then records the
+  // outcome in RUN_LOG.md and status.json. Prints whether a review should run.
+  'session-end'([statusPath, runNumber, today, agentExit, agent, model, stdoutFile]) {
+    const status = readJson(statusPath)
+    const repo = status.repo
+    const run = Number(runNumber)
+    const fallbackStage = sessionStage(status, briefExists(repo))
+    const session = status.session?.run === run ? status.session : {
+      run,
+      stage: fallbackStage,
+      type: STAGE_TYPE[fallbackStage],
+      ratchet: 'off',
+      baseline: null,
+      baselineChecks: null,
+      startedAt: null,
     }
+    const ratchetOn = session.ratchet === 'on' && Boolean(session.baseline)
+    const agentOk = agentExit === '0'
+    let outcome
+    let reason = ''
+    let checks = null
+    let commit = null
+
+    if (!agentOk) {
+      outcome = 'failed'
+      reason = agentExit === '124' || agentExit === '137' ? `${agent} ran out of time` : `${agent} exited ${agentExit}`
+      if (ratchetOn && productChanged(repo, session.baseline)) {
+        const reverted = revertSession(repo, session.baseline)
+        reason += reverted.ok ? '; its changes were discarded' : `; its changes could not be discarded (${reverted.error})`
+      }
+    } else if (ratchetOn && !productChanged(repo, session.baseline)) {
+      outcome = 'no-changes'
+    } else {
+      checks = runChecks({ repo, label: String(run), appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
+      const problems = breakage(session.baselineChecks, checks)
+      if (problems.length && ratchetOn) {
+        const reverted = revertSession(repo, session.baseline)
+        outcome = 'reverted'
+        reason = problems.join('; ') + (reverted.ok ? '' : ` (revert incomplete: ${reverted.error})`)
+      } else if (ratchetOn) {
+        commit = keepSession(repo, commitMessage({ runNumber: run, type: session.type, fields: runFields(readText(status.runLog), run), agent }))
+        outcome = 'kept'
+        if (!commit) reason = 'the lab could not commit it'
+      } else {
+        outcome = problems.length ? 'regressed' : 'kept'
+        reason = problems.join('; ')
+      }
+    }
+
+    const outcomeText = outcome === 'kept'
+      ? `kept${commit ? ` · ${commit.slice(0, 7)}` : ''}${reason ? ` — ${reason}` : ''}`
+      : outcome === 'no-changes' ? 'no changes' : `${outcome} — ${reason}`
+    try {
+      writeTextAtomic(status.runLog, insertIntoRunSection(readText(status.runLog), run, [
+        checks ? `**Checks:** ${checksLine(checks)}` : null,
+        `**Outcome:** ${outcomeText}`,
+        `**Ended:** ${new Date().toISOString()}`,
+      ], { date: today, type: agentOk ? session.type : 'FAILED' }))
+    } catch (err) {
+      console.error(`[incubator] warning: could not record the session outcome: ${err.message}`)
+    }
+
+    status.runner = status.runner || agent
+    status.runCount = run
+    status.lastRun = today
+    status.lastRunType = agentOk ? session.type : 'FAILED'
+    status.lastRunnerStatus = agentOk ? 'ok' : 'failed'
+    status.lastRunStatus = RUN_STATUS[outcome]
+    status.lastOutcome = outcome
+    status.lastOutcomeReason = reason || null
+    status.lastOutcomeAt = new Date().toISOString()
+    status.lastSessionChecks = checks
+    if (outcome === 'failed') {
+      status.lastRunFailure = `[run failed - ${agent} exited ${agentExit}] ${capturedFailureDetail(stdoutFile, 900) || reason}`.trim()
+      status.lastRunFailureSource = 'agent exit'
+    } else {
+      delete status.lastRunFailure
+      delete status.lastRunFailureSource
+      delete status.lastRunExit
+    }
+    if (outcome === 'kept') {
+      status.lastChecks = checks
+      status.lastGoodCommit = ratchetOn ? (commit || session.baseline) : null
+      if (session.startedAt) status.notesSeenAt = session.startedAt
+      if (checks?.app?.shots?.length) {
+        status.keptEvidence = [...(status.keptEvidence || []), { run, evidence: checks.app.evidence, shots: checks.app.shots, at: new Date().toISOString() }].slice(-3)
+      }
+    } else if (ratchetOn) {
+      status.lastGoodCommit = session.baseline
+      status.lastChecks = session.baselineChecks
+    } else if (outcome === 'regressed') {
+      status.lastChecks = checks
+    }
+    for (const field of LEGACY_FIELDS) delete status[field]
+    if (agent === 'claude') {
+      if (model) status.claudeModel = model
+      else delete status.claudeModel
+    }
+
+    const review = outcome === 'kept' && reviewEnabled(status)
+    session.outcome = outcome
+    status.session = session
+    if (!review) {
+      const next = nextStage({ stage: session.stage, outcome, review: null, briefExists: briefExists(repo), polishSessions: status.polishSessions })
+      status.stage = next.stage
+      status.polishSessions = next.polishSessions
+      finishSession(status)
+    }
+    writeJsonAtomic(statusPath, status)
+    printValues({ outcome, review: review ? '1' : '0', reviewer: reviewerFor(status, agent), reason })
+  },
+
+  'review-prompt'([statusPath, runNumber]) {
+    const status = readJson(statusPath)
+    const repo = status.repo
+    const run = Number(runNumber)
+    const session = status.session || {}
+    const checks = status.lastSessionChecks
+    const fields = runFields(readText(status.runLog), run)
+    const shots = (checks?.app?.shots || []).map(file => path.join('reports', 'evidence', checks.app.evidence, file))
+    process.stdout.write(reviewPrompt({
+      name: status.displayName || status.incubatorTitle || status.project,
+      idea: ideaFor(status, readText(feedbackPathFor(status)), readText(path.join(repo, 'README.md'))),
+      runNumber: run,
+      whatChanged: fields['What changed'] || fields.Goal || '',
+      diffStat: diffStat(repo, session.baseline),
+      checksLine: checksLine(checks),
+      shots,
+    }))
+  },
+
+  // Stores the independent review and moves the project through its stages.
+  'review-apply'([statusPath, runNumber, reviewExit, reviewer]) {
+    const status = readJson(statusPath)
+    const repo = status.repo
+    const run = Number(runNumber)
+    let text = ''
+    try { text = fs.readFileSync(0, 'utf8') } catch {}
+    const review = parseReview(text)
+    const at = new Date().toISOString()
+    const verdictAt = text.lastIndexOf('**Verdict:**')
+    const body = review.ok && verdictAt >= 0
+      ? text.slice(verdictAt).trim()
+      : `The reviewer did not return a usable review (${reviewExit === '0' ? 'no verdict in its reply' : `exit ${reviewExit}`}).`
+    try {
+      fs.mkdirSync(path.join(repo, 'reports'), { recursive: true })
+      fs.writeFileSync(path.join(repo, 'reports', 'REVIEW.md'), `# Review of session ${run}\n\n_Independent review by ${reviewer}, ${at}_\n\n${body}\n`)
+      writeTextAtomic(status.runLog, insertIntoRunSection(readText(status.runLog), run, [`**Review:** ${reviewLine(review)}`]))
+    } catch (err) {
+      console.error(`[incubator] warning: could not record the review: ${err.message}`)
+    }
+    if (review.ok) {
+      status.lastReview = { ...review, run, at, reviewer }
+      status.lastQualityRating = review.rating
+      delete status.lastReviewError
+    } else {
+      status.lastReviewError = reviewExit === '0' ? 'the reviewer returned no verdict' : `the reviewer exited ${reviewExit}`
+    }
+    const session = status.session?.run === run ? status.session : { stage: status.stage, outcome: 'kept' }
+    const next = nextStage({ stage: session.stage, outcome: session.outcome || 'kept', review: review.ok ? review : null, briefExists: briefExists(repo), polishSessions: status.polishSessions })
+    status.stage = next.stage
+    status.polishSessions = next.polishSessions
+    finishSession(status, { review: review.ok ? review.verdict : 'unavailable' })
+    writeJsonAtomic(statusPath, status)
+    console.log(`review=${review.ok ? reviewLine(review) : status.lastReviewError}`)
+    console.log(`stage=${status.stage}`)
   },
 }
 

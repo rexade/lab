@@ -3,8 +3,9 @@
 Pi Pulse is the lab's control plane: an Express API + React dashboard on the Pi
 (port 8089, loopback, behind Cloudflare Access) that shows host telemetry, runs
 the **core lab loop** (`run-lab.sh`, the host improving itself), and runs any
-number of **incubator slots** (Codex/Claude agents iterating on their own
-project repos).
+number of **incubator slots**: ideas that autonomous Codex/Claude sessions
+shape, build, polish and finish in their own project repos, with the lab
+keeping or reverting each session and an independent agent reviewing it.
 
 ```
  browser ──HTTP/SSE──► src/pi-pulse/server.js      routes, boot, schedulers, SPA fallback
@@ -16,17 +17,18 @@ project repos).
                          ├ server/run-lock.js         one run at a time, output capture
                          ├ server/run-receipts.js     FAILED rows for blocked/dead runs
                          ├ server/run-logs.js + server-core.js   RUN_LOG parsing
-                         ├ server/local-ai.js         qwen critic + MemPalace context
+                         ├ server/local-ai.js         optional qwen critic API + MemPalace context
                          ├ server/system-stats.js     /proc telemetry, 24h day buffer
                          └ server/events.js           SSE channels
                                    │
-                                   │ bash projects/<slug>/run-<slug>.sh <status.json> [type]
+                                   │ bash projects/<slug>/run-<slug>.sh <status.json>
                                    ▼
-                       src/pi-pulse/scripts/run-incubator.sh   one runner for both agents
-                         ├ lib/incubator-run.mjs    config · latest-note · recent-runs · repair-block ·
-                         │                          quality-fallback · update-status
+                       src/pi-pulse/scripts/run-incubator.sh   one session, either agent
+                         ├ lib/incubator-run.mjs    config · session-begin · session-prompt · session-end ·
+                         │                          review-prompt · review-apply · recent-runs
+                         ├ lib/session.mjs          stages, prompts, git keep/revert, checks, review parsing
                          ├ lib/godot-ai-bridge.sh   optional Godot MCP bridge (Codex)
-                         └ app-evidence.mjs         headless-browser evidence for web apps
+                         └ app-evidence.mjs         headless-browser screenshots/errors for web apps
 ```
 
 ## Module map
@@ -38,9 +40,10 @@ project repos).
 | `server/util.js` | Path containment, atomic JSON writes, shell quoting, SSE helpers |
 | `server/security.js` | Write auth (proxied writes need a CF Access identity or the admin token), generated-app security headers, app → control-API write block |
 | `server/service-health.js` | Source fingerprint at boot; mutating routes return `STALE_SERVICE_SOURCE` until restart, and an idle service under systemd restarts itself once new source has settled and parses/imports cleanly |
-| `server/incubator-store.js` | `incubators.json` (refuses to overwrite a corrupt file), status normalization/repair, Claude relay setup, project scaffold |
-| `server/incubator-templates.js` | Pure: slugs, titles, roles, prompt templates, launcher template |
-| `server/incubator-runs.js` | Preflight → lock → spawn; autonomous scheduler: failing slots back off and retry by themselves, nothing switches autopilot off |
+| `server/incubator-store.js` | `incubators.json` (refuses to overwrite a corrupt file), status normalization/repair, Claude relay setup, project scaffold (stage `shaping`) |
+| `server/incubator-templates.js` | Pure: slugs, titles, launcher template |
+| `server/incubator-runs.js` | Preflight → lock → spawn; autonomous scheduler: unproductive slots back off and retry by themselves, finished (`done`) projects rest, nothing switches autopilot off |
+| `scripts/lib/session.mjs` | The session model: stages and their transitions, the builder and reviewer prompts, review parsing, the keep-or-revert rule (hard breakage only), git baseline/commit/revert, the lab's checks, RUN_LOG field placement |
 | `server/core-lab.js` | Core lab runners, core schedule, status sync |
 | `server/run-lock.js` | Global lock file + detached spawn with output capture and failure receipts |
 | `server/run-receipts.js` | FAILED rows for preflight blocks and processes that die before writing a summary |
@@ -53,12 +56,14 @@ project repos).
 
 | Layer | Owns |
 |-------|------|
-| `lib/` | Pure view models: `incubator.js` (one state per slot, most urgent first: running, blocked, failed, paused, scheduled, manual; hero sentence; six-hour schedule), `runHistory.js` (timeline order, pinned unrecovered failure, failure headlines), `critic.js`, `api.js` (JSON guard: HTML responses become explicit errors), `format.js` |
+| `lib/` | Pure view models: `incubator.js` (stages; one state per slot, most urgent first: running, blocked, failed, paused, resting, scheduled, manual; review state; the "while you were away" digest; hero sentence; six-hour schedule), `runHistory.js` (session outcomes, timeline order, pinned unrecovered failure, failure headlines), `api.js` (JSON guard: HTML responses become explicit errors), `format.js` |
 | `hooks/` | Data: `useIncubators` (SSE + 30s poll, actions), `useSystemStats` (last real sample, never simulated), `useNow` |
-| `components/` | `TopBar`, `LoopHero` + `LoopDial` (what runs now, what fires next, what needs you), `Roster`, `IncubatorDetail`, `RunTimeline`, `Critic`, `PulsePanel` (System tab), `ServicesView` |
+| `components/` | `TopBar`, `LoopHero` + `LoopDial` (what runs now, what fires next, what the lab did while you were away, what needs setup), `Roster`, `IncubatorDetail` (stage track, latest screenshot vs the one before, the builder's brief, last/next session, the independent review), `RunTimeline`, `PulsePanel` (System tab), `ServicesView` |
 
 `npm run preview:lab` serves the real server against a seeded throwaway lab
-(port 8090) with one slot in each state, for design work off the Pi.
+(port 8090) with one slot in each state (building with real before/after
+screenshots when a Chromium is available, polishing mid-session, failing and
+retrying, blocked, done and resting), for design work off the Pi.
 
 ## Invariants
 
@@ -72,18 +77,27 @@ project repos).
   list and schedule state.
 - **Autonomy never bypasses sandboxes.** Scheduled runs set
   `PI_PULSE_SCHEDULED_RUN=1` and the runner ignores bypass flags; persisted
-  bypass flags pause schedules (`PERSISTED_BYPASS_DISABLED`).
+  bypass flags are cleared and recorded (`PERSISTED_BYPASS_DISABLED`).
 - **One run at a time** across core + slots (`GLOBAL_RUN_LOCK_ACTIVE`).
-- **Quality is evidence-capped.** App evidence can only lower a self-reported
-  gate or rating; missing fields produce a conservative fallback block.
+- **The lab, not the agent, decides what is kept.** Every incubator session
+  ends in a commit or a revert to its baseline. Only hard, objective breakage
+  compared with the baseline reverts (a check that passed now fails, a blank
+  page, new page or console errors); the app harness's softer heuristics never
+  do. `reports/` is never reverted. The lab only commits in a repo it owns
+  outright (never inside another repo) and never pushes.
+- **Agents never grade themselves.** A fresh, read-only agent reviews each kept
+  session against the builder's `BRIEF.md`; its verdict (not a self-reported
+  gate) moves the stage and shows as the rating. The core lab loop still uses
+  the self-reported quality contract (`INCUBATOR_QUALITY.md`).
 - **Unattended Claude runs name a permission mode.** `-p` cannot answer
   prompts, so the runner passes `--permission-mode` (`claudePermissionMode`,
   default `auto`) unless a manual run is bypassed.
-- **Nothing waits for a person.** Failed runs back off and retry (capped at
-  12 h), the old failure fuse's pauses resume at boot, persisted bypass flags
-  are cleared without pausing, and new server code loads itself when the lab
-  is idle (`PI_PULSE_AUTO_RESTART=0` opts out). Recovery mode reads only the
-  newest steering note.
+- **Nothing waits for a person.** Unproductive sessions back off and retry
+  (capped at 12 h), the old failure fuse's pauses resume at boot, persisted
+  bypass flags are cleared without pausing, finished projects rest until a
+  note wakes them, and new server code loads itself when the lab is idle
+  (`PI_PULSE_AUTO_RESTART=0` opts out). Notes are read by the next session
+  first and count as new until a session that saw them is kept.
 - `npm run build` runs `test:trust` first: `trust-fixtures.mjs` (units and
   runner behavior with fake agents), `trust-ui.mjs` (the real JSX rendered to
   markup and checked for what a person must see), and `trust-smoke.mjs` (the
@@ -149,6 +163,21 @@ project repos).
      idea-box incubators; it now runs only first.
    - The dashboard's "Next run" showed a goal written once at creation; it
      now shows the newest run's own next step.
+
+7. **Sessions instead of a rotation** (2026-09-27)
+   - Incubators no longer cycle create/mutate/research prompt files. Each
+     session owns one goal end to end with a short prompt built by the lab:
+     the idea, the stage, the builder's own `BRIEF.md`, new notes, the last
+     review's problems, the last outcome, and the limits.
+   - The lab commits kept sessions and reverts broken ones (git), so an
+     unattended run can no longer leave the product worse.
+   - A fresh read-only agent reviews every kept session; the retired 16-field
+     self-graded form, recovery-mode keyword triggers and the local qwen
+     critic panel are gone from incubators (the critic's API remains).
+   - Projects move shaping → building → polishing → done and rest when done.
+   - The dashboard answers "what did the lab do while I was away": the
+     latest screenshot next to the previous one, the brief's done-list, the
+     outcome of each session, and the review.
 
 ## Proposed next steps (not done)
 

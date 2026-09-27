@@ -1,43 +1,5 @@
-const SUMMARY_FIELDS = [
-  'Failure',
-  'Error',
-  'Goal',
-  'Acceptance check',
-  'Done',
-  'What I investigated',
-  'Investigated',
-  'What I built',
-  'What I changed',
-  'What changed',
-  'What improved',
-  'What I found',
-  'Finding',
-  'Key finding',
-  'Quality gate',
-  'Quality rating',
-  'Output excerpt',
-  'Stdout tail',
-  'Output',
-  'Suggested next move',
-  'Next move',
-]
-
-export function runSignalSummary(run = {}) {
-  const skipSyntheticDone = /^(Claude|Codex) completed but did not append a run summary\.$/.test(run.Done || '')
-  for (const field of SUMMARY_FIELDS) {
-    if (field === 'Done' && skipSyntheticDone) continue
-    if (run[field]) return run[field]
-  }
-  return ''
-}
-
-export function latestCompletedRunSignature(runs = []) {
-  const latest = [...runs].reverse().find(run => run?.type !== 'FAILED')
-  if (!latest) return 'no-completed-run'
-  const summary = runSignalSummary(latest)
-  return latest.signature || `${latest.num ?? ''}|${latest.date ?? ''}|${latest.type ?? ''}|${summary}|${runs.length}`
-}
-
+// Stable keys for run history rows, so an expanded row stays expanded while
+// new runs stream in.
 export function runHistoryKey(slotId, run = {}, index = 0) {
   return `${slotId}-${run.signature || `${run.num}-${run.date}-${run.type}-${run.attempt || index}`}`
 }

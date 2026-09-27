@@ -1,14 +1,12 @@
 import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { clip, fmtClock, fmtDuration, fmtInterval, fmtRelativeDay, shortPath, timeValue } from '../lib/format.js'
-import { nextRunType, preflightProblems, qualityState, runnerLabel, slotHue, slotName, slotState, upcomingRun } from '../lib/incubator.js'
-import { failureHeadline, nextMoveFromRuns, RUN_TYPE_COLOR, runHistorySummary } from '../lib/runHistory.js'
-import { Critic } from './Critic.jsx'
+import { OUTCOME, preflightProblems, reviewState, runnerLabel, slotHue, slotName, slotState, STAGE_STEPS, stageOf, upcomingRun } from '../lib/incubator.js'
+import { failureHeadline, nextMoveFromRuns, RUN_TYPE_COLOR, runHistorySummary, runOutcome } from '../lib/runHistory.js'
 import { RunTimeline } from './RunTimeline.jsx'
 import { Button, Chip, Eyebrow, Glyph, Segmented, Switch, toneColor } from './ui.jsx'
 
 const INTERVALS = [0.25, 0.5, 1, 2, 6, 24]
-const GATE_TONE = { PASS: 'ok', 'NEEDS-EVIDENCE': 'warn', FAIL: 'fail' }
 
 function Banner({ tone, title, children, action, testId }) {
   const color = toneColor(tone)
@@ -38,7 +36,7 @@ function Banner({ tone, title, children, action, testId }) {
 
 function RunningBanner({ slot, state, now }) {
   return (
-    <Banner tone="run" title={`Incubating · ${nextRunType(slot)} via ${runnerLabel(slot.running?.runner || slot.runner)}`} testId="running">
+    <Banner tone="run" title={`Incubating · ${state.detail} via ${runnerLabel(slot.running?.runner || slot.runner)}`} testId="running">
       <div className="flex items-center gap-3">
         <span className="num font-mono text-[20px] font-medium text-fg">{fmtClock((now - state.startedAt) / 1000)}</span>
         <span className="relative h-[3px] flex-1 overflow-hidden rounded-full bg-white/[0.06]">
@@ -58,6 +56,145 @@ function Section({ children, className = '' }) {
   return <div className={`border-t border-white/[0.06] px-5 py-6 sm:px-7 ${className}`}>{children}</div>
 }
 
+// Shaping -> Building -> Polishing -> Done. The lab moves the project along.
+function StageTrack({ slot }) {
+  const current = stageOf(slot)
+  return (
+    <ol className="mt-3 flex flex-wrap items-center gap-1.5" aria-label={`Stage: ${current.label}`} data-stage={current.key}>
+      {STAGE_STEPS.map((step, index) => {
+        const reached = index <= current.index
+        const active = index === current.index
+        return (
+          <li key={step.key} className="flex items-center gap-1.5" title={step.blurb}>
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-[3px] text-[12px] font-medium ${active ? 'text-fg' : reached ? 'text-fg3' : 'text-fg4'}`}
+              style={active ? { background: 'color-mix(in srgb, var(--accent) 14%, transparent)', boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--accent) 38%, transparent)' } : undefined}
+              aria-current={active ? 'step' : undefined}
+            >
+              <span className="h-1.5 w-1.5 rounded-full" style={{ background: reached ? 'var(--accent)' : 'rgba(148,163,184,0.35)', boxShadow: active ? '0 0 8px var(--accent-glow)' : 'none' }} />
+              {step.label}
+            </span>
+            {index < STAGE_STEPS.length - 1 && <span aria-hidden="true" className={`h-px w-3 ${index < current.index ? 'bg-[var(--accent)] opacity-60' : 'bg-white/[0.12]'}`} />}
+          </li>
+        )
+      })}
+    </ol>
+  )
+}
+
+function evidenceUrl(slot, evidence, file) {
+  return `/api/incubators/${encodeURIComponent(slot.id)}/evidence/${encodeURIComponent(evidence)}/${encodeURIComponent(file)}`
+}
+
+// What the product looks like now (the lab's own screenshot of the last kept
+// session), next to how it looked the session before.
+function ProductView({ slot }) {
+  const kept = slot.keptEvidence || []
+  const latest = kept[kept.length - 1] || null
+  const previous = kept.length > 1 ? kept[kept.length - 2] : null
+  const [which, setWhich] = useState('now')
+  const [view, setView] = useState('desktop')
+  useEffect(() => { setWhich('now'); setView('desktop') }, [slot.id, latest?.run])
+  const shown = which === 'before' && previous ? previous : latest
+  const file = shown?.shots?.includes(`${view}.png`) ? `${view}.png` : shown?.shots?.[0]
+
+  if (!latest) {
+    return (
+      <div className="grid min-h-[180px] place-items-center rounded-[16px] border border-dashed border-white/[0.09] bg-black/20 p-6 text-center" data-product-view="none">
+        <div>
+          <div className="text-[14px] font-medium text-fg2">No screenshot yet</div>
+          <p className="mx-auto mt-1 max-w-[340px] text-[13px] leading-relaxed text-fg4">
+            After each kept session the lab opens web apps in a headless browser and keeps what it saw here.{slot.playUrl ? ' You can open the app itself above.' : ''}
+          </p>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <figure className="m-0" data-product-view={`run-${latest.run}`}>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        {previous ? (
+          <Segmented
+            size="sm"
+            ariaLabel="Compare with the previous session"
+            layoutId={`shot-${slot.id}`}
+            options={[{ value: 'now', label: `Now · #${latest.run}` }, { value: 'before', label: `Before · #${previous.run}` }]}
+            value={which}
+            onChange={setWhich}
+          />
+        ) : <span className="text-[12px] text-fg4">After session #{latest.run}</span>}
+        {shown?.shots?.includes('mobile.png') && (
+          <Segmented
+            size="sm"
+            ariaLabel="Screen size"
+            layoutId={`view-${slot.id}`}
+            options={[{ value: 'desktop', label: 'Desktop' }, { value: 'mobile', label: 'Phone' }]}
+            value={view}
+            onChange={setView}
+          />
+        )}
+      </div>
+      <div className={`overflow-hidden rounded-[14px] border border-white/[0.08] bg-black/40 ${view === 'mobile' ? 'mx-auto max-w-[260px]' : ''}`}>
+        <img
+          key={`${shown.evidence}/${file}`}
+          src={evidenceUrl(slot, shown.evidence, file)}
+          alt={`${slotName(slot)} after session #${shown.run} (${view})`}
+          className="block max-h-[420px] w-full object-cover object-top"
+          loading="lazy"
+          data-shot={`${shown.evidence}/${file}`}
+        />
+      </div>
+      <figcaption className="mt-2 text-[12px] text-fg4">Screenshot the lab took after session #{shown.run}{shown.at ? `, ${fmtRelativeDay(String(shown.at).slice(0, 10))}` : ''}.</figcaption>
+    </figure>
+  )
+}
+
+// The builder's own brief: what it is, and what done means.
+function BriefCard({ slot }) {
+  const brief = slot.brief || {}
+  if (!brief.exists) {
+    return (
+      <div data-brief="none">
+        <Eyebrow>Brief</Eyebrow>
+        <p className="mt-3 text-[14px] leading-relaxed text-fg3">
+          The first session turns the idea into <span className="font-mono text-[13px] text-fg2">BRIEF.md</span>: what this is, who it is for, and what done means. It appears here once written.
+        </p>
+      </div>
+    )
+  }
+  const doneCount = brief.done.filter(item => item.checked).length
+  return (
+    <div data-brief="present">
+      <div className="flex items-baseline justify-between gap-3">
+        <Eyebrow>Brief</Eyebrow>
+        {brief.done.length > 0 && <span className="num text-[12px] text-fg4">{doneCount}/{brief.done.length} done</span>}
+      </div>
+      {brief.what && <p className="mt-3 text-[16px] leading-snug tracking-[-0.01em] text-fg">{brief.what}</p>}
+      {brief.done.length > 0 && (
+        <ul className="mt-4 grid gap-2" data-brief-done={brief.done.length}>
+          {brief.done.map(item => (
+            <li key={item.text} className="flex items-start gap-2.5 text-[14px] leading-relaxed">
+              <span
+                aria-hidden="true"
+                className="mt-[3px] grid h-4 w-4 shrink-0 place-items-center rounded-[5px] border text-[10px]"
+                style={item.checked
+                  ? { borderColor: 'color-mix(in srgb, var(--ok) 55%, transparent)', background: 'color-mix(in srgb, var(--ok) 18%, transparent)', color: 'var(--ok)' }
+                  : { borderColor: 'rgba(255,255,255,0.14)' }}
+              >
+                {item.checked ? '✓' : ''}
+              </span>
+              <span className={item.checked ? 'text-fg3' : 'text-fg2'}>{item.text}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {brief.constraints.length > 0 && (
+        <p className="mt-4 text-[12px] leading-relaxed text-fg4">Designed within: {brief.constraints.join(' · ')}</p>
+      )}
+    </div>
+  )
+}
+
 function RatingMeter({ rating }) {
   return (
     <span className="inline-flex gap-1" aria-label={rating == null ? 'not rated' : `${rating} of 5`}>
@@ -73,91 +210,87 @@ function RatingMeter({ rating }) {
   )
 }
 
+function ReviewColumn({ slot }) {
+  const review = reviewState(slot)
+  return (
+    <div data-review={review.reviewed ? review.verdict : 'none'}>
+      <Eyebrow>Independent review</Eyebrow>
+      {review.reviewed ? (
+        <>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Chip tone={review.tone}>{review.label}</Chip>
+            <Chip tone={review.done ? 'ok' : 'idle'}>{review.done ? 'meets the brief' : 'not done yet'}</Chip>
+          </div>
+          <div className="mt-3 flex items-center gap-3">
+            <RatingMeter rating={review.rating} />
+            <span className="num text-[12px] text-fg4">{review.rating}/5</span>
+          </div>
+          {review.problems.length > 0 && (
+            <ol className="mt-3 grid gap-1.5 text-[13px] leading-relaxed text-fg2" data-review-problems={review.problems.length}>
+              {review.problems.slice(0, 3).map((problem, index) => (
+                <li key={problem} className="flex gap-2"><span className="num text-fg4">{index + 1}.</span><span>{clip(problem, 150)}</span></li>
+              ))}
+            </ol>
+          )}
+          <p className="mt-3 text-[12px] text-fg4">By {runnerLabel(review.reviewer)} in a fresh session{review.run ? ` after #${review.run}` : ''}. It steers the next session.</p>
+        </>
+      ) : (
+        <p className="mt-3 text-[14px] leading-relaxed text-fg4">After each kept session a separate, read-only agent looks at the product and says what a person would feel. {review.rating != null ? `Older self-rating: ${review.rating}/5.` : ''}</p>
+      )}
+      {slot.lastReviewError && <p className="mt-2 text-[12px] text-warn">Last review unavailable: {slot.lastReviewError}.</p>}
+    </div>
+  )
+}
+
 function LastNextBand({ slot, runs, now }) {
   const last = [...runs].reverse()[0] || null
-  const lastGate = last ? String(last['Quality gate'] || '').toUpperCase().replace(/\s+/g, '-') : ''
-  const gateKey = lastGate.startsWith('PASS') ? 'PASS' : lastGate.startsWith('FAIL') ? 'FAIL' : lastGate.includes('EVIDENCE') ? 'NEEDS-EVIDENCE' : null
+  const outcome = last ? runOutcome(last) : null
+  const meta = outcome?.key ? OUTCOME[outcome.key] : null
   const nextAt = timeValue(slot.nextRunAt)
   const upcoming = upcomingRun(slot)
-  const nextMove = nextMoveFromRuns(runs)
+  const resting = slot.stage === 'done'
   const when = slot.running?.running
-    ? 'after the current run'
-    : slot.enabled
-      ? nextAt > now ? `in ${fmtDuration(nextAt - now)}` : 'any moment'
-      : 'when you press Run'
+    ? 'after the current session'
+    : resting ? 'when a note wakes it'
+      : slot.enabled
+        ? nextAt > now ? `in ${fmtDuration(nextAt - now)}` : 'any moment'
+        : 'when you press Run'
+  const noteFirst = slot.latestUserFeedback && timeValue(slot.feedbackUpdatedAt) > timeValue(slot.lastOutcomeAt)
+  const nextMove = nextMoveFromRuns(runs)
   return (
     <div className="grid gap-6 md:grid-cols-3 md:gap-0 md:divide-x md:divide-white/[0.06]">
       <div className="md:pr-6" data-last-run={last?.num ?? 'none'}>
-        <Eyebrow>Last run</Eyebrow>
+        <Eyebrow>Last session</Eyebrow>
         {last ? (
           <>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <span className="text-[13px] font-semibold uppercase tracking-[0.1em]" style={{ color: RUN_TYPE_COLOR[last.type] || 'var(--text-3)' }}>{last.type}</span>
               <span className="num text-[13px] text-fg4">#{last.num} · {fmtRelativeDay(last.date)}</span>
-              {gateKey && <Chip tone={GATE_TONE[gateKey]}>{gateKey === 'NEEDS-EVIDENCE' ? 'needs evidence' : gateKey.toLowerCase()}</Chip>}
+              {meta && <Chip tone={meta.tone} data-outcome={outcome.key}>{meta.label}</Chip>}
             </div>
             <p className={`mt-2 text-[14px] leading-relaxed ${last.type === 'FAILED' ? 'text-[rgba(254,202,202,0.92)]' : 'text-fg2'}`}>{clip(last.type === 'FAILED' ? failureHeadline(runHistorySummary(last)) : runHistorySummary(last), 180)}</p>
+            {(outcome.key === 'reverted' || outcome.key === 'regressed') && outcome.reason && (
+              <p className="mt-2 text-[13px] leading-relaxed text-warn" data-outcome-reason={outcome.key}>{outcome.key === 'reverted' ? 'Reverted by the lab: ' : 'Made the product worse: '}{clip(outcome.reason, 160)}</p>
+            )}
           </>
         ) : <p className="mt-3 text-[14px] text-fg4">Nothing has run yet.</p>}
       </div>
       <div className="md:px-6" data-next-run={upcoming.type}>
-        <Eyebrow>Next run</Eyebrow>
+        <Eyebrow>Next session</Eyebrow>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-[13px] font-semibold uppercase tracking-[0.1em]" style={{ color: RUN_TYPE_COLOR[upcoming.type] || 'var(--text-3)' }}>{upcoming.type}</span>
           <span className="num text-[13px] text-fg4">#{upcoming.num} · {when}</span>
         </div>
-        <p className="mt-2 text-[14px] leading-relaxed text-fg2" data-next-move={nextMove ? 'agent' : 'default'}>{nextMove ? clip(nextMove, 180) : 'The agent picks the most valuable next step from the run log and your notes.'}</p>
+        <p className="mt-2 text-[14px] leading-relaxed text-fg2" data-next-move={noteFirst ? 'note' : nextMove ? 'agent' : 'default'}>
+          {noteFirst
+            ? <>Your note comes first: <span className="text-fg">{clip(slot.latestUserFeedback, 160)}</span></>
+            : nextMove ? clip(nextMove, 180) : 'The builder picks the most valuable next goal from its brief, the review and your notes.'}
+        </p>
       </div>
       <div className="md:pl-6">
-        <Critic slotId={slot.id} autoTrigger={slot.criticTrigger || 0} />
+        <ReviewColumn slot={slot} />
       </div>
     </div>
-  )
-}
-
-function Direction({ slot }) {
-  const quality = qualityState(slot)
-  const rows = [
-    ['Strategy', slot.lastRunStrategy],
-    ['Why this run type', slot.lastWhyRunType],
-    ['Expected change', slot.lastExpectedQualityDelta],
-    ['Actual change', slot.lastActualQualityDelta],
-    ['Verdict', slot.lastPlateauRegressionVerdict],
-    ['Evidence', slot.lastQualitySummary],
-    ['App evidence', slot.lastAppEvidenceSummary ? `${slot.lastAppEvidenceGate || ''} ${slot.lastAppEvidenceSummary}`.trim() : null],
-  ].filter(([, value]) => value)
-  if (!slot.lastNorthStar && !rows.length && quality.gate == null && quality.rating == null) return null
-  return (
-    <Section>
-      <div className="flex flex-wrap items-start justify-between gap-6">
-        <div className="min-w-0 flex-1">
-          <Eyebrow>North star</Eyebrow>
-          <p className="mt-3 max-w-[640px] text-[17px] leading-snug tracking-[-0.01em] text-fg">{slot.lastNorthStar ? clip(slot.lastNorthStar, 260) : <span className="text-fg4">Not declared yet.</span>}</p>
-        </div>
-        <div className="grid gap-2 text-right" data-quality-state={quality.label}>
-          <Chip tone={quality.tone} className="justify-self-end">{quality.label}</Chip>
-          <RatingMeter rating={quality.rating} />
-          <span className="num text-[12px] text-fg4">
-            {quality.rating == null ? 'unrated' : `quality ${quality.rating}/5`}{quality.confidence == null ? '' : ` · evidence ${quality.confidence}/5`}
-          </span>
-        </div>
-      </div>
-      {rows.length > 0 && (
-        <details className="group mt-5">
-          <summary className="cursor-pointer list-none text-[13px] font-medium text-fg3 transition-colors hover:text-fg">
-            <span className="inline-block transition-transform group-open:rotate-90">›</span> Strategy and evidence
-          </summary>
-          <dl className="mt-3 grid gap-3 sm:grid-cols-2">
-            {rows.map(([label, value]) => (
-              <div key={label} className="rounded-[12px] border border-white/[0.05] bg-black/20 p-3">
-                <dt className="text-[11px] font-semibold uppercase tracking-[0.12em] text-fg4">{label}</dt>
-                <dd className="mt-1 text-[13px] leading-relaxed text-fg2">{clip(value, 320)}</dd>
-              </div>
-            ))}
-          </dl>
-        </details>
-      )}
-    </Section>
   )
 }
 
@@ -181,8 +314,8 @@ function Steering({ slot, onSend }) {
   }
   return (
     <form onSubmit={send}>
-      <Eyebrow>Steer</Eyebrow>
-      <p className="mt-2 text-[14px] text-fg3">The next run reads this before choosing its work. Negative feedback puts it in recovery mode.</p>
+      <Eyebrow>Leave a note</Eyebrow>
+      <p className="mt-2 text-[14px] text-fg3">Optional. The next session reads it before anything else{slot.stage === 'done' ? ', and it wakes this finished project up' : ''}.</p>
       <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end">
         <textarea
           className="field min-h-[52px] flex-1 resize-y"
@@ -190,7 +323,7 @@ function Steering({ slot, onSend }) {
           value={text}
           onChange={event => setText(event.target.value)}
           placeholder="I like where this is heading, but…"
-          aria-label={`Steering note for ${slotName(slot)}`}
+          aria-label={`Note for ${slotName(slot)}`}
         />
         <Button type="submit" variant="ghost" disabled={text.trim().length < 3 || state === 'saving'}>
           {state === 'saving' ? 'Sending…' : state === 'saved' ? 'Sent ✓' : 'Send'}
@@ -209,10 +342,12 @@ function Steering({ slot, onSend }) {
 function RunnerDetails({ slot, preflight }) {
   const setup = slot.runnerSetups?.claude
   const rows = [
-    ['Runner', runnerLabel(slot.runner)],
+    ['Builder', runnerLabel(slot.runner)],
+    ['Reviewer', slot.review === false ? 'off' : `${runnerLabel(slot.reviewer)} (fresh session, read-only)`],
     ['Command', preflight?.command],
     slot.runner === 'claude' ? ['Model', `${slot.claudeModel || setup?.model || 'CLI default'} (falls back to sonnet)`] : ['Model', slot.codexModel || 'Codex default'],
     slot.runner === 'claude' ? ['Permissions', setup?.permissionMode || 'auto'] : ['Sandbox', 'workspace-write (project only)'],
+    ['Version control', slot.ratchet === 'off' ? `off: ${slot.ratchetReason || 'unavailable'}` : slot.lastGoodCommit ? `on · last good ${slot.lastGoodCommit}` : 'starts with the first session'],
     ['Launcher', slot.launcher ? shortPath(slot.launcher) : null],
     ['Repo', slot.repo],
     ['Run log', slot.runLog ? shortPath(slot.runLog) : null],
@@ -250,7 +385,6 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
   const name = slotName(slot)
   const state = slotState(slot, { preflight, now })
   const problems = preflightProblems(preflight)
-  const quality = qualityState(slot)
   const running = state.kind === 'running'
   const intervalOptions = [...new Set([...INTERVALS, Number(slot.intervalHours) || 0.5])].sort((a, b) => a - b)
     .map(hours => ({ value: hours, label: fmtInterval(hours) }))
@@ -286,8 +420,9 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
               <h2 className="truncate text-[26px] font-semibold leading-tight tracking-[-0.03em] text-fg sm:text-[30px]">{name}</h2>
               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-fg4">
                 {slot.phase && <><span>{slot.phase}</span><span>·</span></>}
-                <span className="num">{slot.runCount || 0} runs</span>
+                <span className="num">{slot.runCount || 0} sessions</span>
               </div>
+              <StageTrack slot={slot} />
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -300,7 +435,7 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
               variant={problems.length ? 'danger' : running ? 'ghost' : 'run'}
               onClick={() => act('run', () => actions.run(slot.id), `${name} started`)}
               disabled={running || !!busy}
-              title={problems.length ? `Launch is blocked: ${problems[0]}. Trying records the blocked attempt in history.` : `Run ${name} now`}
+              title={problems.length ? `Launch is blocked: ${problems[0]}. Trying records the blocked attempt in history.` : `Run a session of ${name} now`}
               data-run-button={slot.id}
               data-run-blocked={problems.length ? 'true' : 'false'}
             >
@@ -329,7 +464,7 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
             />
             <div>
               <div className="text-[14px] font-medium text-fg">Autopilot</div>
-              <div className="text-[12px] text-fg4">{slot.enabled ? `runs every ${fmtInterval(slot.intervalHours)}` : 'runs only when you press Run'}</div>
+              <div className="text-[12px] text-fg4">{slot.enabled ? `a session every ${fmtInterval(slot.intervalHours)}` : 'runs only when you press Run'}</div>
             </div>
             <Segmented
               size="sm"
@@ -363,14 +498,14 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
                 <ul className="grid gap-1" data-preflight-problems={problems.length}>
                   {problems.map(problem => <li key={problem} className="font-mono text-[13px] text-[rgba(254,202,202,0.92)]">{problem}</li>)}
                 </ul>
-                <p className="mt-2 text-[13px] text-fg3">Fix the check above. Until then every launch attempt, manual or on autopilot, is recorded as a failed run.</p>
+                <p className="mt-2 text-[13px] text-fg3">This is setup the lab cannot fix by itself. Until it is fixed, every launch attempt is recorded as a failed session.</p>
               </Banner>
             )}
             {!running && state.kind !== 'blocked' && slot.lastRunStatus === 'failed' && (
               <Banner
                 key="failed"
                 tone="fail"
-                title={`Last run failed${slot.lastRunFailureSource ? ` · ${slot.lastRunFailureSource}` : ''}`}
+                title={`Last session failed${slot.lastRunFailureSource ? ` · ${slot.lastRunFailureSource}` : ''}`}
                 testId="failed"
                 action={slot.lastRunFailure && slot.lastRunFailure.length > 120 ? <Button size="sm" variant="quiet" onClick={() => setFailureOpen(open => !open)}>{failureOpen ? 'Less' : 'Full error'}</Button> : null}
               >
@@ -393,9 +528,9 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
                 {state.detail}
               </Banner>
             )}
-            {quality.label === 'Recovery mode' && (
-              <Banner key="recovery" tone="warn" title="Recovery mode" testId="recovery">
-                Your latest note was critical, so the next run fixes that complaint before adding anything.
+            {state.kind === 'resting' && (
+              <Banner key="resting" tone="ok" title="Done — it meets its brief" testId="resting">
+                The reviewer confirmed the brief and polishing found nothing more worth doing, so it rests. Leave a note to give it something new.
               </Banner>
             )}
             {notice && (
@@ -406,9 +541,14 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
       </div>
 
       <Section>
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)] lg:gap-8">
+          <ProductView slot={slot} />
+          <BriefCard slot={slot} />
+        </div>
+      </Section>
+      <Section>
         <LastNextBand slot={slot} runs={runs} now={now} />
       </Section>
-      <Direction slot={slot} />
       <Section>
         <RunTimeline runs={runs} slotId={slot.id} error={historyError} />
       </Section>

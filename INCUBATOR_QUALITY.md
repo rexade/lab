@@ -1,5 +1,10 @@
 # Incubator Quality Contract
 
+> **Scope (2026-09-27):** this self-reported contract now governs the core lab
+> loop (`run-lab.sh`, `prompts/*.md`). Incubator slots no longer fill in quality
+> fields: the lab runs their checks and keeps or reverts each session, and an
+> independent agent reviews what was kept. See `projects/INCUBATOR.md`.
+
 Pi Pulse does not treat agent output as good just because the runner exited cleanly.
 Every incubator run must leave enough evidence for the next run and the UI to judge state.
 

@@ -132,17 +132,6 @@ export function resolveClaudePermissionMode(saved, env = process.env) {
   return [saved, env.CLAUDE_PERMISSION_MODE].find(mode => CLAUDE_PERMISSION_MODES.includes(mode)) || DEFAULT_CLAUDE_PERMISSION_MODE
 }
 
-export const DEFAULT_ROTATION = ['mutate', 'research', 'mutate']
-
-// `create` builds the first prototype, so it runs once: after that the rotation
-// must never tell a living project to start over.
-export function rotationFor(status = {}) {
-  const runTypes = Array.isArray(status.runTypes) && status.runTypes.length ? status.runTypes : DEFAULT_ROTATION
-  if (!(Number(status.runCount) > 0)) return runTypes
-  const rest = runTypes.filter(type => String(type).toLowerCase() !== 'create')
-  return rest.length ? rest : DEFAULT_ROTATION
-}
-
 // The UI appends each steering note as a `## <ISO timestamp>` section; `## Seed`
 // holds the original idea, not feedback. Other `## ` lines belong to a note's
 // own markdown. Returns the newest note's body, or '' when there is none.
@@ -165,7 +154,9 @@ export function checkClaudeModel(model, allowCliDefault = false) {
   return readinessCheck('model', 'Claude model', true, model)
 }
 
-export function preflightRunConfig({ id, project, runner, runScript, relayScript = null, launcher = null, repo, runLog, statusPath, promptDir, runTypes, runType, claudeModel, allowClaudeDefaultModel = false }) {
+// `sessionRun`: incubator sessions build their prompt in code, so prompt files
+// are only required by the core lab loop (run-lab.sh).
+export function preflightRunConfig({ id, project, runner, runScript, relayScript = null, launcher = null, repo, runLog, statusPath, promptDir, runTypes, runType, claudeModel, allowClaudeDefaultModel = false, sessionRun = false }) {
   const selectedRunner = runner || 'script'
   const checks = [
     checkPath('status', 'status file', statusPath),
@@ -177,8 +168,10 @@ export function preflightRunConfig({ id, project, runner, runScript, relayScript
   if (selectedRunner === 'codex' || runScript?.includes('run-codex-incubator.sh')) {
     const selectedRunType = runType || runTypes?.[0] || 'mutate'
     checks.push(checkCommand('binary', 'codex', process.env.CODEX_BIN || '/home/admin/.npm-global/bin/codex'))
-    checks.push(checkPath('promptDir', 'prompt directory', promptDir, 'dir'))
-    checks.push(checkPath('prompt', `${selectedRunType} prompt`, promptDir ? join(promptDir, `${selectedRunType}.md`) : null))
+    if (!sessionRun) {
+      checks.push(checkPath('promptDir', 'prompt directory', promptDir, 'dir'))
+      checks.push(checkPath('prompt', `${selectedRunType} prompt`, promptDir ? join(promptDir, `${selectedRunType}.md`) : null))
+    }
   } else if (selectedRunner === 'claude') {
     const selectedRunType = runType || runTypes?.[0] || 'mutate'
     if (relayScript && relayScript !== runScript) {
@@ -186,7 +179,7 @@ export function preflightRunConfig({ id, project, runner, runScript, relayScript
     }
     checks.push(checkClaudeCommand())
     checks.push(checkClaudeModel(claudeModel, allowClaudeDefaultModel))
-    if (promptDir || runScript?.includes('run-claude-incubator.sh')) {
+    if (!sessionRun && (promptDir || runScript?.includes('run-claude-incubator.sh'))) {
       checks.push(checkPath('promptDir', 'prompt directory', promptDir, 'dir'))
       checks.push(checkPath('prompt', `${selectedRunType} prompt`, promptDir ? join(promptDir, `${selectedRunType}.md`) : null))
     }
@@ -698,7 +691,7 @@ export function parseRunsFromLog(content, options = {}) {
 function isRecoveredAfterFailure(run) {
   if (!run || run.type === 'FAILED') return false
   const gate = String(run['Quality gate'] || '').toUpperCase()
-  return gate === 'PASS' || run.type === 'CREATE' || run.type === 'MUTATE' || run.type === 'RESEARCH' || run.type === 'HARVEST'
+  return gate === 'PASS' || ['CREATE', 'MUTATE', 'RESEARCH', 'HARVEST', 'SHAPE', 'BUILD', 'POLISH'].includes(run.type)
 }
 
 function shouldPinFailure(runs = [], failure, recent) {

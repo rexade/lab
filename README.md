@@ -65,6 +65,8 @@ The short version of why:
 
 Freeform is the pro-creativity engine. Milestones are the pro-shipping engine. Both matter, but you use them in that order: create, then converge.
 
+**Incubators converge by design (2026-09-27).** An incubator exists to turn someone's idea into a finished thing without them, so it is the one place that aims to finish. The convergence is owned by the agents, not imposed by a person: the builder writes its own brief (what done means) in the first session and may change it at any time, the lab only reverts sessions that measurably break the product, and an independent reviewer decides when the brief is met. The workshop loop itself stays freeform.
+
 The one signal that would justify introducing milestone discipline for a specific product: a **binary shipping gate** — e.g. "V32 beats DEFAULT_WEIGHTS on the named May 2026 holdout → promote." That's when a product has converged enough that "does it beat X" is answerable. No product is at that threshold today. If the human ever says "help me ship X" or "prove Y beats baseline," ask before adding structure — that's the conversation where milestones might come back on the table for that specific product, without changing how the workshop drives everything else.
 
 ---
@@ -197,9 +199,9 @@ Do not switch `.mcp.json` to `mempalace-mcp` until that executable exists on the
 
 ## Incubator slots
 
-Pi Pulse hosts any number of **incubator slots** (`projects/incubators.json`). Each slot points at `projects/<slug>/status.json`, which names the project repo (under `/home/admin/<slug>/`), its run log, prompts, runner (`codex` or `claude`), and last-run quality state. The Lab tab shows the loop at a glance (what is incubating, what fires next, what needs you) and, per slot, its history, autopilot schedule, runner switch, steering box, and local critic.
+Pi Pulse hosts any number of **incubator slots** (`projects/incubators.json`): ideas the lab builds on its own. You give it an idea (and, if you like, a note now and then); autonomous sessions shape it into a `BRIEF.md` and a first version, build toward the brief's "Done means" list, polish, and rest when an independent reviewer finds the brief met. Each slot points at `projects/<slug>/status.json`, which names the project folder (under `/home/admin/<slug>/`), its run log, the builder (`codex` or `claude`), its stage and its last outcome and review. The Lab tab answers "what did the lab do while I was away": what is incubating, what fires next, the latest screenshot next to the previous one, each session's outcome, and the review.
 
-Every slot launches through a generated `projects/<slug>/run-<slug>.sh`, which execs the unified runner `src/pi-pulse/scripts/run-incubator.sh`. The runner picks the agent from `status.runner`, builds the prompt, runs the agent under a timeout, writes RUN_LOG receipts and `reports/stdout/<agent>-run-N.log`, runs app evidence, and updates `status.json`.
+Every slot launches through a generated `projects/<slug>/run-<slug>.sh`, which execs the unified runner `src/pi-pulse/scripts/run-incubator.sh`. One session = one agent owning one goal end to end; the lab then runs its checks and either commits the session or reverts it (git, never pushed), and a fresh read-only agent reviews what was kept.
 
 **To add a project:** use the UI's new-incubator form (`POST /api/incubators/create`), or write `projects/<name>/status.json` and `POST /api/incubators { "project": "<name>" }`. No restart needed. Details: `projects/INCUBATOR.md`.
 

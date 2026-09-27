@@ -1,12 +1,59 @@
 import { AnimatePresence, motion } from 'framer-motion'
+import { clip } from '../lib/format.js'
+import { OUTCOME } from '../lib/incubator.js'
 import { LoopDial } from './LoopDial.jsx'
-import { Dot, Eyebrow, toneColor } from './ui.jsx'
+import { Chip, Dot, Eyebrow, toneColor } from './ui.jsx'
 
 const TONE_EYEBROW = {
   run: 'Agent at work',
   ok: 'Running feral',
-  warn: 'Running · needs you',
+  warn: 'Running · something needs setup',
   idle: 'Resting',
+}
+
+// What the lab did since you last looked, newest first.
+function AwayDigest({ away, onFocus }) {
+  if (!away?.total && !away?.finished?.length) return null
+  const parts = [
+    `${away.total} session${away.total === 1 ? '' : 's'}`,
+    away.kept ? `${away.kept} kept` : null,
+    away.reverted ? `${away.reverted} reverted by the lab` : null,
+    away.failed ? `${away.failed} failed and retrying` : null,
+  ].filter(Boolean)
+  return (
+    <div className="mt-7 rounded-[18px] border border-white/[0.07] bg-black/25 p-4 sm:p-5" data-away-digest={away.total}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <Eyebrow>While you were away</Eyebrow>
+        <span className="text-[13px] text-fg3">{parts.join(' · ')}</span>
+      </div>
+      {away.finished.length > 0 && (
+        <p className="mt-3 text-[14px] text-ok" data-away-finished={away.finished.length}>
+          Finished: {away.finished.join(', ')} — {away.finished.length === 1 ? 'it meets its brief' : 'they meet their briefs'} and {away.finished.length === 1 ? 'rests' : 'rest'}.
+        </p>
+      )}
+      <ul className="mt-3 grid gap-1.5">
+        {away.items.slice(0, 5).map(item => {
+          const meta = OUTCOME[item.outcome] || { label: item.type, tone: 'idle' }
+          return (
+            <li key={`${item.slotId}-${item.num}`}>
+              <button
+                type="button"
+                onClick={() => onFocus?.(item.slotId)}
+                className="focus-ring group flex w-full items-baseline gap-3 rounded-[10px] px-2 py-1.5 text-left transition-colors hover:bg-white/[0.04]"
+              >
+                <Chip tone={meta.tone} className="shrink-0">{meta.label}</Chip>
+                <span className="min-w-0 flex-1 truncate text-[14px] text-fg2">
+                  <span className="font-medium text-fg">{item.name}</span>
+                  <span className="text-fg4"> · #{item.num} </span>
+                  {clip(item.text, 120)}
+                </span>
+              </button>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
 }
 
 function Stat({ label, value, tone, onClick }) {
@@ -23,7 +70,7 @@ function Stat({ label, value, tone, onClick }) {
   )
 }
 
-export function LoopHero({ slots, headline, today, now, onFocus }) {
+export function LoopHero({ slots, headline, today, away, now, onFocus }) {
   const attention = headline.attention || []
   return (
     <section className="glass overflow-hidden p-6 sm:p-8" aria-label="Autonomous lab status">
@@ -55,9 +102,11 @@ export function LoopHero({ slots, headline, today, now, onFocus }) {
 
           <div className="mt-8 flex flex-wrap gap-x-10 gap-y-5">
             <Stat label="on autopilot" value={`${headline.autopilot}/${slots.length}`} tone={headline.autopilot ? 'ok' : null} />
-            <Stat label="runs today" value={today.total} />
-            <Stat label="failed today" value={today.failed} tone={today.failed ? 'fail' : null} />
-            <Stat label="need you" value={attention.length} tone={attention.length ? 'warn' : null} onClick={attention.length ? () => onFocus?.(attention[0].id) : undefined} />
+            <Stat label="sessions today" value={today.total} />
+            <Stat label="kept today" value={today.kept ?? 0} tone={today.kept ? 'ok' : null} />
+            {attention.length > 0
+              ? <Stat label="need setup" value={attention.length} tone="warn" onClick={() => onFocus?.(attention[0].id)} />
+              : <Stat label="done & resting" value={headline.resting ?? 0} tone={headline.resting ? 'ok' : null} />}
           </div>
 
           {attention.length > 0 && (
@@ -77,6 +126,7 @@ export function LoopHero({ slots, headline, today, now, onFocus }) {
               ))}
             </div>
           )}
+          <AwayDigest away={away} onFocus={onFocus} />
         </div>
         <LoopDial slots={slots} now={now} headline={headline} />
       </div>

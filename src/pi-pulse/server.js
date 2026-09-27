@@ -4,11 +4,11 @@ import express from 'express'
 import fs from 'fs'
 import { spawn } from 'child_process'
 import { basename, dirname, join, resolve } from 'path'
-import { firstRunnableClaudeModel, preflightFailureDetail, rotationFor, runsWithPinnedLatestFailure } from './server-core.js'
+import { firstRunnableClaudeModel, preflightFailureDetail, runsWithPinnedLatestFailure } from './server-core.js'
+import { currentStage, parseBrief, STAGE_TYPE } from './scripts/lib/session.mjs'
 import {
   CORE_FEEDBACK_JSON,
   CORE_FEEDBACK_MD,
-  DEFAULT_RUN_TYPES,
   DIST_DIR,
   GHOST_DIARY_PATH,
   HOST,
@@ -144,16 +144,27 @@ const rejectGeneratedAppControlWrite = createGeneratedAppWriteGuard(isGeneratedA
 
 // ─── Incubator view model ─────────────────────────────────────────────────────
 
+function readBrief(repo) {
+  try {
+    const text = fs.readFileSync(join(repo, 'BRIEF.md'), 'utf8')
+    return parseBrief(text.slice(0, 16000))
+  } catch {
+    return { exists: false, what: '', done: [], constraints: [] }
+  }
+}
+
 function hydrateIncubator(slot) {
   const { status: cfg, repaired } = repairClaudeRunnerStatusIfNeeded(slot.statusPath)
-  const repoStatusPath = join(cfg.repo, 'status.json')
+  // Older projects keep their display name in the repo's own status.json.
   let repoStatus = {}
-  try { repoStatus = JSON.parse(fs.readFileSync(repoStatusPath, 'utf8')) } catch {}
+  try { repoStatus = JSON.parse(fs.readFileSync(join(cfg.repo, 'status.json'), 'utf8')) } catch {}
   const running = getIncubatorRun(slot.id)
   const playRoute = fs.existsSync(join(cfg.repo, 'index.html')) ? mountPlayRoute(cfg) : null
   const claudeSetup = claudeRunnerSetupForStatus(cfg)
   const claudeRelayScript = claudeSetup.script || claudeSetup.expectedScript || cfg.claudeRunScript || null
-  const runTypes = Array.isArray(cfg.runTypes) && cfg.runTypes.length ? cfg.runTypes : DEFAULT_RUN_TYPES
+  const brief = readBrief(cfg.repo)
+  const stage = currentStage(cfg, brief.exists)
+  const nextStage = stage === 'done' ? 'polishing' : stage
   return {
     ...slot,
     project: cfg.project,
@@ -161,6 +172,8 @@ function hydrateIncubator(slot) {
     displayName: cfg.displayName ?? cfg.incubatorTitle ?? repoStatus.displayName ?? repoStatus.incubatorTitle ?? cfg.project,
     phase: cfg.phase ?? repoStatus.phase ?? null,
     runner: cfg.runner ?? 'script',
+    reviewer: cfg.reviewer === 'codex' || cfg.reviewer === 'claude' ? cfg.reviewer : (cfg.runner ?? 'codex'),
+    review: cfg.review !== false,
     repo: cfg.repo,
     runLog: cfg.runLog,
     launchScript: cfg.runScript ?? null,
@@ -168,46 +181,41 @@ function hydrateIncubator(slot) {
     claudeRelayScript,
     relayScript: cfg.runner === 'claude' ? claudeRelayScript : null,
     playUrl: playRoute ? `${playRoute}/` : null,
-    runCount: cfg.runCount ?? repoStatus.runCount ?? 0,
-    runTypes,
-    // The runner picks rotation[runCount % length]; `create` only ever runs first.
-    nextRunType: (() => {
-      const rotation = rotationFor({ ...cfg, runTypes })
-      return String(rotation[Number(cfg.runCount || 0) % rotation.length] || 'mutate').toUpperCase()
-    })(),
-    lastRun: cfg.lastRun ?? repoStatus.lastRun ?? null,
-    lastRunType: cfg.lastRunType ?? repoStatus.lastRunType ?? null,
-    lastRunStatus: cfg.lastRunStatus ?? repoStatus.lastRunStatus ?? null,
-    lastRunnerStatus: cfg.lastRunnerStatus ?? repoStatus.lastRunnerStatus ?? null,
-    lastQualityGate: cfg.lastQualityGate ?? repoStatus.lastQualityGate ?? null,
-    lastQualityRating: cfg.lastQualityRating ?? repoStatus.lastQualityRating ?? null,
-    lastEvidenceConfidence: cfg.lastEvidenceConfidence ?? repoStatus.lastEvidenceConfidence ?? null,
-    lastQualitySummary: cfg.lastQualitySummary ?? repoStatus.lastQualitySummary ?? null,
-    lastNorthStar: cfg.lastNorthStar ?? repoStatus.lastNorthStar ?? null,
-    lastRunStrategy: cfg.lastRunStrategy ?? repoStatus.lastRunStrategy ?? null,
-    lastWhyRunType: cfg.lastWhyRunType ?? repoStatus.lastWhyRunType ?? null,
-    lastExpectedQualityDelta: cfg.lastExpectedQualityDelta ?? repoStatus.lastExpectedQualityDelta ?? null,
-    lastActualQualityDelta: cfg.lastActualQualityDelta ?? repoStatus.lastActualQualityDelta ?? null,
-    lastPlateauRegressionVerdict: cfg.lastPlateauRegressionVerdict ?? repoStatus.lastPlateauRegressionVerdict ?? null,
-    lastRecoveryRequired: cfg.lastRecoveryRequired ?? repoStatus.lastRecoveryRequired ?? null,
-    lastRecoveryMode: cfg.lastRecoveryMode ?? repoStatus.lastRecoveryMode ?? null,
-    lastAppEvidencePath: cfg.lastAppEvidencePath ?? repoStatus.lastAppEvidencePath ?? null,
-    lastAppEvidenceGate: cfg.lastAppEvidenceGate ?? repoStatus.lastAppEvidenceGate ?? null,
-    lastAppEvidenceTopTier: cfg.lastAppEvidenceTopTier ?? repoStatus.lastAppEvidenceTopTier ?? null,
-    lastAppEvidenceMode: cfg.lastAppEvidenceMode ?? repoStatus.lastAppEvidenceMode ?? null,
-    lastAppEvidencePrimaryAction: cfg.lastAppEvidencePrimaryAction ?? repoStatus.lastAppEvidencePrimaryAction ?? null,
-    lastAppEvidenceSemanticSuccess: cfg.lastAppEvidenceSemanticSuccess ?? repoStatus.lastAppEvidenceSemanticSuccess ?? null,
-    lastAppEvidenceSummary: cfg.lastAppEvidenceSummary ?? repoStatus.lastAppEvidenceSummary ?? null,
-    lastRunFailure: cfg.lastRunFailure ?? repoStatus.lastRunFailure ?? null,
-    lastRunFailureSource: cfg.lastRunFailureSource ?? repoStatus.lastRunFailureSource ?? null,
-    lastRunExit: cfg.lastRunExit ?? repoStatus.lastRunExit ?? null,
+    runCount: cfg.runCount ?? 0,
+    // Sessions follow the project's stage: shaping -> building -> polishing -> done.
+    stage,
+    polishSessions: cfg.polishSessions ?? 0,
+    nextRunType: STAGE_TYPE[nextStage],
+    brief,
+    session: cfg.session ? { run: cfg.session.run, stage: cfg.session.stage, type: cfg.session.type, startedAt: cfg.session.startedAt, ratchet: cfg.session.ratchet } : null,
+    lastSession: cfg.lastSession ?? null,
+    ratchet: cfg.ratchet ?? null,
+    ratchetReason: cfg.ratchetReason ?? null,
+    lastGoodCommit: cfg.lastGoodCommit ? String(cfg.lastGoodCommit).slice(0, 7) : null,
+    lastOutcome: cfg.lastOutcome ?? null,
+    lastOutcomeReason: cfg.lastOutcomeReason ?? null,
+    lastOutcomeAt: cfg.lastOutcomeAt ?? null,
+    lastChecks: cfg.lastChecks ?? null,
+    lastSessionChecks: cfg.lastSessionChecks ?? null,
+    lastReview: cfg.lastReview?.ok ? cfg.lastReview : null,
+    lastReviewError: cfg.lastReviewError ?? null,
+    keptEvidence: Array.isArray(cfg.keptEvidence) ? cfg.keptEvidence.slice(-2) : [],
+    lastRun: cfg.lastRun ?? null,
+    lastRunType: cfg.lastRunType ?? null,
+    lastRunStatus: cfg.lastRunStatus ?? null,
+    lastRunnerStatus: cfg.lastRunnerStatus ?? null,
+    // Older projects carry a self-reported rating until their first reviewed session.
+    lastQualityRating: cfg.lastReview?.ok ? cfg.lastReview.rating : cfg.lastQualityRating ?? null,
+    lastRunFailure: cfg.lastRunFailure ?? null,
+    lastRunFailureSource: cfg.lastRunFailureSource ?? null,
+    lastRunExit: cfg.lastRunExit ?? null,
     availableRunners: ['codex', 'claude'],
     runnerSetups: { claude: claudeSetup },
     repairedRunnerConfig: repaired ? 'claude' : null,
     claudeModel: firstRunnableClaudeModel(cfg.claudeModel) ?? null,
     codexModel: cfg.codexModel ?? null,
-    current_focus: cfg.current_focus ?? repoStatus.current_focus ?? null,
-    notes: cfg.notes ?? repoStatus.notes ?? null,
+    current_focus: cfg.current_focus ?? null,
+    notes: cfg.notes ?? null,
     feedbackPath: projectFeedbackPath(cfg),
     latestUserFeedback: cfg.latestUserFeedback ?? readLatestProjectFeedback(projectFeedbackPath(cfg)),
     feedbackUpdatedAt: cfg.feedbackUpdatedAt ?? null,
@@ -439,6 +447,24 @@ app.get('/api/incubators/:id/runs', (req, res) => {
   }
 })
 
+// Screenshots the lab's browser check took of a session (reports/evidence/run-N/*.png).
+app.get('/api/incubators/:id/evidence/:run/:file', (req, res) => {
+  const slot = readIncubators().slots.find(s => s.id === req.params.id)
+  if (!slot) return res.status(404).json({ ok: false, error: 'incubator not found' })
+  const { run, file } = req.params
+  if (!/^run-[a-z0-9-]+$/i.test(run) || !/^[a-z0-9_-]+\.png$/i.test(file)) return res.status(400).json({ ok: false, error: 'invalid evidence path' })
+  try {
+    const cfg = readStatusAt(slot.statusPath)
+    const root = resolve(cfg.repo, 'reports', 'evidence')
+    const target = resolve(root, run, file)
+    if (!target.startsWith(root + '/') || !fs.existsSync(target) || !fs.statSync(target).isFile()) return res.status(404).json({ ok: false, error: 'evidence not found' })
+    res.set('Cache-Control', 'private, max-age=300')
+    res.sendFile(target)
+  } catch (err) {
+    res.status(404).json({ ok: false, error: err.message })
+  }
+})
+
 app.get('/api/incubators/:id/run/status', (req, res) => {
   res.json({ ok: true, ...getIncubatorRun(req.params.id) })
 })
@@ -559,6 +585,12 @@ app.post('/api/incubators/:id/feedback', requireFreshSource, (req, res) => {
     cfg.feedbackPath = filePath
     cfg.latestUserFeedback = feedback.slice(0, 2000)
     cfg.feedbackUpdatedAt = stamp
+    // A note on a finished project is a new request: it goes back to building.
+    if (cfg.stage === 'done' || cfg.stage === 'polishing') {
+      cfg.stage = 'building'
+      cfg.polishSessions = 0
+    }
+    slot.restingSince = null
     slot.autoRunsSinceHuman = 0
     clearSlotBlockState(slot)
     if (slot.enabled && (!slot.nextRunAt || slot.nextRunAt < Date.now())) {

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { fmtClock } from '../lib/format.js'
-import { outcomeStrip, slotHue, slotName, slotState } from '../lib/incubator.js'
+import { outcomeStrip, slotHue, slotName, slotState, stageOf } from '../lib/incubator.js'
 import { Button, Eyebrow, Glyph, OutcomeStrip, toneColor } from './ui.jsx'
 
 function NewIncubator({ onCreate, onClose }) {
@@ -42,7 +42,7 @@ function NewIncubator({ onCreate, onClose }) {
           className="field min-h-[96px] resize-y"
           value={idea}
           onChange={event => { setIdea(event.target.value); setError(null) }}
-          placeholder="Describe what the lab should build — the agent takes it from here."
+          placeholder="Describe an idea. The lab shapes it into a brief, builds it, reviews it and polishes it on its own."
           aria-label="Incubator idea"
         />
         <input
@@ -98,7 +98,7 @@ function RosterRow({ slot, selected, state, runs, now, onSelect }) {
       </span>
       <span className="relative hidden shrink-0 flex-col items-end gap-1.5 sm:flex">
         <OutcomeStrip outcomes={outcomeStrip(runs, 10)} />
-        <span className={`text-[11px] font-semibold uppercase tracking-[0.14em] ${slot.enabled ? 'text-ok' : 'text-fg4'}`}>{slot.enabled ? 'auto' : 'manual'}</span>
+        <span className={`text-[11px] font-semibold uppercase tracking-[0.14em] ${slot.enabled ? 'text-ok' : 'text-fg4'}`} data-row-stage={stageOf(slot).key} title={stageOf(slot).label}>{slot.enabled ? 'auto' : 'manual'}</span>
       </span>
     </button>
   )

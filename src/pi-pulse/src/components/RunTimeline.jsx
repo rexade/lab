@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { clip, fmtRelativeDay } from '../lib/format.js'
+import { OUTCOME } from '../lib/incubator.js'
 import {
   defaultOpenRunKey,
   failureHeadline,
   RUN_TYPE_COLOR,
   runAttemptText,
   runHistorySummary,
+  runOutcome,
   runOutputDetail,
   timelineRuns,
 } from '../lib/runHistory.js'
@@ -29,6 +31,7 @@ export function RunRow({ run, runKey, open, onToggle, last }) {
   const summary = failed ? failureHeadline(runHistorySummary(run)) : runHistorySummary(run)
   const detail = runOutputDetail(run) || (failed ? summary : '')
   const gate = gateOf(run)
+  const outcome = OUTCOME[runOutcome(run).key]
   const attempt = runAttemptText(run)
   return (
     <li
@@ -43,7 +46,9 @@ export function RunRow({ run, runKey, open, onToggle, last }) {
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
           <span className="text-[12px] font-semibold uppercase tracking-[0.12em]" style={{ color }}>{run.type || 'Run'}</span>
           <span className="num text-[12px] text-fg4">#{run.num} · {fmtRelativeDay(run.date)}{attempt ? ` · ${attempt}` : ''}</span>
-          {gate && <Chip tone={GATE_TONE[gate]}>{gate === 'NEEDS-EVIDENCE' ? 'needs evidence' : gate.toLowerCase()}{run['Quality rating'] ? ` · ${run['Quality rating']}` : ''}</Chip>}
+          {outcome && !failed
+            ? <Chip tone={outcome.tone} data-run-outcome={runOutcome(run).key}>{outcome.label.toLowerCase()}</Chip>
+            : gate && <Chip tone={GATE_TONE[gate]}>{gate === 'NEEDS-EVIDENCE' ? 'needs evidence' : gate.toLowerCase()}{run['Quality rating'] ? ` · ${run['Quality rating']}` : ''}</Chip>}
         </div>
         <p className={`mt-1.5 text-[14px] leading-relaxed ${failed ? 'text-[rgba(254,202,202,0.92)]' : 'text-fg2'}`}>{clip(summary, failed ? 260 : 200)}</p>
         {detail && (

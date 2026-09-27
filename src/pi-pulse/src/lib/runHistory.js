@@ -1,6 +1,9 @@
 import { runHistoryKey } from './runSignals.js'
 
 export const RUN_TYPE_COLOR = {
+  SHAPE: '#22d3ee',
+  BUILD: '#a78bfa',
+  POLISH: '#fbbf24',
   CREATE: '#22d3ee',
   MUTATE: '#a78bfa',
   RESEARCH: '#34d399',
@@ -8,9 +11,12 @@ export const RUN_TYPE_COLOR = {
   FAILED: '#f87171',
 }
 
+const SESSION_TYPES = ['SHAPE', 'BUILD', 'POLISH']
+
 const SUMMARY_FIELDS = [
   'Failure',
   'Error',
+  'What changed',
   'Goal',
   'Acceptance check',
   'Done',
@@ -88,6 +94,12 @@ export function runFailureDetail(run = {}) {
 export function runOutputDetail(run = {}) {
   if (run.type === 'FAILED') return runFailureDetail(run)
   const detailFields = [
+    'Goal',
+    'Verified',
+    'Checks',
+    'Outcome',
+    'Review',
+    'Next',
     'Acceptance check',
     'Evidence',
     'Quality gate',
@@ -105,8 +117,26 @@ export function runOutputDetail(run = {}) {
     .join('\n')
 }
 
+// A session's outcome as the lab recorded it: kept, reverted, failed, no changes.
+export function runOutcome(run = {}) {
+  if (run.type === 'FAILED') return { key: 'failed', text: run.Outcome || '' }
+  const text = String(run.Outcome || '').trim()
+  const key = /^kept\b/i.test(text) ? 'kept'
+    : /^no changes\b/i.test(text) ? 'no-changes'
+      : /^reverted\b/i.test(text) ? 'reverted'
+        : /^regressed\b/i.test(text) ? 'regressed'
+          : /^failed\b/i.test(text) ? 'failed' : null
+  const reason = text.replace(/^(kept|no changes|reverted|regressed|failed)\s*[·—–-]*\s*/i, '')
+  return { key, text, reason }
+}
+
 export function runTone(run = {}) {
   if (run.type === 'FAILED') return 'fail'
+  const outcome = runOutcome(run).key
+  if (outcome === 'kept') return 'ok'
+  if (outcome === 'reverted') return 'warn'
+  if (outcome === 'failed' || outcome === 'regressed') return 'fail'
+  if (outcome === 'no-changes') return 'neutral'
   const gate = String(run['Quality gate'] || '').toUpperCase()
   if (gate.startsWith('PASS')) return 'ok'
   if (gate.startsWith('FAIL')) return 'fail'
@@ -117,7 +147,7 @@ export function runTone(run = {}) {
 function recoveredAfterFailure(run) {
   if (!run || run.type === 'FAILED') return false
   const gate = String(run['Quality gate'] || '').toUpperCase()
-  return gate === 'PASS' || ['CREATE', 'MUTATE', 'RESEARCH', 'HARVEST'].includes(String(run.type || '').toUpperCase())
+  return gate === 'PASS' || ['CREATE', 'MUTATE', 'RESEARCH', 'HARVEST', ...SESSION_TYPES].includes(String(run.type || '').toUpperCase())
 }
 
 // Newest first. A failure older than the window stays visible (as `pinned`)

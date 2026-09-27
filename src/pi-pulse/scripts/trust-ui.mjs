@@ -19,7 +19,6 @@ async function loadUi() {
     export { IncubatorDetail } from './src/components/IncubatorDetail.jsx'
     export { LoopHero } from './src/components/LoopHero.jsx'
     export { LoopDial } from './src/components/LoopDial.jsx'
-    export { CriticView } from './src/components/Critic.jsx'
     export * as incubator from './src/lib/incubator.js'
     export * as history from './src/lib/runHistory.js'
     export * as api from './src/lib/api.js'
@@ -155,7 +154,7 @@ const tests = {
     includes(html, '2 in a row', 'the growing wait is explained')
     assert.ok(!html.includes('data-banner="needs-human"'), 'there is no to-do for a person')
     const judged = ui.incubator.slotState(slot({ enabled: true, lastRunStatus: 'quality-failed', failStreak: 2, backoffUntil: NOW + 3600000, nextRunAt: NOW + 3600000 }), { now: NOW })
-    assert.equal(judged.detail, 'retrying after 2 failed runs', 'a slot backing off says why its next run is later')
+    assert.equal(judged.detail, 'retrying after 2 sessions without progress', 'a slot backing off says why its next session is later')
     const off = render(ui.IncubatorDetail, { slot: { ...failing, enabled: false }, runs: failedRuns, preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
     assert.ok(!off.includes('data-retry='), 'a slot you switched off does not promise a retry')
   },
@@ -202,8 +201,8 @@ const tests = {
     })
     includes(running, 'data-banner="running"', 'an active run is announced')
     assert.match(tagWith(running, 'data-run-button="proj"'), /\sdisabled[=\s>]/, 'a second launch cannot be started while one runs')
-    includes(running, 'data-next-run="MUTATE"', 'while run #5 (research) runs, the next run is #6 (mutate)')
-    includes(running, '#6 · after the current run', 'the next-run number accounts for the run in flight')
+    includes(running, 'data-next-run="SHAPE"', 'without a brief the next session shapes the idea')
+    includes(running, '#6 · after the current session', 'the next-session number accounts for the one in flight')
   },
 
   'the runner caption tells you how Claude will run'() {
@@ -227,7 +226,7 @@ const tests = {
       slot({ id: 'later', enabled: true, nextRunAt: NOW + 50 * 60000 }),
       slot({ id: 'soon', displayName: 'Soon', enabled: true, nextRunAt: NOW + 12 * 60000 }),
     ], { now: NOW })
-    assert.equal(scheduled.title, 'Next run in 12m')
+    assert.equal(scheduled.title, 'Next session in 12m')
     assert.equal(scheduled.focusId, 'soon', 'the hero points at whichever slot fires first')
 
     const resting = ui.incubator.loopHeadline([slot()], { now: NOW })
@@ -250,18 +249,103 @@ const tests = {
     includes(html, '30:00', 'the dial counts down to the next launch')
   },
 
-  'the local critic is labeled, per slot, and honest when off'() {
-    const analysis = { fields: { DIRECTION: 'Tighten the raid loop.', NEXT: 'Add a telegraph.' }, missing: ['STRONGEST', 'WEAKEST', 'DRIFT'], raw: 'DIRECTION: Tighten the raid loop.', malformed: true, model: 'qwen2.5-instruct:1.5b' }
-    const html = render(ui.CriticView, { analysis, savedAt: NOW, slotId: 'tidebound', onRefresh() {} })
-    includes(html, 'data-critic-source="local-ollama-qwen"', 'the source is machine-readable')
-    includes(html, 'Local Ollama/Qwen', 'the source is labeled for people')
-    includes(html, 'data-critic-slot="tidebound"', 'the critique belongs to one incubator')
-    includes(html, 'Tighten the raid loop.', 'saved fields render')
-    includes(html, 'Raw response (3 fields missing)', 'a malformed response is disclosed, not hidden')
+  'the detail view shows the stage, what the product looks like now, and its brief'() {
+    const html = render(ui.IncubatorDetail, {
+      slot: slot({
+        stage: 'building',
+        nextRunType: 'BUILD',
+        brief: { exists: true, what: 'A harbor raid game for phones.', done: [{ text: 'A raid ends in five minutes', checked: true }, { text: 'Sound on hits', checked: false }], constraints: ['no network'] },
+        keptEvidence: [
+          { run: 7, evidence: 'run-7', shots: ['desktop.png', 'mobile.png'], at: '2026-09-25T10:00:00Z' },
+          { run: 9, evidence: 'run-9', shots: ['desktop.png', 'mobile.png'], at: '2026-09-26T10:00:00Z' },
+        ],
+      }),
+      runs: [],
+      preflight: { ok: true, checks: [] },
+      now: NOW,
+      actions: noopActions,
+    })
+    includes(html, 'data-stage="building"', 'the lifecycle stage is visible')
+    includes(tagWith(html, 'aria-current="step"'), 'aria-current="step"', 'the current stage is marked for assistive tech')
+    includes(html, 'src="/api/incubators/proj/evidence/run-9/desktop.png"', 'the newest kept screenshot is shown')
+    includes(html, 'Before · #7', 'the previous session is one click away')
+    includes(html, 'data-brief-done="2"', "the builder's done-list is shown")
+    includes(html, '1/2 done', 'progress against the brief is counted')
+    includes(html, 'A harbor raid game for phones.', 'the brief says what the product is')
 
-    const off = render(ui.CriticView, { analysis: null, disabled: true, slotId: 'x', onRefresh() {} })
-    includes(off, 'PI_PULSE_ENABLE_LOCAL_LLM=1', 'a disabled critic says how to enable it instead of showing an error')
-    assert.ok(!off.includes('Refresh'), 'there is nothing to refresh while the critic is off')
+    const bare = render(ui.IncubatorDetail, { slot: slot(), runs: [], preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
+    includes(bare, 'data-product-view="none"', 'no screenshot yet is said plainly')
+    includes(bare, 'data-brief="none"', 'a missing brief explains that the first session writes it')
+  },
+
+  'the independent review and the last outcome are what you see first'() {
+    const runs = [
+      { num: 8, date: '2026-09-25', type: 'BUILD', 'What changed': 'Raids end in five minutes', Outcome: 'kept · a1b2c3d', Ended: '2026-09-25T11:00:00Z' },
+      { num: 9, date: '2026-09-26', type: 'BUILD', 'What changed': 'New combo system', Outcome: 'reverted — ./check.sh failed: combo test', Ended: '2026-09-26T11:00:00Z', Next: 'Make the combo test pass first' },
+    ]
+    const html = render(ui.IncubatorDetail, {
+      slot: slot({ stage: 'building', lastReview: { ok: true, verdict: 'better', rating: 3.5, done: false, problems: ['No sound on hits', 'Buttons too small'], reviewer: 'claude', run: 8 } }),
+      runs,
+      preflight: { ok: true, checks: [] },
+      now: NOW,
+      actions: noopActions,
+    })
+    includes(html, 'data-review="better"', 'the review verdict is shown')
+    includes(html, 'Better than before', 'in words')
+    includes(html, 'data-review-problems="2"', "the reviewer's problems are listed")
+    includes(html, 'not done yet', 'whether the brief is met is explicit')
+    includes(html, 'data-outcome="reverted"', 'a reverted session is marked as such')
+    includes(html, 'Reverted by the lab: ./check.sh failed: combo test', 'with the reason the lab reverted it')
+    includes(html, 'Make the combo test pass first', 'the next goal is the agent\'s own')
+    includes(html, 'data-run-outcome="reverted"', 'the timeline marks the reverted session too')
+    includes(html, 'data-run-outcome="kept"', 'and the kept one')
+
+    const noted = render(ui.IncubatorDetail, {
+      slot: slot({ stage: 'building', latestUserFeedback: 'make it purple', feedbackUpdatedAt: '2026-09-26T12:00:00Z', lastOutcomeAt: '2026-09-26T11:00:00Z' }),
+      runs,
+      preflight: { ok: true, checks: [] },
+      now: NOW,
+      actions: noopActions,
+    })
+    includes(noted, 'data-next-move="note"', 'a note written after the last session comes first')
+    includes(noted, 'make it purple', 'and it is quoted')
+  },
+
+  'a finished project rests, and the hero says the lab is caught up'() {
+    const done = slot({ id: 'moss', displayName: 'Moss', stage: 'done', enabled: true, nextRunAt: NOW - 60000, lastOutcomeAt: '2026-09-26T11:00:00Z' })
+    assert.equal(ui.incubator.slotState(done, { now: NOW }).kind, 'resting')
+    assert.equal(ui.incubator.upcomingSchedule([done], NOW).length, 0, 'a resting project has no upcoming sessions')
+    const headline = ui.incubator.loopHeadline([done], { now: NOW })
+    assert.equal(headline.title, 'All caught up')
+    assert.equal(headline.resting, 1)
+    const html = render(ui.IncubatorDetail, { slot: done, runs: [], preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
+    includes(html, 'data-banner="resting"', 'the detail view says it is done and resting')
+    includes(html, 'wakes this finished project up', 'and how to wake it')
+  },
+
+  'while you were away: what the lab did since your last visit'() {
+    const slots = [slot({ id: 'harbor', displayName: 'Harbor' }), slot({ id: 'moss', displayName: 'Moss', stage: 'done', lastOutcomeAt: '2026-09-26T09:00:00Z' })]
+    const runsBySlot = {
+      harbor: [
+        { num: 8, type: 'BUILD', 'What changed': 'old news', Outcome: 'kept · 1', Ended: '2026-09-24T09:00:00Z' },
+        { num: 9, type: 'BUILD', 'What changed': 'Raids end in five minutes', Outcome: 'kept · 2', Ended: '2026-09-26T08:00:00Z' },
+        { num: 10, type: 'BUILD', 'What changed': 'combo system', Outcome: 'reverted — check failed', Ended: '2026-09-26T09:30:00Z' },
+      ],
+      moss: [{ num: 3, type: 'POLISH', 'What changed': 'tighter last stanza', Outcome: 'kept · 3', Ended: '2026-09-26T08:30:00Z' }],
+    }
+    const away = ui.incubator.awayDigest(slots, runsBySlot, Date.parse('2026-09-25T00:00:00Z'))
+    assert.equal(away.total, 3, 'only sessions after your last visit count')
+    assert.equal(away.kept, 2)
+    assert.equal(away.reverted, 1)
+    assert.deepEqual(away.finished, ['Moss'], 'projects that finished while you were away are named')
+    assert.equal(away.items[0].num, 10, 'newest first')
+    const html = render(ui.LoopHero, { slots, headline: ui.incubator.loopHeadline(slots, { now: NOW }), today: { total: 3, failed: 0, kept: 2 }, away, now: NOW })
+    includes(html, 'data-away-digest="3"', 'the hero summarises the time away')
+    includes(html, '2 kept', 'with counts')
+    includes(html, 'Finished: Moss', 'and what finished')
+    includes(html, 'Raids end in five minutes', 'and what changed, in plain words')
+    const quiet = render(ui.LoopHero, { slots, headline: ui.incubator.loopHeadline(slots, { now: NOW }), today: { total: 0, failed: 0, kept: 0 }, away: ui.incubator.awayDigest(slots, runsBySlot, NOW), now: NOW })
+    assert.ok(!quiet.includes('data-away-digest'), 'nothing new, nothing shown')
   },
 
   async 'API responses that are HTML become explicit errors'() {

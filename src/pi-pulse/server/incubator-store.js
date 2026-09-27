@@ -21,7 +21,6 @@ import {
   CODEX_INCUBATOR_SCRIPT,
   CORE_FEEDBACK_JSON,
   CORE_FEEDBACK_MD,
-  DEFAULT_RUN_TYPES,
   GENERIC_CLAUDE_INCUBATOR_SCRIPT,
   INCUBATOR_REPO_ROOT,
   INCUBATOR_RUNNER_SCRIPT,
@@ -33,8 +32,6 @@ import {
 import {
   incubatorLauncherScript,
   normalizedIncubatorTitle,
-  promptForIncubatorRunType,
-  safeRunTypeName,
   slugifyProjectName,
   suggestedIncubatorTitle,
 } from './incubator-templates.js'
@@ -277,8 +274,6 @@ export function updateProjectRunner(statusPath, runner) {
   if (runner === 'codex') {
     status.runner = 'codex'
     status.runScript = runnableLauncherForStatus(status) || INCUBATOR_RUNNER_SCRIPT
-    status.promptDir = status.promptDir || join(status.repo, 'prompts')
-    status.runTypes = status.runTypes || [...DEFAULT_RUN_TYPES]
     status.codexBypass = false
   } else if (runner === 'claude') {
     const setup = claudeRunnerSetupForStatus(status)
@@ -289,8 +284,6 @@ export function updateProjectRunner(statusPath, runner) {
     else delete status.claudeModel
     status.claudeRunScript = relayScript
     status.claudeBypass = false
-    status.promptDir = status.promptDir || join(status.repo, 'prompts')
-    status.runTypes = status.runTypes || [...DEFAULT_RUN_TYPES]
     writeJsonAtomic(statusPath, status)
     const selectedDetail = `${setup.model || 'Claude CLI default'} via ${status.runScript}${status.runScript === relayScript ? '' : ` -> ${relayScript}`}`
     return {
@@ -329,14 +322,6 @@ export function repairClaudeRunnerStatusIfNeeded(statusPath) {
   if (next.claudeModel !== setup.model) {
     if (setup.model) next.claudeModel = setup.model
     else delete next.claudeModel
-    repaired = true
-  }
-  if (!next.promptDir && next.repo) {
-    next.promptDir = join(next.repo, 'prompts')
-    repaired = true
-  }
-  if (!next.runTypes) {
-    next.runTypes = [...DEFAULT_RUN_TYPES]
     repaired = true
   }
   if (next.claudeBypass !== false) {
@@ -397,22 +382,18 @@ function ensureDirectory(filePath) {
   }
 }
 
+// The files every session expects. A broken path (say, a repo that is a file)
+// must surface as a blocked preflight, not as an exception on every read.
 function ensureIncubatorProjectScaffold(status) {
-  const project = status.project || 'incubator'
+  const attempt = write => { try { write() } catch {} }
   if (status.repo) ensureDirectory(join(status.repo, 'reports'))
-  if (status.runLog) writeFileIfMissing(status.runLog, '# Run Log\n\n')
-  if (status.recentRuns) writeFileIfMissing(status.recentRuns, '# Recent Runs\n\n*(no runs yet)*\n')
+  if (status.runLog) attempt(() => writeFileIfMissing(status.runLog, '# Run Log\n\n'))
+  if (status.recentRuns) attempt(() => writeFileIfMissing(status.recentRuns, '# Recent Runs\n\n*(no runs yet)*\n'))
   if (status.feedbackPath) {
-    writeFileIfMissing(status.feedbackPath, `# User Feedback / Steering Notes
+    attempt(() => writeFileIfMissing(status.feedbackPath, `# User Feedback / Steering Notes
 
-These notes are written from the Pi Pulse UI and injected into future incubator runs.
-`)
-  }
-  if (status.promptDir && ensureDirectory(status.promptDir)) {
-    const runTypes = Array.isArray(status.runTypes) && status.runTypes.length ? status.runTypes : ['mutate']
-    for (const runType of new Set(runTypes.map(safeRunTypeName))) {
-      writeFileIfMissing(join(status.promptDir, `${runType}.md`), promptForIncubatorRunType(project, runType))
-    }
+These notes are written from the Pi Pulse UI and read by the next session.
+`))
   }
 }
 
@@ -465,14 +446,6 @@ export function normalizeIncubatorStatus(statusPath) {
   }
   if (!pathInside(next.recentRuns, reportsRoot)) {
     next.recentRuns = join(reportsRoot, 'RECENT_RUNS.md')
-    changed = true
-  }
-  if (!pathInside(next.promptDir, projectRoot)) {
-    next.promptDir = join(projectRoot, 'prompts')
-    changed = true
-  }
-  if (!next.runTypes) {
-    next.runTypes = [...DEFAULT_RUN_TYPES]
     changed = true
   }
   if (next.codexBypass !== false) {
@@ -530,13 +503,11 @@ export function createIncubatorProjectFromIdea(idea, requestedTitle = '') {
   const slug = uniqueIncubatorSlug(title)
   const repo = join(INCUBATOR_REPO_ROOT, slug)
   const labProjectDir = join(PROJECTS_DIR, slug)
-  const promptDir = join(repo, 'prompts')
   const reportsDir = join(repo, 'reports')
   const feedbackPath = join(reportsDir, 'USER_FEEDBACK.md')
   const runLog = join(reportsDir, 'RUN_LOG.md')
   const recentRuns = join(reportsDir, 'RECENT_RUNS.md')
 
-  fs.mkdirSync(promptDir, { recursive: true })
   fs.mkdirSync(reportsDir, { recursive: true })
   fs.mkdirSync(labProjectDir, { recursive: true })
 
@@ -546,16 +517,13 @@ Seed idea:
 
 ${cleanIdea}
 
-This project was created from the Pi Pulse Add Incubator idea box.
+This project was created from the Pi Pulse idea box and is built by autonomous sessions.
 `)
-  writeFileIfMissing(join(promptDir, 'create.md'), promptForIncubatorRunType('this incubator project', 'create', cleanIdea))
-  writeFileIfMissing(join(promptDir, 'mutate.md'), promptForIncubatorRunType('this incubator project', 'mutate', cleanIdea))
-  writeFileIfMissing(join(promptDir, 'research.md'), promptForIncubatorRunType('this incubator project', 'research', cleanIdea))
   writeFileIfMissing(runLog, `# Run Log\n\n`)
   writeFileIfMissing(recentRuns, `# Recent Runs\n\n*(no runs yet)*\n`)
   writeFileIfMissing(feedbackPath, `# User Feedback / Steering Notes
 
-These notes are written from the Pi Pulse UI and injected into future incubator runs.
+These notes are written from the Pi Pulse UI and read by the next session.
 
 ## Seed
 
@@ -566,22 +534,20 @@ ${cleanIdea}
     project: slug,
     displayName: title,
     incubatorTitle: title,
-    status: 'seeded',
-    phase: 'idea-seed',
+    idea: cleanIdea.slice(0, 2000),
+    // The first session shapes the idea into BRIEF.md and a first version.
+    stage: 'shaping',
     runner: 'codex',
     repo,
     runLog,
     recentRuns,
     runScript: INCUBATOR_RUNNER_SCRIPT,
     claudeRunScript: GENERIC_CLAUDE_INCUBATOR_SCRIPT,
-    promptDir,
     feedbackPath,
-    runTypes: ['create', 'mutate', 'research', 'mutate'],
     runCount: 0,
     lastRun: null,
     lastRunType: null,
-    current_focus: cleanIdea.slice(0, 260),
-    notes: 'Created from Pi Pulse Add Incubator idea box.',
+    notes: 'Created from the Pi Pulse idea box.',
     codexBypass: false,
     claudeBypass: false,
     claudeModel: null,
