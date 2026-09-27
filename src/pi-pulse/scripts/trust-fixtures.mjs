@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import zlib from 'node:zlib'
 import {
   aiFeedbackPayload,
   appendFailedPreflightEntry,
@@ -32,6 +33,8 @@ import { incubatorLauncherScript } from '../server/incubator-templates.js'
 import { staleSourceRestartPlan, validateSourceForRestart } from '../server/service-health.js'
 import { breakage, checksAllowCompletion, checksLine, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview, milestoneSnapshot, runChecks, runFields, saveRejectedVersion } from './lib/session.mjs'
 import { compareRecordedRun, recordedVersions } from '../server/version-history.js'
+import { commitHeadline } from './lib/incubator-run.mjs'
+import { decodePng, showsSomething } from './lib/pixels.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
@@ -1277,11 +1280,13 @@ function testSessionsBuildKeepAndReviewWithEitherAgent() {
   // A failing agent: FAILED receipt, and its half-done edits are discarded.
   const head = fx.git('rev-parse', 'HEAD')
   runRunner(codexShim, [fx.statusPath], { ...base, FAKE_MODE: 'fail' })
-  assertIncludes(fs.readFileSync(fx.runLog, 'utf8'), '**Failure:** [run failed - codex exited 3]', 'agent failures write a FAILED receipt')
+  assertIncludes(fs.readFileSync(fx.runLog, 'utf8'), '**Failure:** [run failed - codex exited 3] fixture api error', 'agent failures write a FAILED receipt with the marker once and the real error')
   status = fx.status()
   assert.equal(status.lastRunStatus, 'failed')
   assert.equal(status.lastRunnerStatus, 'failed')
   assertIncludes(status.lastOutcomeReason, 'its changes were discarded', 'a failed session leaves no half-done edits behind')
+  assert.equal(status.lastRunFailure.split('[run failed').length - 1, 1, 'the failure names its marker once')
+  assertIncludes(status.lastRunFailure, 'fixture api error', 'and carries the real error')
   assert.ok(!fs.readFileSync(join(fx.repo, 'index.html'), 'utf8').includes('half-done'))
   assert.equal(fx.git('rev-parse', 'HEAD'), head, 'a failed session adds no commit')
 }
@@ -1471,6 +1476,66 @@ function testLegacyBrowserBaselinesAreRechecked() {
   assert.notEqual(baseline.app.blank, true, 'an old false-blank receipt must not mask a future real regression')
 }
 
+// A PNG encoder for the fixtures that uses every row filter type, as
+// Chromium's encoder does. The decoder does not check CRCs, so they are zero.
+function encodePng(width, height, pixelAt) {
+  const channels = 3
+  const stride = width * channels
+  const rows = []
+  let previous = Buffer.alloc(stride)
+  for (let y = 0; y < height; y += 1) {
+    const raw = Buffer.alloc(stride)
+    for (let x = 0; x < width; x += 1) raw.set(pixelAt(x, y), x * channels)
+    const filter = y % 5
+    const line = Buffer.alloc(stride + 1)
+    line[0] = filter
+    for (let i = 0; i < stride; i += 1) {
+      const a = i >= channels ? raw[i - channels] : 0
+      const b = previous[i]
+      const c = i >= channels ? previous[i - channels] : 0
+      const p = a + b - c
+      const paeth = Math.abs(p - a) <= Math.abs(p - b) && Math.abs(p - a) <= Math.abs(p - c) ? a : Math.abs(p - b) <= Math.abs(p - c) ? b : c
+      line[i + 1] = (raw[i] - [0, a, b, (a + b) >> 1, paeth][filter]) & 0xff
+    }
+    rows.push(line)
+    previous = raw
+  }
+  const chunk = (type, body) => {
+    const head = Buffer.alloc(8)
+    head.writeUInt32BE(body.length, 0)
+    head.write(type, 4, 'ascii')
+    return Buffer.concat([head, body, Buffer.alloc(4)])
+  }
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header[8] = 8
+  header[9] = 2
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', header), chunk('IDAT', zlib.deflateSync(Buffer.concat(rows))), chunk('IEND', Buffer.alloc(0))])
+}
+
+// A blank page reverts a session, so "blank" must mean a person sees nothing.
+// The DOM test alone called full-screen canvas games blank; the browser check
+// now asks the screenshot's pixels (verified against real Chromium screenshots).
+function testBlankMeansNothingVisible() {
+  const [w, h] = [120, 90]
+  const sea = [1, 17, 51]
+  const sprite = (x, y) => ((x - 60) ** 2 + (y - 45) ** 2 < 144 || (x > 10 && x < 40 && y > 10 && y < 16)) ? [76, 204, 255] : sea
+  const image = decodePng(encodePng(w, h, sprite))
+  assert.deepEqual([image.width, image.height, image.channels], [w, h, 3])
+  const at = (x, y) => [...image.pixels.subarray((y * w + x) * 3, (y * w + x) * 3 + 3)]
+  assert.deepEqual(at(60, 45), [76, 204, 255], 'every row filter decodes: the sprite')
+  assert.deepEqual(at(119, 89), sea, 'every row filter decodes: the sea')
+  assert.equal(showsSomething(encodePng(w, h, sprite)), true, 'a shape drawn on a canvas is something to see')
+  assert.equal(showsSomething(encodePng(w, h, () => sea)), false, 'one flat colour shows nothing')
+  assert.equal(showsSomething(encodePng(w, h, (x, y) => [0, y, 60 + y])), false, 'a smooth gradient shows nothing')
+  assert.equal(showsSomething(encodePng(w, h, (x, y) => y < 50 ? sea : [255, 255, 255])), false, 'the seam where a background ends is not content')
+  assert.equal(showsSomething(Buffer.from('not a png')), null, 'an unreadable picture leaves the DOM verdict in place')
+  assert.equal(checksLine({ check: { state: 'none' }, app: { ran: true, blank: true, pageErrors: 0, consoleErrors: 0 } }), 'no check script · app opened blank', 'a blank page is reported as blank, not as an incomplete check')
+  const evidence = fs.readFileSync(join(root, 'scripts', 'app-evidence.mjs'), 'utf8')
+  assert.equal((evidence.match(/looksBlank\(/g) || []).length, 3, 'the first-open views and the after-action view are judged by what they show')
+}
+
 function testSessionPureRules() {
   const repo = tempDir('milestone-identity')
   const milestone = '# Goal\n## Goal\nLasting value.\n## Done means\n- [ ] ' + 'x'.repeat(220) + ' A\n'
@@ -1486,6 +1551,15 @@ function testSessionPureRules() {
   assert.equal(parseReview(complete.replace('**Top problems:**\nnone', '**Top problems:** none')).ok, true, 'inline none is explicit too')
   assert.equal(parseReview(complete + '\n**Verdict:** same — interrupted').ok, false, 'a truncated final review cannot borrow older fields')
   assert.equal(parseReview(complete.replace('none\n', 'Storage loses data\n')).problems.length, 1, 'unnumbered problems are not silently treated as approval')
+  // Reviewers explain their "none"; counted as a problem, it kept a met milestone polishing forever.
+  for (const none of ['None — the milestone is ready.', 'None; every outcome holds.', 'No blocking problems.', 'No problems remain.', '1. None. (Future ideas: sound.)']) {
+    const review = parseReview(complete.replace('none\n', `${none}\n`))
+    assert.deepEqual(review.problems, [], `"${none}" means no problems`)
+    assert.equal(nextStage({ stage: 'building', outcome: 'kept', review, briefExists: true }).stage, 'done', `"${none}" completes a met milestone`)
+  }
+  for (const problem of ['None of the buttons respond on a phone', 'No problems with the loop, but the score overlaps the HUD', 'Nothing happens when Play is pressed']) {
+    assert.equal(parseReview(complete.replace('none\n', `${problem}\n`)).problems.length, 1, `"${problem}" is a problem`)
+  }
   assert.deepEqual(nextStage({ stage: 'shaping', outcome: 'kept', briefExists: false }), { stage: 'shaping', polishSessions: 0 }, 'no brief, no building')
   assert.deepEqual(nextStage({ stage: 'building', outcome: 'reverted', briefExists: true, review: null }), { stage: 'building', polishSessions: 0 })
   assert.equal(isUnproductive({ lastRunStatus: 'no-changes', stage: 'building' }), true, 'a building session that changed nothing backs off')
@@ -1499,6 +1573,12 @@ function testSessionPureRules() {
   const log = '# Run Log\n\n## Run 4 - d - BUILD\n\n**Goal:** g\n\n## User Feedback - x\n\n**Steering:** s\n'
   assert.match(insertIntoRunSection(log, 4, ['**Outcome:** kept']), /\*\*Goal:\*\* g\n\*\*Outcome:\*\* kept\n\n## User Feedback/, "harness fields land in the session's own section")
   assert.deepEqual(parseBrief('# X\n## What it is\nA game.\n## Done means\n- [x] one\n- [ ] two\n').done, [{ text: 'one', checked: true }, { text: 'two', checked: false }])
+  // From a real session's "What changed", which used to become a title cut mid-sentence.
+  assert.equal(commitHeadline('Created the project from scratch (folder only had reports/ before this): wrote BRIEF.md, a self-contained index.html'), 'Created the project from scratch')
+  assert.equal(commitHeadline('The Anchor Guard now shows its wind-up a turn early, with what to do about it and why that matters for new players.'), 'The Anchor Guard now shows its wind-up a turn early, with what…')
+  assert.equal(commitHeadline('good pass on the harbor'), 'good pass on the harbor')
+  assert.equal(commitHeadline('Polish: tightened the copy on the first screen'), 'Polish: tightened the copy on the first screen', 'a short lead-in is not the whole title')
+  assert.equal(commitHeadline('Added hints on the first screen, e.g. what to press. Also fixed the timer.'), 'Added hints on the first screen, e.g. what to press')
 }
 
 function testUnifiedRunnerFailsVisiblyOnBadInput() {
@@ -1877,6 +1957,7 @@ function testSuccessfulTranscriptsThatMentionErrorsStaySuccessful() {
 }
 
 const tests = [
+  testBlankMeansNothingVisible,
   testStdoutFailedRunsShowCommandError,
   testCapturedFailureDetailIsReusableForStatusReceipts,
   testScheduledPreflightPersistsUsefulFailureDetail,

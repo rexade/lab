@@ -147,10 +147,26 @@ function lastOutcomeSentence(status) {
   }
 }
 
+// A commit title a person can read in `git log`: the first clause of what
+// changed (a sentence end that is not "e.g.", a colon or semicolon, or an aside
+// in parentheses; a short lead-in like "Polish:" keeps going), never cut
+// mid-word.
+export function commitHeadline(text = '', max = 64) {
+  const line = oneLine(text)
+  const end = line.search(/(?<=^.{16,})(?:(?<!\b\w)[.!?]\s|[:;]\s|\s\()/)
+  const first = (end > 0 ? line.slice(0, end) : line).replace(/[.:;,\s]+$/, '')
+  if (first.length <= max) return first || 'session changes'
+  let cut = first.slice(0, max)
+  if (/\S/.test(first[max])) cut = cut.replace(/\s+\S*$/, '')
+  return `${cut.replace(/[.:;,\s]+$/, '') || first.slice(0, max)}…`
+}
+
 function commitMessage({ runNumber, type, fields, agent }) {
-  const headline = oneLine(fields['What changed'] || fields.Goal || 'session changes').slice(0, 72)
+  const changed = oneLine(fields['What changed'])
+  const headline = commitHeadline(changed || fields.Goal || 'session changes')
   const body = [
     fields.Goal ? `Goal: ${oneLine(fields.Goal)}` : null,
+    changed && changed !== headline ? `What changed: ${changed}` : null,
     fields.Verified ? `Verified: ${oneLine(fields.Verified)}` : null,
     `Autonomous session by ${agent} via Pi Pulse.`,
   ].filter(Boolean).join('\n')
@@ -397,7 +413,9 @@ const commands = {
     status.lastOutcomeAt = new Date().toISOString()
     status.lastSessionChecks = checks
     if (outcome === 'failed') {
-      status.lastRunFailure = `[run failed - ${agent} exited ${agentExit}] ${capturedFailureDetail(stdoutFile, 900) || reason}`.trim()
+      // The transcript already starts with the runner's own marker; keep one.
+      const detail = capturedFailureDetail(stdoutFile, 900)
+      status.lastRunFailure = detail.startsWith('[run failed') ? detail : `[run failed - ${agent} exited ${agentExit}] ${detail || reason}`.trim()
       status.lastRunFailureSource = 'agent exit'
     } else {
       delete status.lastRunFailure

@@ -174,12 +174,17 @@ fi
 AGENT_EXIT=0
 OUTPUT=$(timeout -k 60 "$AGENT_TIMEOUT" "$AGENT_BIN" "${AGENT_ARGS[@]}" 2>&1) || AGENT_EXIT=$?
 
+FAILURE_MARK=""
 if [ "$AGENT_EXIT" -eq 124 ] || [ "$AGENT_EXIT" -eq 137 ]; then
-  OUTPUT="[run failed - $AGENT killed after ${AGENT_TIMEOUT}s timeout]
-
-$OUTPUT"
+  FAILURE_MARK="[run failed - $AGENT killed after ${AGENT_TIMEOUT}s timeout]"
 elif [ "$AGENT_EXIT" -ne 0 ]; then
-  OUTPUT="[run failed - $AGENT exited $AGENT_EXIT]
+  FAILURE_MARK="[run failed - $AGENT exited $AGENT_EXIT]"
+fi
+if [ -n "$FAILURE_MARK" ]; then
+  # The agent's own last words, before the marker is prepended (a one-line
+  # error such as a rate limit would otherwise repeat the marker).
+  FAILURE_DETAIL=$(printf '%s\n' "$OUTPUT" | sed '/^[[:space:]]*$/d' | tail -n 3 | tr '\n' ' ' | cut -c1-260)
+  OUTPUT="$FAILURE_MARK
 
 $OUTPUT"
 fi
@@ -197,13 +202,12 @@ ls -t "$STDOUT_DIR" 2>/dev/null | tail -n +201 | while read -r old; do rm -f "$S
 # not a Pi Pulse project cache. Pi Pulse only manages transcripts under reports/stdout.
 
 # --- RUN_LOG receipts ----------------------------------------------------------
-if [ "$AGENT_EXIT" -ne 0 ]; then
-  FAILURE_DETAIL=$(printf '%s\n' "$OUTPUT" | sed '/^[[:space:]]*$/d' | tail -n 3 | tr '\n' ' ' | cut -c1-260)
+if [ -n "$FAILURE_MARK" ]; then
   {
     echo ""
     echo "## Run $RUN_NUMBER - $TODAY - FAILED"
     echo ""
-    echo "**Failure:** [run failed - $AGENT exited $AGENT_EXIT] ${FAILURE_DETAIL:-no output before exit}"
+    echo "**Failure:** $FAILURE_MARK ${FAILURE_DETAIL:-no output before exit}"
     echo "**Output:** Full stdout saved to $STDOUT_FILE"
   } >> "$LOG_FILE"
 elif ! grep -qE "^## Run $RUN_NUMBER[[:space:]]+[—-]" "$LOG_FILE"; then

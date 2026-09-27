@@ -289,6 +289,11 @@ Do not modify any file. Reply with exactly this block and nothing after it:
 `
 }
 
+// "none" as the review prompt asks, or as reviewers actually write it: "None —
+// the milestone is ready.", "No blocking problems." A line that goes on to name
+// something ("None of the buttons respond") is a problem.
+const NO_PROBLEMS = /^(?:none|nothing|n\/a|no(?:\s+[a-z-]+){0,2}\s+(?:problems?|issues?|blockers?)(?:\s+(?:remain(?:ing)?|found|left|identified|to report|for this milestone))?)(?:$|[^\p{L}\p{N}\s]|\s+[—–-])/iu
+
 // Last occurrence of each field wins: an agent's final answer comes last.
 export function parseReview(text = '') {
   const raw = String(text || '')
@@ -312,7 +317,7 @@ export function parseReview(text = '') {
   const addProblem = line => {
     const item = line.match(/^\s*(?:\d+[.)]|[-*])\s+(.+)$/)
     const content = (item?.[1] || line).trim()
-    if (/^(none|nothing|n\/a)[.!]?$/i.test(content)) explicitNone = true
+    if (NO_PROBLEMS.test(content)) explicitNone = true
     else if (content) problems.push(clip(content, 400))
   }
   if (problemsAt >= 0) {
@@ -370,7 +375,8 @@ export function checksLine(checks = null) {
   const app = checks.app
   if (app?.ran) {
     const errors = (app.pageErrors || 0) + (app.consoleErrors || 0)
-    parts.push(`app opened${app.blank === true ? ' blank' : ''}${errors ? ` with ${errors} error${errors === 1 ? '' : 's'}` : app.blank === false ? ' cleanly' : '; render check incomplete'}`)
+    const how = errors ? ` with ${errors} error${errors === 1 ? '' : 's'}` : app.blank === false ? ' cleanly' : app.blank === true ? '' : '; render check incomplete'
+    parts.push(`app opened${app.blank === true ? ' blank' : ''}${how}`)
     if (app.inspectionComplete === false) parts.push('browser inspection incomplete')
   } else if (app?.state === 'unavailable') {
     parts.push('browser unavailable')
