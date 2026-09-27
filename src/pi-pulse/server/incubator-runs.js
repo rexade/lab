@@ -200,8 +200,9 @@ function awaitsSteering(slot) {
   const noted = Date.parse(status.feedbackUpdatedAt || '')
   if (!noted) return false
   const seen = Date.parse(status.notesSeenAt || '') || 0
-  // A blocked preflight also spends it, or it would retry (and log) every minute.
-  const tried = Math.max(Date.parse(slot.lastScheduledRun || '') || 0, Date.parse(slot.lastScheduleBlockedAt || '') || 0)
+  // Launch and blocked preflight both spend it (else it would retry every minute);
+  // boot rescheduling and other bookkeeping must not.
+  const tried = Date.parse(slot.steeringTriedAt || '') || 0
   return noted > seen && noted > tried
 }
 
@@ -236,6 +237,7 @@ export function incubatorSchedulerTick() {
     }
     const result = startIncubatorRun(slot, null, { scheduled: true })
     if (!result) continue
+    if (result.code !== 'GLOBAL_RUN_LOCK_ACTIVE') { slot.steeringTriedAt = new Date().toISOString(); changed = true }
     if (result.ok === false) {
       if (result.code === 'GLOBAL_RUN_LOCK_ACTIVE') {
         slot.nextRunAt = hoursFromNow(slot.intervalHours || 0.5)

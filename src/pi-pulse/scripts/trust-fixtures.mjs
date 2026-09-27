@@ -1710,7 +1710,8 @@ function testSchedulerRunsUnreadSteeringFirst() {
   fs.writeFileSync(noted, JSON.stringify({ ...JSON.parse(fs.readFileSync(lab.statusPath, 'utf8')), project: 'noted', feedbackUpdatedAt: new Date(Date.now() - 60000).toISOString(), notesSeenAt: new Date(Date.now() - 3600000).toISOString() }))
   // Not due for another hour, while 'proj' has been due for minutes.
   data.slots[0].nextRunAt = Date.now() - 300000
-  data.slots.push({ ...first, id: 'noted', statusPath: noted, nextRunAt: Date.now() + 3600000 })
+  // A restart after the note pushed it out an interval; that is not an attempt.
+  data.slots.push({ ...first, id: 'noted', statusPath: noted, nextRunAt: Date.now() + 3600000, lastScheduleBlockedAt: new Date(Date.now() - 30000).toISOString(), lastScheduleBlockedCode: 'STALE_SCHEDULE_RECONCILED' })
   fs.writeFileSync(registryPath, JSON.stringify(data))
   const out = runInLab(lab.dir, `
     const runs = await import(${JSON.stringify(join(root, 'server', 'incubator-runs.js'))})
