@@ -16,6 +16,7 @@ import {
   qualityStateFromRun,
   resolveClaudeModel,
   resolveClaudePermissionMode,
+  rotationFor,
   runsWithPinnedLatestFailure,
 } from '../server-core.js'
 import {
@@ -36,7 +37,7 @@ import {
   runHistoryKey,
 } from '../src/lib/runSignals.js'
 import { incubatorLauncherScript } from '../server/incubator-templates.js'
-import { needsHuman } from './lib/incubator-run.mjs'
+import { staleSourceRestartPlan, validateSourceForRestart } from '../server/service-health.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
@@ -1091,10 +1092,6 @@ function testIncubatorQualityContractIsWired() {
   assertIncludes(server, 'lastAppEvidenceGate: cfg.lastAppEvidenceGate', 'hydrated incubators should expose app evidence gate')
   assertIncludes(server, 'lastAppEvidencePrimaryAction: cfg.lastAppEvidencePrimaryAction', 'hydrated incubators should expose primary-action evidence')
   assertIncludes(server, 'lastAppEvidenceTopTier: cfg.lastAppEvidenceTopTier', 'hydrated incubators should expose top-tier app evidence eligibility')
-  assertIncludes(server, 'function incubatorAutoStrategyDecision', 'scheduler should guard against autonomous loop churn')
-  assertIncludes(server, 'AUTO_PLATEAU_RESEARCH', 'scheduler should force strategy research after repeated plateau runs')
-  assertIncludes(server, 'AUTO_NORTH_STAR_RESEARCH', 'scheduler should force north-star research after high-quality autonomous run churn')
-  assertIncludes(server, 'Manual/human validation requests are not a scheduler stop condition', 'manual validation wording should not hard-stop autonomous runs')
   assertIncludes(server, 'Do not make manual/human validation the required next move', 'new incubator prompt templates should replace hard human-validation waits with proxy evidence')
   assertIncludes(server, 'Research runs must infer a defensible north star themselves', 'new incubator prompt templates should require autonomous north-star selection')
   assertIncludes(server, '**North star:** [the strongest inferred product/benchmark/taste target for this project]', 'new incubator prompt templates should require first-class north-star fields')
@@ -1167,13 +1164,11 @@ function testPublicWriteSafetyAndLoopFusesAreWired() {
   assertIncludes(server, 'claudeBypass: false', 'new incubators should not default to Claude bypass')
   assertIncludes(server, 'GLOBAL_RUN_LOCK_ACTIVE', 'runner launches should enforce a persistent global run lock')
   assertIncludes(server, "script: join(LAB_ROOT, 'run-lab.sh')", 'core Claude runs should launch the repo-owned run-lab.sh')
-  assertIncludes(server, 'PERSISTED_BYPASS_DISABLED', 'persisted bypass flags should pause/clear autonomous schedules')
+  assertIncludes(server, 'PERSISTED_BYPASS_DISABLED', 'persisted bypass flags should be cleared and recorded')
   assertIncludes(server, 'generatedAppSecurityHeaders', 'generated app routes should receive restrictive security headers')
   assertIncludes(server, 'APP_CONTROL_API_FORBIDDEN', 'generated app referers should not call control-plane writes')
   assertIncludes(server, 'assertTrustedStatusPath', 'status files should be constrained to the trusted project root')
   assertIncludes(server, 'function clampScheduleInterval', 'schedule intervals should be clamped')
-  assertIncludes(server, 'MAX_CONSECUTIVE_AUTONOMOUS_FAILS', 'scheduler should have a failure fuse')
-  assertIncludes(server, 'AUTO_FAIL_FUSE', 'scheduler pause should be machine-readable')
   assertIncludes(server, 'function parsedRunsForLog', 'RUN_LOG parsing should be cached by file metadata')
   assertIncludes(server, 'setTimeout(notifyRunLogChanged, 500)', 'RUN_LOG file watch should be debounced')
   assertIncludes(appEvidence, "summary.evidenceMode = 'unavailable'", 'browser infrastructure failures should be separated from product failures')
@@ -1251,6 +1246,7 @@ function runnerFixture(name) {
   fs.writeFileSync(join(repo, 'reports', 'RUN_LOG.md'), '# Run Log\n\n## Run 3 - 2026-01-01 - MUTATE\n\n**Quality gate:** PASS\n')
   fs.writeFileSync(join(repo, 'reports', 'USER_FEEDBACK.md'), 'the first screen is confusing\n')
   fs.writeFileSync(join(dir, 'BENCHMARK_SUITE.md'), '# Benchmarks\n- benchmark marker\n')
+  fs.writeFileSync(join(dir, 'INCUBATOR_LEARNINGS.md'), '# Incubator Learnings\n\n**Lesson:** receipt marker\n')
   const statusPath = join(repo, 'status.json')
   fs.writeFileSync(statusPath, JSON.stringify({
     project: 'proj',
@@ -1259,7 +1255,7 @@ function runnerFixture(name) {
     runTypes: ['mutate', 'research'],
     runCount: 1,
     runner: 'codex',
-    incubatorRole: 'signal-feeder',
+    incubatorRole: 'signal-feeder', // legacy field: must no longer change prompts
     claudeModel: 'fable',
   }, null, 2))
   // Fake agents record their argv; the fake Codex also writes a structured summary.
@@ -1306,8 +1302,11 @@ function testUnifiedRunnerGivesCodexAndClaudeTheSameContract() {
   assertIncludes(codexArgs, '--sandbox\nworkspace-write', 'scheduled Codex runs should stay sandboxed')
   assert.ok(!codexArgs.includes('--dangerously-bypass-approvals-and-sandbox'), 'scheduled Codex runs should ignore CODEX_BYPASS')
   assertIncludes(codexArgs, 'Run number: 4', 'run numbers should continue from the highest RUN_LOG/status count')
-  assertIncludes(codexArgs, 'INCUBATOR ROLE: signal feeder', 'signal-feeder role should reach the Codex prompt')
-  assertIncludes(codexArgs, 'benchmark marker', 'signal-feeder benchmark suite should reach the Codex prompt')
+  // Another project's receipts and a role guessed from the idea text steered
+  // every prompt; runs now work from their own project only.
+  assert.ok(!codexArgs.includes('INCUBATOR ROLE'), 'no role block reaches the prompt')
+  assert.ok(!codexArgs.includes('benchmark marker'), 'the benchmark suite no longer reaches the prompt')
+  assert.ok(!codexArgs.includes('receipt marker'), 'shared learnings no longer reach the prompt')
   assertIncludes(codexArgs, 'QUALITY RECOVERY MODE TRIGGERED', 'negative feedback should trigger recovery mode')
   let status = readStatus()
   assert.equal(status.runCount, 4)
@@ -1317,9 +1316,7 @@ function testUnifiedRunnerGivesCodexAndClaudeTheSameContract() {
   assert.equal(status.lastRecoveryRequired, true)
   assert.ok(fs.existsSync(join(fx.repo, 'reports', 'stdout', 'codex-run-4.log')), 'Codex stdout should be saved per run')
   assertIncludes(fs.readFileSync(join(fx.repo, 'reports', 'RECENT_RUNS.md'), 'utf8'), '## Run 4 - 2026-01-02 - MUTATE', 'RECENT_RUNS.md should be regenerated after the run')
-  const learnings = fs.readFileSync(join(fx.dir, 'INCUBATOR_LEARNINGS.md'), 'utf8')
-  assertIncludes(learnings, '<!-- incubator-learning:proj:4 -->', 'signal-feeder lessons should be harvested once with a marker')
-  assertIncludes(learnings, '**Lesson:** fixture lesson', 'harvested lesson text should be preserved')
+  assert.equal(fs.readFileSync(join(fx.dir, 'INCUBATOR_LEARNINGS.md'), 'utf8'), '# Incubator Learnings\n\n**Lesson:** receipt marker\n', 'runs no longer harvest lessons into a shared file')
 
   // Claude gets the same prompt blocks, repairs stale model pins, and writes a
   // conservative no-summary receipt when the agent skips the RUN_LOG entry.
@@ -1337,8 +1334,8 @@ function testUnifiedRunnerGivesCodexAndClaudeTheSameContract() {
   assert.ok(!claudeArgs.includes('--permission-mode'), 'bypass and an explicit permission mode are mutually exclusive')
   const claudePrompt = claudeArgs.join('\n')
   assertIncludes(claudePrompt, 'Run type: mutate', 'rotation should pick runTypes[previous run count % length]')
-  assertIncludes(claudePrompt, 'INCUBATOR ROLE: signal feeder', 'signal-feeder role should reach the Claude prompt too')
-  assertIncludes(claudePrompt, 'GLOBAL INCUBATOR LEARNINGS', 'global learnings should reach the Claude prompt too')
+  assertIncludes(claudePrompt, 'OPERATING RULES', 'Claude gets the same operating rules')
+  assert.ok(!claudePrompt.includes('GLOBAL INCUBATOR LEARNINGS'), 'Claude prompts carry no shared learnings either')
   const log = fs.readFileSync(fx.runLog, 'utf8')
   assertIncludes(log, '## Run 5 - ', 'Claude no-summary runs should get a RUN_LOG receipt')
   assertIncludes(log, '**Done:** Claude completed but did not append a run summary.', 'no-summary receipts should name the agent')
@@ -1376,45 +1373,57 @@ function testUnifiedRunnerGivesCodexAndClaudeTheSameContract() {
   assert.equal(status.lastRunStatus, 'failed')
 }
 
-// Runs report one human-only action in **Needs human:**; recovery mode answers
-// the newest steering note, not every complaint still inside the tail.
-function testRunsAskForAPersonAndRecoveryFollowsTheLatestNote() {
-  const fx = runnerFixture('needs-human')
+// Runs are unattended: the prompt says so, and nothing a run writes can put a
+// to-do on a person. Recovery mode answers the newest steering note, not every
+// complaint still inside the tail.
+function testRunsNeverWaitOnAPersonAndRecoveryFollowsTheLatestNote() {
+  const fx = runnerFixture('no-handover')
   const argsPath = join(fx.dir, 'args')
   writeExecutable(join(fx.bin, 'codex-asks'), `#!/usr/bin/env bash
 printf '%s\\n' "$@" > "$FAKE_ARGS_OUT"
 N=$(printf '%s\\n' "$@" | grep -oE '^Run number: [0-9]+' | grep -oE '[0-9]+')
-printf '\\n## Run %s - 2026-01-02 - MUTATE\\n\\n**Quality gate:** PASS\\n**Needs human:** %s\\n' "$N" "$FAKE_NEEDS_HUMAN" >> "$FAKE_RUN_LOG"
+printf '\\n## Run %s - 2026-01-02 - MUTATE\\n\\n**Quality gate:** PASS\\n**Needs human:** Restart pi-pulse.service\\n' "$N" >> "$FAKE_RUN_LOG"
 `)
   const feedbackPath = join(fx.repo, 'reports', 'USER_FEEDBACK.md')
-  const run = (needsHuman, bin = 'codex-asks') => runRunner(join(root, 'scripts', 'run-incubator.sh'), [fx.statusPath, 'mutate'], {
-    LAB_DIR: fx.dir, PI_PULSE_AGENT: 'codex', CODEX_BIN: join(fx.bin, bin), FAKE_ARGS_OUT: argsPath, FAKE_RUN_LOG: fx.runLog, FAKE_NEEDS_HUMAN: needsHuman,
+  const run = () => runRunner(join(root, 'scripts', 'run-incubator.sh'), [fx.statusPath, 'mutate'], {
+    LAB_DIR: fx.dir, PI_PULSE_AGENT: 'codex', CODEX_BIN: join(fx.bin, 'codex-asks'), FAKE_ARGS_OUT: argsPath, FAKE_RUN_LOG: fx.runLog,
   })
   const status = () => JSON.parse(fs.readFileSync(fx.statusPath, 'utf8'))
   const prompt = () => fs.readFileSync(argsPath, 'utf8')
 
   fs.writeFileSync(feedbackPath, '# User Feedback / Steering Notes\n\n## Seed\n\na harbor game\n\n## 2026-09-01T10:00:00.000Z\n\nthe first screen is confusing\n\n## 2026-09-02T10:00:00.000Z\n\nmuch clearer now, keep going\n')
-  run('Restart pi-pulse.service so the new route is served.')
-  assertIncludes(prompt(), 'OPERATING RULES', 'every run is told how to work')
-  assertIncludes(prompt(), '**Needs human:**', 'every run is told how to ask for a person')
+  run()
+  assertIncludes(prompt(), 'Nobody is watching and nobody can be asked', 'every run is told it is unattended')
+  assertIncludes(prompt(), 'design around it and keep going', 'limits are worked around, not handed to a person')
+  assert.ok(!prompt().includes('Needs human'), 'no prompt offers a channel for handing work to a person')
+  assert.ok(!('lastNeedsHuman' in status()), 'a run writing a request for a person does not create a to-do')
   assertIncludes(prompt(), 'the first screen is confusing', 'older notes stay in the prompt as context')
   assert.ok(!prompt().includes('QUALITY RECOVERY MODE TRIGGERED'), 'a complaint the person has since answered must not keep forcing recovery')
   assert.equal(status().lastRecoveryRequired, false)
-  assert.equal(status().lastNeedsHuman, 'Restart pi-pulse.service so the new route is served.')
-
-  run('Restart pi-pulse.service so the new route is served.', 'codex-fail')
-  assert.equal(status().lastNeedsHuman, 'Restart pi-pulse.service so the new route is served.', 'a failed run never answered, so the request stays open')
 
   fs.appendFileSync(feedbackPath, '\n## 2026-09-03T10:00:00.000Z\n\n## What I saw\nthe new menu is broken on my phone\n')
-  run('none')
+  run()
   assertIncludes(prompt(), 'QUALITY RECOVERY MODE TRIGGERED', 'a new complaint triggers recovery, even when it carries its own headings')
   assert.equal(status().lastRecoveryRequired, true)
-  assert.equal(status().lastNeedsHuman, null, 'a run that reports none clears the request')
+}
 
-  for (const none of ['none', 'None.', 'none - all work was finishable', '`none`', 'n/a', 'none | [the one action]']) {
-    assert.equal(needsHuman(none), null, `${JSON.stringify(none)} means nothing is waiting`)
+// `create` builds the first prototype; a living project must never be told to start over.
+function testCreateRunsOnlyAsTheFirstRun() {
+  assert.deepEqual(rotationFor({ runTypes: ['create', 'mutate', 'research', 'mutate'], runCount: 0 }), ['create', 'mutate', 'research', 'mutate'])
+  assert.deepEqual(rotationFor({ runTypes: ['create', 'mutate', 'research', 'mutate'], runCount: 4 }), ['mutate', 'research', 'mutate'])
+  assert.deepEqual(rotationFor({ runTypes: ['create'], runCount: 2 }), ['mutate', 'research', 'mutate'], 'a create-only rotation falls back to the default after the first run')
+  const fx = runnerFixture('create-once')
+  const argsPath = join(fx.dir, 'args')
+  const types = []
+  for (const runCount of [0, 4, 8]) {
+    fs.writeFileSync(fx.statusPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(fx.statusPath, 'utf8')), runTypes: ['create', 'mutate', 'research', 'mutate'], runCount }, null, 2))
+    fs.writeFileSync(fx.runLog, '# Run Log\n')
+    fs.writeFileSync(join(fx.repo, 'prompts', 'create.md'), 'Create prompt.\n')
+    runRunner(join(root, 'scripts', 'run-incubator.sh'), [fx.statusPath], { LAB_DIR: fx.dir, PI_PULSE_AGENT: 'codex', CODEX_BIN: join(fx.bin, 'codex'), FAKE_ARGS_OUT: argsPath, FAKE_RUN_LOG: fx.runLog })
+    types.push(fs.readFileSync(argsPath, 'utf8').match(/^Run type: (\w+)/m)?.[1])
   }
-  assert.equal(needsHuman('No SSH key on the Pi; add one'), 'No SSH key on the Pi; add one', 'a request that starts with "No" is still a request')
+  assert.equal(types[0], 'create', 'the first run creates the prototype')
+  assert.ok(!types.slice(1).includes('create'), `runs 5 and 9 used to re-run "create the first tiny prototype" (got ${types.join(', ')})`)
 }
 
 function testUnifiedRunnerFailsVisiblyOnBadInput() {
@@ -1543,10 +1552,112 @@ function testSchedulerDefersBusySlotsWithoutRecountingFailures() {
     for (let i = 0; i < 8; i += 1) runs.incubatorSchedulerTick()
     console.log(JSON.stringify(store.readIncubators().slots[0]))
   `, lab.env)
-  assert.equal(out.enabled, true, 'waiting on another run must not trip the failure fuse')
-  assert.ok(!out.consecutiveFailGates, 'one failed run must not be recounted on every blocked tick')
+  assert.equal(out.enabled, true, 'waiting on another run never switches autopilot off')
+  assert.ok(!out.failStreak, 'a slot waiting on the lock is not judged, so its last failure is not recounted')
   assert.equal(out.nextRunAt, due, 'a deferred slot stays due and starts on the first free tick')
   assert.ok(!fs.existsSync(lab.agentRan), 'nothing may launch while the global lock is held')
+}
+
+// Autopilot is never switched off by the lab: a failing slot waits longer after
+// each new failure, retries by itself, and a good run resets the wait.
+function testFailingSlotsBackOffAndRetryInsteadOfPausing() {
+  const lab = schedulerLab('scheduler-backoff', { slotStatus: { runCount: 3, lastRunStatus: 'failed', lastQualityGate: 'FAIL' } })
+  const incubatorsPath = join(lab.projectsDir, 'incubators.json')
+  const tick = () => runInLab(lab.dir, `
+    const runs = await import(${JSON.stringify(join(root, 'server', 'incubator-runs.js'))})
+    const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
+    const lock = await import(${JSON.stringify(join(root, 'server', 'run-lock.js'))})
+    runs.incubatorSchedulerTick()
+    const fs = await import('node:fs')
+    for (let i = 0; i < 40 && !fs.existsSync(${JSON.stringify(lab.agentRan)}); i += 1) await new Promise(r => setTimeout(r, 100))
+    // A launched run holds the lab lock until its runner finishes; let it finish.
+    for (let i = 0; i < 150 && lock.globalRunBusy(); i += 1) await new Promise(r => setTimeout(r, 100))
+    console.log(JSON.stringify(store.readIncubators().slots[0]))
+  `, lab.env)
+  const makeDue = () => {
+    const data = JSON.parse(fs.readFileSync(incubatorsPath, 'utf8'))
+    data.slots[0].nextRunAt = Date.now() - 1000
+    fs.writeFileSync(incubatorsPath, JSON.stringify(data, null, 2))
+  }
+  const setStatus = patch => fs.writeFileSync(lab.statusPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(lab.statusPath, 'utf8')), ...patch }, null, 2))
+
+  let slot = tick()
+  assert.equal(slot.enabled, true, 'a failure never switches autopilot off')
+  assert.equal(slot.failStreak, 1)
+  assert.ok(slot.nextRunAt - Date.now() > 20 * 60 * 1000, 'the first failure waits an extra interval before retrying')
+  assert.ok(!fs.existsSync(lab.agentRan), 'the backoff tick does not launch')
+
+  makeDue()
+  slot = tick()
+  assert.ok(fs.existsSync(lab.agentRan), 'once the wait is over the slot retries by itself')
+  assert.equal(slot.failStreak, 1, 'retrying the same failure does not grow the streak')
+  fs.rmSync(lab.agentRan)
+
+  // The retry failed too (runCount moved on): the next wait is longer.
+  setStatus({ runCount: 4, lastRunStatus: 'failed' })
+  makeDue()
+  slot = tick()
+  assert.equal(slot.failStreak, 2)
+  assert.ok(slot.nextRunAt - Date.now() > 80 * 60 * 1000, 'the second failure in a row waits three intervals')
+  assert.ok(!fs.existsSync(lab.agentRan))
+
+  setStatus({ runCount: 5, lastRunStatus: 'ok', lastQualityGate: 'PASS' })
+  makeDue()
+  slot = tick()
+  assert.ok(fs.existsSync(lab.agentRan), 'a healthy slot launches straight away')
+  assert.equal(slot.failStreak, 0, 'a good run resets the backoff')
+  assert.equal(slot.backoffReason, null)
+}
+
+function testFusePausedSlotsResumeAtBoot() {
+  const lab = schedulerLab('scheduler-fuse-resume', {
+    slot: { enabled: false, nextRunAt: null, schedulePausedAt: new Date().toISOString(), schedulePauseReason: 'schedule paused: 5 consecutive failed quality gates; needs deliberate steering or manual run', lastScheduleBlockedCode: 'AUTO_FAIL_FUSE', consecutiveFailGates: 5 },
+  })
+  const manual = schedulerLab('scheduler-manual-off', { slot: { enabled: false, nextRunAt: null } })
+  const resumed = runInLab(lab.dir, `
+    const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
+    store.reconcileStaleSchedulesAtBoot()
+    console.log(JSON.stringify(store.readIncubators().slots[0]))
+  `, lab.env)
+  assert.equal(resumed.enabled, true, 'a slot the retired fuse switched off comes back on at boot')
+  assert.ok(resumed.nextRunAt > Date.now(), 'it resumes one interval out, not in a burst')
+  assert.equal(resumed.schedulePauseReason, null)
+  assert.equal(resumed.lastScheduleBlockedCode, 'AUTOPILOT_RESUMED')
+  assert.equal(resumed.failStreak, 5, 'its failures carry over into the backoff')
+  assert.equal(resumed.backoffForRun, 0, 'it retries once at the next interval before backing off again')
+  const untouched = runInLab(manual.dir, `
+    const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
+    store.reconcileStaleSchedulesAtBoot()
+    console.log(JSON.stringify(store.readIncubators().slots[0]))
+  `, manual.env)
+  assert.equal(untouched.enabled, false, 'autopilot a person switched off stays off')
+}
+
+// New server code on disk loads itself: only when the lab is idle, only after
+// the files stopped changing, and only when every file parses and imports.
+function testNewSourceRestartsAnIdleServiceOnlyWhenClean() {
+  const health = fingerprint => ({ source: { changedSinceStart: true, fingerprint } })
+  const plans = [
+    staleSourceRestartPlan({ health: { source: { changedSinceStart: false, fingerprint: 'a' } } }),
+    staleSourceRestartPlan({ health: health('a') }),
+    staleSourceRestartPlan({ health: health('a'), pendingFingerprint: 'a', busy: true }),
+    staleSourceRestartPlan({ health: health('a'), pendingFingerprint: 'a' }),
+    staleSourceRestartPlan({ health: health('b'), pendingFingerprint: 'a' }),
+    staleSourceRestartPlan({ health: health('a'), pendingFingerprint: 'a', rejectedFingerprint: 'a' }),
+  ].map(plan => plan.action)
+  assert.deepEqual(plans, ['none', 'settle', 'none', 'restart', 'settle', 'none'], 'fresh source, first sighting, busy lab, settled + idle, still changing, known-bad source')
+
+  const dir = tempDir('restart-validate')
+  fs.mkdirSync(join(dir, 'server'))
+  fs.writeFileSync(join(dir, 'package.json'), '{"type":"module"}')
+  fs.writeFileSync(join(dir, 'server', 'ok.js'), 'export const ok = 1\n')
+  fs.writeFileSync(join(dir, 'server', 'syntax.js'), 'export const broken = (\n')
+  fs.writeFileSync(join(dir, 'server', 'import.js'), "import { nope } from './missing.js'\nexport const x = nope\n")
+  fs.writeFileSync(join(dir, 'run.sh'), 'if then fi\n')
+  assert.equal(validateSourceForRestart([join(dir, 'server', 'ok.js')]).ok, true)
+  assert.match(validateSourceForRestart([join(dir, 'server', 'syntax.js')]).error, /SyntaxError/, 'a half-written file is never loaded')
+  assert.match(validateSourceForRestart([join(dir, 'server', 'import.js')]).error, /ERR_MODULE_NOT_FOUND|Cannot find module/, 'a broken import is never loaded')
+  assert.match(validateSourceForRestart([join(dir, 'run.sh')]).error, /syntax error/, 'a broken runner script is never loaded')
 }
 
 function testStopReachesRunsRecoveredFromTheLock() {
@@ -1693,12 +1804,16 @@ const tests = [
   testPublicWriteSafetyAndLoopFusesAreWired,
   testStaleSourceMutationsAreWriteGated,
   testUnifiedRunnerGivesCodexAndClaudeTheSameContract,
-  testRunsAskForAPersonAndRecoveryFollowsTheLatestNote,
+  testRunsNeverWaitOnAPersonAndRecoveryFollowsTheLatestNote,
+  testCreateRunsOnlyAsTheFirstRun,
   testUnifiedRunnerFailsVisiblyOnBadInput,
   testCorruptIncubatorsFileIsNeverOverwritten,
   testDueScheduledSlotsActuallyFire,
   testOverdueSlotsAreSpacedOutOnlyAtBoot,
   testSchedulerDefersBusySlotsWithoutRecountingFailures,
+  testFailingSlotsBackOffAndRetryInsteadOfPausing,
+  testFusePausedSlotsResumeAtBoot,
+  testNewSourceRestartsAnIdleServiceOnlyWhenClean,
   testStopReachesRunsRecoveredFromTheLock,
   testSpawnFailuresReleaseTheLockAndLeaveAReceipt,
   testCpuSamplesAreStableAcrossConsumers,

@@ -31,7 +31,6 @@ import {
   PROJECTS_DIR,
 } from './config.js'
 import {
-  inferIncubatorRole,
   incubatorLauncherScript,
   normalizedIncubatorTitle,
   promptForIncubatorRunType,
@@ -98,6 +97,16 @@ export function pauseIncubatorSchedule(slot, reason, code) {
   slot.lastScheduleBlockedCode = code
 }
 
+function resumeSlot(slot, reason) {
+  slot.enabled = true
+  slot.nextRunAt = Date.now() + clampScheduleInterval(slot.intervalHours, 0.5) * 60 * 60 * 1000
+  slot.schedulePausedAt = null
+  slot.schedulePauseReason = null
+  slot.lastScheduleBlockedAt = new Date().toISOString()
+  slot.lastScheduleBlockedReason = reason
+  slot.lastScheduleBlockedCode = 'AUTOPILOT_RESUMED'
+}
+
 export function clearSlotBlockState(slot) {
   slot.lastScheduleBlockedAt = null
   slot.lastScheduleBlockedReason = null
@@ -107,6 +116,10 @@ export function clearSlotBlockState(slot) {
   slot.lastAutonomyInterventionAt = null
   slot.lastAutonomyInterventionReason = null
   slot.lastAutonomyInterventionCode = null
+  slot.failStreak = 0
+  slot.backoffForRun = null
+  slot.backoffUntil = null
+  slot.backoffReason = null
 }
 
 function reconcileIncubatorScheduleState(data) {
@@ -129,13 +142,20 @@ function reconcileIncubatorScheduleState(data) {
     }
     try {
       const status = JSON.parse(fs.readFileSync(slot.statusPath, 'utf8'))
+      // Scheduled runs never honor bypass flags; clearing them is the whole fix,
+      // so the slot keeps running and the change is only recorded.
       if (status.codexBypass === true || status.claudeBypass === true) {
         status.codexBypass = false
         status.claudeBypass = false
         writeJsonAtomic(slot.statusPath, status)
-        if (slot.enabled) {
-          pauseIncubatorSchedule(slot, 'schedule paused: persisted bypass flags are not allowed for autonomous runs', 'PERSISTED_BYPASS_DISABLED')
-        }
+        slot.lastScheduleBlockedAt = new Date().toISOString()
+        slot.lastScheduleBlockedReason = 'persisted bypass flags were cleared; autonomous runs stay sandboxed'
+        slot.lastScheduleBlockedCode = 'PERSISTED_BYPASS_DISABLED'
+        changed = true
+      }
+      // A status file that was unreadable is readable again: resume on its own.
+      if (!slot.enabled && slot.lastScheduleBlockedCode === 'STATUS_READ_FAILED' && slot.schedulePauseReason) {
+        resumeSlot(slot, 'autopilot resumed: status file is readable again')
         changed = true
       }
     } catch {
@@ -162,6 +182,18 @@ export function reconcileStaleSchedulesAtBoot() {
   const now = Date.now()
   let changed = false
   for (const slot of data.slots) {
+    // The retired failure fuse switched autopilot off after five failures and
+    // waited for a person. Failures now back off instead, so those slots resume.
+    if (!slot.enabled && slot.lastScheduleBlockedCode === 'AUTO_FAIL_FUSE' && slot.schedulePauseReason) {
+      resumeSlot(slot, 'autopilot resumed: failures now back off instead of pausing')
+      slot.failStreak = Math.max(Number(slot.failStreak || slot.consecutiveFailGates || 0), 1)
+      delete slot.consecutiveFailGates
+      // Retry once at the next interval (a deploy may have fixed the cause);
+      // if that fails too, the carried-over streak makes the wait long.
+      try { slot.backoffForRun = Number(readStatusAt(slot.statusPath).runCount || 0) } catch {}
+      changed = true
+      continue
+    }
     if (!slot.enabled || !slot.nextRunAt || Number(slot.nextRunAt) >= now) continue
     slot.nextRunAt = now + slot.intervalHours * 60 * 60 * 1000
     slot.lastScheduleBlockedAt = new Date().toISOString()
@@ -496,7 +528,6 @@ export function createIncubatorProjectFromIdea(idea, requestedTitle = '') {
   }
   const title = normalizedIncubatorTitle(requestedTitle) || suggestedIncubatorTitle(cleanIdea)
   const slug = uniqueIncubatorSlug(title)
-  const incubatorRole = inferIncubatorRole({ id: slug, displayName: title, current_focus: cleanIdea })
   const repo = join(INCUBATOR_REPO_ROOT, slug)
   const labProjectDir = join(PROJECTS_DIR, slug)
   const promptDir = join(repo, 'prompts')
@@ -517,9 +548,9 @@ ${cleanIdea}
 
 This project was created from the Pi Pulse Add Incubator idea box.
 `)
-  writeFileIfMissing(join(promptDir, 'create.md'), promptForIncubatorRunType('this incubator project', 'create', cleanIdea, incubatorRole))
-  writeFileIfMissing(join(promptDir, 'mutate.md'), promptForIncubatorRunType('this incubator project', 'mutate', cleanIdea, incubatorRole))
-  writeFileIfMissing(join(promptDir, 'research.md'), promptForIncubatorRunType('this incubator project', 'research', cleanIdea, incubatorRole))
+  writeFileIfMissing(join(promptDir, 'create.md'), promptForIncubatorRunType('this incubator project', 'create', cleanIdea))
+  writeFileIfMissing(join(promptDir, 'mutate.md'), promptForIncubatorRunType('this incubator project', 'mutate', cleanIdea))
+  writeFileIfMissing(join(promptDir, 'research.md'), promptForIncubatorRunType('this incubator project', 'research', cleanIdea))
   writeFileIfMissing(runLog, `# Run Log\n\n`)
   writeFileIfMissing(recentRuns, `# Recent Runs\n\n*(no runs yet)*\n`)
   writeFileIfMissing(feedbackPath, `# User Feedback / Steering Notes
@@ -535,7 +566,6 @@ ${cleanIdea}
     project: slug,
     displayName: title,
     incubatorTitle: title,
-    incubatorRole,
     status: 'seeded',
     phase: 'idea-seed',
     runner: 'codex',
@@ -551,7 +581,6 @@ ${cleanIdea}
     lastRun: null,
     lastRunType: null,
     current_focus: cleanIdea.slice(0, 260),
-    next_run_goal: 'Run CREATE to turn this idea into the first usable local prototype.',
     notes: 'Created from Pi Pulse Add Incubator idea box.',
     codexBypass: false,
     claudeBypass: false,

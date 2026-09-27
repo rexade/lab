@@ -1,4 +1,4 @@
-// Pure naming, role, and prompt templates for incubator projects.
+// Pure naming and prompt templates for incubator projects.
 // No filesystem access here: callers decide where the output lands.
 import { shellQuote } from './util.js'
 
@@ -67,42 +67,12 @@ export function suggestedIncubatorTitle(idea) {
   return titleCaseWords(titleWords.length ? titleWords : ['New', 'Incubator'])
 }
 
-export function inferIncubatorRole(value = {}) {
-  const text = [
-    value.id,
-    value.project,
-    value.displayName,
-    value.incubatorTitle,
-    value.phase,
-    value.current_focus,
-    value.notes,
-  ].filter(Boolean).join(' ').toLowerCase()
-  if (/\btaste\b|\bpreference\b|\bpicker\b|\btrain\b/.test(text)) return 'signal-feeder'
-  if (/\baudit\b|\breport\b|\binvestigat/.test(text) && /\bpi[-\s]?pulse\b|\bincubator\b/.test(text)) return 'signal-feeder'
-  if (/\bimpossible\b|\bbullshit\b|\bbenchmark\b|\bhard evidence\b|\bcompletion rate\b|\bcrashes\b|\bruntime\b|\bscheduler\b|\bpacking\b|\branking\b|\banomaly\b|\bcompression\b|\bocr\b|\bdatabase\b|\bquery engine\b/.test(text)) return 'signal-feeder'
-  return 'product'
-}
-
-export function incubatorQualityInstructions(seedIdea = '', incubatorRole = 'product') {
+export function incubatorQualityInstructions(seedIdea = '') {
   const seed = seedIdea ? `
 Seed idea:
 ${seedIdea}
 ` : ''
-  const signalFeeder = incubatorRole === 'signal-feeder'
-  const roleBlock = signalFeeder ? `
-Incubator role: signal feeder for Pi Pulse.
-- Treat the app as an instrument that should produce reusable learning for future incubators, not only as a standalone product.
-- Keep the user-facing workflow small enough to generate clear signal.
-- Prefer measurable outcomes, before/after comparisons, preference labels, or failure patterns over vague impressions.
-- Every run must add these extra fields to reports/RUN_LOG.md when there is a lesson:
-**Pi Pulse lesson:** [one portable lesson future incubators should reuse]
-**Learning evidence:** [metric, user observation, screenshot, test, or app-evidence result]
-**Applies to future apps:** yes/no - [scope]
-` : `
-Incubator role: product app.
-- Optimize for a real user's first-screen clarity, main workflow, and durable product quality.
-`
-  return `${seed}${roleBlock}
+  return `${seed}
 Quality contract:
 - Read reports/USER_FEEDBACK.md if present and convert the latest note into one acceptance check.
 - Treat runner success as process health only; product quality needs its own gate.
@@ -132,13 +102,12 @@ Append these fields to reports/RUN_LOG.md every run:
 **Evidence confidence:** [0-5]/5
 **Risk / regression:** [what got worse, is unverified, or could break]
 **Next move:** [one small follow-up]
-**Needs human:** none | [the one action no run can do, such as credentials or a service restart]
 `
 }
 
-export function promptForIncubatorRunType(project, runType, seedIdea = '', incubatorRole = 'product') {
+export function promptForIncubatorRunType(project, runType, seedIdea = '') {
   const normalized = String(runType || 'mutate').toLowerCase()
-  const quality = incubatorQualityInstructions(seedIdea, incubatorRole)
+  const quality = incubatorQualityInstructions(seedIdea)
   if (normalized === 'create') {
     return `Create the first tiny local prototype for ${project}.
 

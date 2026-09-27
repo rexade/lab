@@ -12,7 +12,7 @@ project repos).
                          ├ server/service-health.js stale-source gate on mutating routes
                          ├ server/core-lab.js ────► run-lab.sh (claude) | run-codex-incubator.sh
                          ├ server/incubator-store.js  incubators.json, status.json repair, launchers
-                         ├ server/incubator-runs.js   preflight, spawn, scheduler, fuses
+                         ├ server/incubator-runs.js   preflight, spawn, scheduler, backoff
                          ├ server/run-lock.js         one run at a time, output capture
                          ├ server/run-receipts.js     FAILED rows for blocked/dead runs
                          ├ server/run-logs.js + server-core.js   RUN_LOG parsing
@@ -24,7 +24,7 @@ project repos).
                                    ▼
                        src/pi-pulse/scripts/run-incubator.sh   one runner for both agents
                          ├ lib/incubator-run.mjs    config · latest-note · recent-runs · repair-block ·
-                         │                          quality-fallback · update-status · harvest-learning
+                         │                          quality-fallback · update-status
                          ├ lib/godot-ai-bridge.sh   optional Godot MCP bridge (Codex)
                          └ app-evidence.mjs         headless-browser evidence for web apps
 ```
@@ -37,10 +37,10 @@ project repos).
 | `server/config.js` | Every path/env knob. All are overridable, so the smoke test runs the real server against a temp lab |
 | `server/util.js` | Path containment, atomic JSON writes, shell quoting, SSE helpers |
 | `server/security.js` | Write auth (proxied writes need a CF Access identity or the admin token), generated-app security headers, app → control-API write block |
-| `server/service-health.js` | Source fingerprint at boot; mutating routes return `STALE_SERVICE_SOURCE` until restart |
+| `server/service-health.js` | Source fingerprint at boot; mutating routes return `STALE_SERVICE_SOURCE` until restart, and an idle service under systemd restarts itself once new source has settled and parses/imports cleanly |
 | `server/incubator-store.js` | `incubators.json` (refuses to overwrite a corrupt file), status normalization/repair, Claude relay setup, project scaffold |
 | `server/incubator-templates.js` | Pure: slugs, titles, roles, prompt templates, launcher template |
-| `server/incubator-runs.js` | Preflight → lock → spawn; autonomous scheduler with failure fuse, plateau/north-star strategy shifts, persisted-bypass pause |
+| `server/incubator-runs.js` | Preflight → lock → spawn; autonomous scheduler: failing slots back off and retry by themselves, nothing switches autopilot off |
 | `server/core-lab.js` | Core lab runners, core schedule, status sync |
 | `server/run-lock.js` | Global lock file + detached spawn with output capture and failure receipts |
 | `server/run-receipts.js` | FAILED rows for preflight blocks and processes that die before writing a summary |
@@ -53,7 +53,7 @@ project repos).
 
 | Layer | Owns |
 |-------|------|
-| `lib/` | Pure view models: `incubator.js` (one state per slot, most urgent first: running, blocked, failed, paused, needs you, scheduled, manual; hero sentence; six-hour schedule), `runHistory.js` (timeline order, pinned unrecovered failure, failure headlines), `critic.js`, `api.js` (JSON guard: HTML responses become explicit errors), `format.js` |
+| `lib/` | Pure view models: `incubator.js` (one state per slot, most urgent first: running, blocked, failed, paused, scheduled, manual; hero sentence; six-hour schedule), `runHistory.js` (timeline order, pinned unrecovered failure, failure headlines), `critic.js`, `api.js` (JSON guard: HTML responses become explicit errors), `format.js` |
 | `hooks/` | Data: `useIncubators` (SSE + 30s poll, actions), `useSystemStats` (last real sample, never simulated), `useNow` |
 | `components/` | `TopBar`, `LoopHero` + `LoopDial` (what runs now, what fires next, what needs you), `Roster`, `IncubatorDetail`, `RunTimeline`, `Critic`, `PulsePanel` (System tab), `ServicesView` |
 
@@ -79,9 +79,11 @@ project repos).
 - **Unattended Claude runs name a permission mode.** `-p` cannot answer
   prompts, so the runner passes `--permission-mode` (`claudePermissionMode`,
   default `auto`) unless a manual run is bypassed.
-- **A run asks for a person in one place.** `**Needs human:**` becomes
-  `status.lastNeedsHuman` and the dashboard's "Needs you" state; the loop keeps
-  running. Recovery mode reads only the newest steering note.
+- **Nothing waits for a person.** Failed runs back off and retry (capped at
+  12 h), the old failure fuse's pauses resume at boot, persisted bypass flags
+  are cleared without pausing, and new server code loads itself when the lab
+  is idle (`PI_PULSE_AUTO_RESTART=0` opts out). Recovery mode reads only the
+  newest steering note.
 - `npm run build` runs `test:trust` first: `trust-fixtures.mjs` (units and
   runner behavior with fake agents), `trust-ui.mjs` (the real JSX rendered to
   markup and checked for what a person must see), and `trust-smoke.mjs` (the
@@ -134,6 +136,19 @@ project repos).
    - `/play/*` served dotfiles (`.git/config`); same-site-only writes are now
      enforced with `Sec-Fetch-Site`; the admin token compare is constant-time.
    - The dashboard was rebuilt around the loop (see Dashboard above).
+
+6. **Removed handover and prompt noise** (2026-09-27)
+   - The failure fuse switched autopilot off after five failures, API
+     outages included, and waited for a person; failures now back off.
+   - Forced "research" strategy shifts (no code changes allowed) are gone.
+   - Every prompt carried the tail of `INCUBATOR_LEARNINGS.md` (74% of a
+     product prompt; 84 of 91 lessons were about benchmark receipts from two
+     retired incubators) and a role guessed from the idea's wording; both
+     are gone, as is the lesson harvest.
+   - `create` ("build the first tiny prototype") re-ran on every 4th run of
+     idea-box incubators; it now runs only first.
+   - The dashboard's "Next run" showed a goal written once at creation; it
+     now shows the newest run's own next step.
 
 ## Proposed next steps (not done)
 

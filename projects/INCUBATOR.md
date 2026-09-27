@@ -46,9 +46,9 @@ them all. No restart is needed to add, remove, or switch a slot.
 | `repo` | Project repo. Must live under `/home/admin` and outside the lab repo |
 | `runLog` | `RUN_LOG.md` inside `<repo>/reports/` |
 | `runner` | `codex` or `claude`; switch it from the UI (`POST /api/incubators/:id/runner`) |
-| `runTypes` | Rotation; the run type is `runTypes[runCount % length]` unless one is requested |
+| `runTypes` | Rotation; the run type is `runTypes[runCount % length]` unless one is requested. `create` only ever runs first |
 | `promptDir` | Defaults to `<repo>/prompts`; needs `<runType>.md` for each run type |
-| `incubatorRole` | `signal-feeder` adds the role + benchmark blocks and harvests `**Pi Pulse lesson:**` lines into `INCUBATOR_LEARNINGS.md` |
+| `incubatorRole` | Legacy, ignored. Runs no longer get a role guessed from the idea, the benchmark suite, or the shared `INCUBATOR_LEARNINGS.md` receipts |
 | `codexModel` / `claudeModel` | Optional model pins. Aliases (`sonnet`, `opus`, `fable`) are kept; retired dated pins fall forward to `sonnet`. Claude runs on any other model add `--fallback-model sonnet` |
 | `claudePermissionMode` | How unattended Claude runs handle tool permissions: `auto` (default), `acceptEdits`, `dontAsk`, `default`, `plan`. Env `CLAUDE_PERMISSION_MODE` sets the lab-wide default. Headless `-p` runs cannot answer prompts, so a prompting mode denies edits |
 | `godotAi` | Optional `{ enabled, mcpUrl, statusUrl, serverVersion, log }`; Codex runs start the Godot MCP bridge first |
@@ -68,9 +68,9 @@ UI / scheduler ─► preflight (script, binary, model, prompt, log)
               ─► projects/<slug>/run-<slug>.sh            (launcher)
               ─► src/pi-pulse/scripts/run-incubator.sh    (one runner, both agents)
                    agent = $PI_PULSE_AGENT or status.runner
-                   prompt = <promptDir>/<type>.md + operating rules + role/benchmark/learnings/feedback/recovery/app-evidence blocks
+                   prompt = <promptDir>/<type>.md + operating rules + feedback/recovery/app-evidence blocks
                    codex exec … | claude -p …   (timeout, stdout → reports/stdout/<agent>-run-N.log)
-                   RUN_LOG receipt → app evidence → quality fallback → status.json → learning harvest
+                   RUN_LOG receipt → app evidence → quality fallback → status.json
 ```
 
 `scripts/run-codex-incubator.sh` and `src/pi-pulse/scripts/run-claude-incubator.sh`
@@ -86,8 +86,15 @@ lock in `src/pi-pulse/server/run-lock.js`.
 
 Every run gets the same short **operating rules**: own one problem end to end
 (investigate, change, verify, report), report only what was verified, decide
-product questions without waiting for a person, and put anything no run can do
-(credentials, hardware, a service restart) in one `**Needs human:**` line.
+product questions itself, and design around anything out of reach (credentials,
+hardware, sudo, system services). Runs are unattended and never hand work to a
+person.
+
+**Failures back off; nothing switches autopilot off.** After a failed run the
+slot waits longer before retrying (one extra interval, then three, seven…,
+capped at 12 hours) and then tries again by itself; the first good run resets
+the wait. Slots that the retired failure fuse switched off resume at the next
+service start. Only a person turns autopilot off.
 
 **Recovery mode** answers the newest steering note only (the last
 `## <timestamp>` section of `reports/USER_FEEDBACK.md`; `## Seed` is the idea,
@@ -110,18 +117,11 @@ receipt when it does not.
 **Quality rating:** 3/5
 **Evidence confidence:** 4/5
 **Next move:** Next concrete action
-**Needs human:** none
 ```
 
 Header: `## Run <N> — <date> — <TYPE>` (em dash or hyphen). See
 `INCUBATOR_QUALITY.md` for the full quality contract. App evidence (headless
 browser checks for web apps) can only lower a self-reported gate or rating.
-
-`**Needs human:**` is the one field a run uses to ask for something only a
-person can do. Anything other than `none` is stored as `status.lastNeedsHuman`
-and shown as a **Needs you** badge and banner on the dashboard. The loop keeps
-running meanwhile. The request clears when a later run reports `none`; a failed
-run leaves it open, since that run never got to answer.
 
 ---
 

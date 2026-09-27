@@ -63,7 +63,7 @@ const slots = [
     slot: { enabled: true, nextRunAt: min(23), lastScheduledRun: new Date(min(-7)).toISOString() },
   }),
   seed({
-    id: 'taste-trainer', title: 'Taste Trainer', runner: 'claude', role: 'signal-feeder', phase: 'preference loop',
+    id: 'taste-trainer', title: 'Taste Trainer', runner: 'claude', phase: 'preference loop',
     runs: [
       entry(66, day(0), 'MUTATE', { 'What I changed': 'Pairs now come from the least-certain region of the preference model.', 'Quality gate': 'PASS', 'Quality rating': '4/5' }),
       entry(67, day(0), 'RESEARCH', { 'What I investigated': 'Whether 12 comparisons are enough to separate two taste clusters.', 'Key finding': 'Eight are enough when pairs are chosen by uncertainty.', 'Quality gate': 'PASS', 'Quality rating': '4/5' }),
@@ -89,19 +89,13 @@ const slots = [
     id: 'hatchery', title: 'Hatchery', runner: 'codex', phase: 'idle game',
     runs: [
       entry(7, day(2), 'MUTATE', { 'What I changed': 'Eggs hatch on a visible timer instead of instantly.', 'Quality gate': 'FAIL', 'Quality rating': '2/5' }),
-      entry(8, day(1), 'MUTATE', { 'What I changed': 'Tried a second timer style; first screen still confusing.', 'Quality gate': 'FAIL', 'Quality rating': '2/5' }),
+      entry(8, day(1), 'MUTATE', { 'What I changed': 'Tried a second timer style; first screen still confusing.', 'Quality gate': 'FAIL', 'Quality rating': '2/5', 'Next move': 'Cut the timer panel and show one egg with one obvious tap target.' }),
     ],
-    status: { runCount: 8, lastRun: day(1), lastRunType: 'MUTATE', lastRunStatus: 'quality-failed', lastQualityGate: 'FAIL', lastQualityRating: 2, lastRecoveryRequired: true, latestUserFeedback: 'The first screen is confusing, I do not know what to press.' },
-    slot: { enabled: false, schedulePausedAt: new Date(min(-90)).toISOString(), schedulePauseReason: 'schedule paused: 5 consecutive failed quality gates; needs deliberate steering or manual run' },
+    status: { runCount: 8, lastRun: day(1), lastRunType: 'MUTATE', lastRunStatus: 'quality-failed', lastQualityGate: 'FAIL', lastQualityRating: 2, lastRecoveryRequired: true, latestUserFeedback: 'The first screen is confusing, I do not know what to press.', lastRunFailure: 'Quality gate FAIL: the first screen still does not say what to press.' },
+    slot: { enabled: true, nextRunAt: min(150), failStreak: 2, backoffForRun: 8, backoffUntil: min(150), backoffReason: '2 failed runs in a row; retrying on its own' },
   }),
 ]
 
-slots.push(seed({
-  id: 'ghost-trio', title: 'Ghost Trio', runner: 'claude', phase: 'diary ghosts',
-  runs: [entry(3, day(0), 'MUTATE', { 'What I changed': 'Ghost tints now read at a glance on the lock screen palette.', 'Quality gate': 'NEEDS-EVIDENCE', 'Quality rating': '3/5', 'Needs human': 'Install ghost-trio.service and restart pi-pulse so the diary data goes live.' })],
-  status: { runCount: 3, lastRun: day(0), lastRunType: 'MUTATE', lastRunStatus: 'needs-evidence', lastQualityGate: 'NEEDS-EVIDENCE', lastQualityRating: 3, lastNeedsHuman: 'Install ghost-trio.service and restart pi-pulse so the diary data goes live.' },
-  slot: { enabled: true, nextRunAt: min(38) },
-}))
 
 fs.writeFileSync(join(projects, 'incubators.json'), JSON.stringify({ slots }, null, 2))
 fs.writeFileSync(join(lab, 'RUN_LOG.md'), '# Run Log\n')

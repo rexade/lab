@@ -27,8 +27,15 @@ export function preflightProblems(preflight) {
   return failed.map(check => `${check.label || check.id || 'check'}: ${check.detail || 'failed'}${check.path ? ` (${check.path})` : ''}`)
 }
 
+const DEFAULT_ROTATION = ['mutate', 'research', 'mutate']
+
+// Mirrors the runner: `create` only ever runs first.
 function runTypeAt(slot, index) {
-  const types = Array.isArray(slot.runTypes) && slot.runTypes.length ? slot.runTypes : ['mutate', 'research', 'mutate']
+  let types = Array.isArray(slot.runTypes) && slot.runTypes.length ? slot.runTypes : DEFAULT_ROTATION
+  if (index > 0) {
+    const rest = types.filter(type => String(type).toLowerCase() !== 'create')
+    types = rest.length ? rest : DEFAULT_ROTATION
+  }
   return String(types[index % types.length]).toUpperCase()
 }
 
@@ -74,19 +81,15 @@ export function slotState(slot = {}, { preflight = null, now = Date.now() } = {}
   if (!slot.enabled && slot.schedulePauseReason) {
     return { kind: 'paused', tone: 'warn', label: 'Autopilot paused', detail: clip(slot.schedulePauseReason.replace(/^schedule paused:\s*/i, ''), 160) }
   }
-  // The agent asked for something only a person can do; the loop keeps running.
-  const ask = String(slot.lastNeedsHuman || '').trim()
-  if (ask) {
-    return { kind: 'needs-human', tone: 'warn', label: 'Needs you', detail: clip(ask, 160), ask, nextRunAt: slot.enabled ? timeValue(slot.nextRunAt) : 0 }
-  }
   if (slot.enabled) {
     const at = timeValue(slot.nextRunAt)
     const due = at ? at - now : 0
+    const backingOff = Number(slot.failStreak) > 0 && timeValue(slot.backoffUntil) > now
     return {
       kind: 'scheduled',
       tone: 'ok',
       label: due > 0 ? `Next in ${fmtDuration(due)}` : 'Starting soon',
-      detail: `${nextRunType(slot)} next`,
+      detail: backingOff ? `retrying after ${slot.failStreak} failed run${slot.failStreak === 1 ? '' : 's'}` : `${nextRunType(slot)} next`,
       nextRunAt: at,
     }
   }
@@ -146,7 +149,8 @@ export function upcomingSchedule(slots = [], now = Date.now(), windowMs = 6 * 36
 // The one sentence at the top of the dashboard.
 export function loopHeadline(slots = [], { preflightBySlot = {}, now = Date.now() } = {}) {
   const states = slots.map(slot => ({ slot, state: slotState(slot, { preflight: preflightBySlot[slot.id], now }) }))
-  const attention = states.filter(({ state }) => ['blocked', 'failed', 'paused', 'needs-human'].includes(state.kind))
+  // Only what the lab cannot fix by itself: a failing slot retries on its own.
+  const attention = states.filter(({ state }) => ['blocked', 'paused'].includes(state.kind))
   const running = states.find(({ state }) => state.kind === 'running')
   const autopilot = slots.filter(slot => slot.enabled).length
   const next = states

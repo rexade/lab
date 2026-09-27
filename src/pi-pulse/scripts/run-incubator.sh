@@ -12,8 +12,6 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RUN_HELPER="$SCRIPT_DIR/lib/incubator-run.mjs"
 LAB_DIR=${LAB_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
 APP_EVIDENCE_SCRIPT=${APP_EVIDENCE_SCRIPT:-$SCRIPT_DIR/app-evidence.mjs}
-GLOBAL_LEARNING_LOG=${GLOBAL_LEARNING_LOG:-$LAB_DIR/INCUBATOR_LEARNINGS.md}
-BENCHMARK_SUITE_FILE=${BENCHMARK_SUITE_FILE:-$LAB_DIR/BENCHMARK_SUITE.md}
 
 # systemd starts runs with a minimal environment; fill gaps without clobbering.
 export HOME=${HOME:-/home/admin}
@@ -49,7 +47,6 @@ LOG_FILE=${CFG[runLog]}
 PROMPT_DIR=${CFG[promptDir]}
 RECENT_FILE=${CFG[recentRuns]}
 FEEDBACK_FILE=${CFG[feedbackPath]}
-INCUBATOR_ROLE=${CFG[incubatorRole]}
 BYPASS=${CFG[bypass]}
 read -r -a RUN_TYPES <<< "${CFG[runTypes]}"
 
@@ -149,52 +146,16 @@ fi
 
 APP_EVIDENCE_REPAIR_BLOCK=$(node "$RUN_HELPER" repair-block "$STATUS_PATH")
 
-# How every run works, whatever its type. The Needs human field is the one place
-# a run can ask for something only a person can do; the dashboard surfaces it.
+# How every run works, whatever its type. Runs are unattended: nothing here asks
+# a person for anything.
 OPERATING_BLOCK=$(printf '
 
 OPERATING RULES (every run):
 - You own this run end to end: choose one problem, investigate it, change it, verify the change against the running app or its tests, then report.
 - Report only what you verified. Mark anything you could not check as unverified. Do not invent problems or passes.
-- Decide product questions yourself and keep going. Only if the next useful step needs something no run can do (credentials, hardware, a service restart, an install outside this project), write it once in your RUN_LOG entry as **Needs human:** [the one action] and spend this run on work you can finish. Otherwise write **Needs human:** none.')
+- Nobody is watching and nobody can be asked. Decide product questions yourself. If something is out of reach (credentials, hardware, sudo, system services, anything outside this project folder), design around it and keep going.')
 
-ROLE_BLOCK=""
-if [ "$INCUBATOR_ROLE" = "signal-feeder" ]; then
-  ROLE_BLOCK=$(printf '
-
-INCUBATOR ROLE: signal feeder for Pi Pulse.
-- This project exists partly to improve Pi Pulse and future incubators.
-- Keep the app small enough to produce clear signal.
-- Prefer metrics, user-choice evidence, failure patterns, and before/after comparisons over vague prose.
-- When a reusable lesson exists, append these fields to reports/RUN_LOG.md:
-**Pi Pulse lesson:** [one portable lesson future incubators should reuse]
-**Learning evidence:** [metric, user observation, screenshot, test, or app-evidence result]
-**Applies to future apps:** yes/no - [scope]')
-fi
-
-GLOBAL_LEARNING_BLOCK=""
-if [ -f "$GLOBAL_LEARNING_LOG" ]; then
-  GLOBAL_LEARNING_TEXT=$(tail -n 80 "$GLOBAL_LEARNING_LOG" || true)
-  if [ -n "$GLOBAL_LEARNING_TEXT" ]; then
-    GLOBAL_LEARNING_BLOCK=$(printf '
-
-GLOBAL INCUBATOR LEARNINGS (apply when relevant, do not blindly copy):
-%s' "$GLOBAL_LEARNING_TEXT")
-  fi
-fi
-
-BENCHMARK_SUITE_BLOCK=""
-if [ "$INCUBATOR_ROLE" = "signal-feeder" ] && [ -f "$BENCHMARK_SUITE_FILE" ]; then
-  BENCHMARK_SUITE_TEXT=$(cat "$BENCHMARK_SUITE_FILE" || true)
-  if [ -n "$BENCHMARK_SUITE_TEXT" ]; then
-    BENCHMARK_SUITE_BLOCK=$(printf '
-
-PI PULSE BENCHMARK SUITE:
-%s' "$BENCHMARK_SUITE_TEXT")
-  fi
-fi
-
-FULL_PROMPT=$(printf 'Run number: %s\nRun date: %s\nRun type: %s\n\n%s%s%s%s%s%s' "$RUN_NUMBER" "$TODAY" "$RUN_TYPE" "$(cat "$PROMPT_FILE")" "$OPERATING_BLOCK$ROLE_BLOCK" "$BENCHMARK_SUITE_BLOCK" "$GLOBAL_LEARNING_BLOCK" "$FEEDBACK_BLOCK" "$RECOVERY_BLOCK$APP_EVIDENCE_REPAIR_BLOCK")
+FULL_PROMPT=$(printf 'Run number: %s\nRun date: %s\nRun type: %s\n\n%s%s%s%s' "$RUN_NUMBER" "$TODAY" "$RUN_TYPE" "$(cat "$PROMPT_FILE")" "$OPERATING_BLOCK" "$FEEDBACK_BLOCK" "$RECOVERY_BLOCK$APP_EVIDENCE_REPAIR_BLOCK")
 
 # --- Agent invocation --------------------------------------------------------
 if [ "$AGENT" = "claude" ]; then
@@ -306,6 +267,5 @@ fi
 node "$RUN_HELPER" recent-runs "$LOG_FILE" "$RECENT_FILE"
 node "$RUN_HELPER" quality-fallback "$LOG_FILE" "$RUN_NUMBER" "$STDOUT_FILE" "$APP_EVIDENCE_JSON" "$AGENT_EXIT"
 node "$RUN_HELPER" update-status "$STATUS_PATH" "$RUN_TYPE" "$TODAY" "$AGENT_EXIT" "$RUN_NUMBER" "$LOG_FILE" "$RECOVERY_REQUIRED" "$APP_EVIDENCE_JSON" "$AGENT" "$CLAUDE_MODEL"
-node "$RUN_HELPER" harvest-learning "$STATUS_PATH" "$PROJECT" "$RUN_NUMBER" "$TODAY" "$LOG_FILE" "$GLOBAL_LEARNING_LOG"
 
 echo "$TAG done"

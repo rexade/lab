@@ -132,6 +132,17 @@ export function resolveClaudePermissionMode(saved, env = process.env) {
   return [saved, env.CLAUDE_PERMISSION_MODE].find(mode => CLAUDE_PERMISSION_MODES.includes(mode)) || DEFAULT_CLAUDE_PERMISSION_MODE
 }
 
+export const DEFAULT_ROTATION = ['mutate', 'research', 'mutate']
+
+// `create` builds the first prototype, so it runs once: after that the rotation
+// must never tell a living project to start over.
+export function rotationFor(status = {}) {
+  const runTypes = Array.isArray(status.runTypes) && status.runTypes.length ? status.runTypes : DEFAULT_ROTATION
+  if (!(Number(status.runCount) > 0)) return runTypes
+  const rest = runTypes.filter(type => String(type).toLowerCase() !== 'create')
+  return rest.length ? rest : DEFAULT_ROTATION
+}
+
 // The UI appends each steering note as a `## <ISO timestamp>` section; `## Seed`
 // holds the original idea, not feedback. Other `## ` lines belong to a note's
 // own markdown. Returns the newest note's body, or '' when there is none.

@@ -139,3 +139,14 @@ export function defaultOpenRunKey(runs = [], slotId = 'slot') {
   const index = runs.findIndex(run => run?.type === 'FAILED')
   return index >= 0 ? runHistoryKey(slotId, runs[index], index) : null
 }
+
+// What the agent itself said comes next: the newest completed run's own next
+// step. Never a field written once at creation and left to go stale.
+export function nextMoveFromRuns(runs = []) {
+  for (const run of [...runs].reverse()) {
+    if (!run || run.type === 'FAILED') continue
+    const next = run.Next || run['Next move'] || run['Suggested next move']
+    if (next && !/^ask the next run to append/i.test(next)) return next
+  }
+  return ''
+}

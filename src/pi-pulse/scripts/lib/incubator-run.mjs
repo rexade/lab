@@ -9,14 +9,12 @@
 //   repair-block    <status.json>                         -> prompt block or ''
 //   quality-fallback <log> <run#> <stdoutFile> <appEvidenceJson> <exitCode>
 //   update-status   <status.json> <runType> <today> <exitCode> <run#> <log> <recoveryRequired> <appEvidenceJson> <agent> <claudeModel>
-//   harvest-learning <status.json> <project> <run#> <today> <log> <globalLearningLog>
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { latestSteeringNote, resolveClaudeModel, resolveClaudePermissionMode } from '../../server-core.js'
+import { latestSteeringNote, resolveClaudeModel, resolveClaudePermissionMode, rotationFor } from '../../server-core.js'
 
 const [command, ...args] = process.argv.slice(2)
-const DEFAULT_RUN_TYPES = ['mutate', 'research', 'mutate']
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'))
@@ -79,14 +77,6 @@ export function feedbackForRecovery(text = '') {
   return /^## (?:Seed\s*$|\d{4}-\d{2}-\d{2})/im.test(text) ? '' : String(text).trim().slice(-1200)
 }
 
-// `none` (or no/n/a/nothing, optionally followed by punctuation and a reason)
-// means nothing is waiting on a person. "No SSH key on the Pi" is a request.
-export function needsHuman(value = '') {
-  const text = String(value || '').replace(/^[\s[`*_"']+|[\s\]`*_"']+$/g, '')
-  if (!text || /^(none|no|n\/a|nothing|nothing needed|not needed|-)\s*([.,:;|(\-\u2013\u2014]|$)/i.test(text)) return null
-  return text.slice(0, 400)
-}
-
 function resolveAgent(status) {
   const requested = process.env.PI_PULSE_AGENT
   if (requested === 'codex' || requested === 'claude') return requested
@@ -115,7 +105,7 @@ const commands = {
       process.exit(2)
     }
     const agent = resolveAgent(status)
-    const runTypes = Array.isArray(status.runTypes) && status.runTypes.length ? status.runTypes : DEFAULT_RUN_TYPES
+    const runTypes = rotationFor(status)
     const godot = status.godotAi || {}
     const values = {
       agent,
@@ -127,7 +117,6 @@ const commands = {
       feedbackPath: status.feedbackPath || path.join(status.repo, 'reports', 'USER_FEEDBACK.md'),
       runTypes: runTypes.join(' '),
       runCount: Math.max(0, Math.floor(Number(status.runCount) || 0)),
-      incubatorRole: status.incubatorRole || status.role || '',
       bypass: bypassFor(agent),
       codexModel: status.codexModel || process.env.CODEX_MODEL || '',
       claudeModel: agent === 'claude' ? resolveClaudeModel(status.claudeModel) : '',
@@ -268,8 +257,7 @@ const commands = {
       status.lastExpectedQualityDelta = (fields['Expected quality delta'] || '').slice(0, 500) || null
       status.lastActualQualityDelta = (fields['Actual quality delta'] || '').slice(0, 500) || null
       status.lastPlateauRegressionVerdict = (fields['Plateau/regression verdict'] || '').slice(0, 300) || null
-      // A failed run never got to answer, so an open request stays open.
-      status.lastNeedsHuman = runnerOk ? needsHuman(fields['Needs human']) : (status.lastNeedsHuman ?? null)
+      delete status.lastNeedsHuman
       status.lastRecoveryRequired = recoveryRequired === '1'
       status.lastRecoveryMode = fields['Recovery mode'] || (status.lastRecoveryRequired ? 'yes - negative feedback trigger' : null)
       status.lastAppEvidencePath = appEvidence?.summaryMdPath || appEvidence?.summaryPath || null
@@ -287,37 +275,6 @@ const commands = {
       writeJsonAtomic(statusPath, status)
     } catch (err) {
       console.error(`[${agent || 'incubator'}-incubator] warning: could not update status: ${err.message}`)
-    }
-  },
-
-  // Signal-feeder incubators promote their "Pi Pulse lesson" into the shared
-  // INCUBATOR_LEARNINGS.md that every future run receives the tail of.
-  'harvest-learning'([statusPath, project, runNumber, today, logPath, globalLearningLog]) {
-    try {
-      const status = readJson(statusPath)
-      const role = status.incubatorRole || status.role || 'product'
-      const fields = latestRunFields(logPath, runNumber)
-      const lesson = fields['Pi Pulse lesson'] || ''
-      if (!lesson || role !== 'signal-feeder') return
-      const evidence = fields['Learning evidence'] || fields['Evidence'] || 'not recorded'
-      const applies = fields['Applies to future apps'] || 'yes - scope not specified'
-      const marker = `<!-- incubator-learning:${project}:${runNumber} -->`
-      let existing = ''
-      try { existing = fs.readFileSync(globalLearningLog, 'utf8') } catch {}
-      if (existing.includes(marker)) return
-      if (!existing.trim()) existing = '# Incubator Learnings\n\nPortable lessons produced by signal-feeder incubators. Future runs receive the tail of this file.\n'
-      const entry = [
-        '',
-        marker,
-        `## ${today} - ${project} run ${runNumber}`,
-        `**Lesson:** ${lesson}`,
-        `**Evidence:** ${evidence}`,
-        `**Applies:** ${applies}`,
-        '',
-      ].join('\n')
-      fs.writeFileSync(globalLearningLog, existing.replace(/\s*$/, '\n') + entry)
-    } catch (err) {
-      console.error(`[incubator] warning: could not harvest incubator learning: ${err.message}`)
     }
   },
 }

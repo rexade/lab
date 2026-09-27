@@ -1,9 +1,9 @@
 // Incubator run orchestration: preflight, launch, live-run tracking, and the
-// autonomous scheduler's safety decisions (failure fuse, strategy shifts).
+// autonomous scheduler. The scheduler never switches autopilot off: failing
+// slots back off and retry on their own.
 import { preflightRunConfig, resolveClaudeModel } from '../server-core.js'
-import { LAB_ROOT, MAX_CONSECUTIVE_AUTONOMOUS_FAILS } from './config.js'
+import { LAB_ROOT, MAX_BACKOFF_HOURS } from './config.js'
 import { notifyIncubatorClients } from './events.js'
-import { inferIncubatorRole } from './incubator-templates.js'
 import { readIncubators, readStatusAt, repairClaudeRunnerStatusIfNeeded, writeIncubators } from './incubator-store.js'
 import { acquireRunLock, currentRunLock, globalRunBusy, spawnTrackedRun } from './run-lock.js'
 import { appendIncubatorPreflightFailure, markIncubatorProcessFailure, nextIncubatorRunNum } from './run-receipts.js'
@@ -141,88 +141,57 @@ export function startIncubatorRun(slot, runType = null, options = {}) {
   return { ok: true, pid: child.pid, runner: run.runner, startTime: run.startTime }
 }
 
-// ─── Autonomy guards ──────────────────────────────────────────────────────────
+// ─── Autonomy: back off, never switch off ─────────────────────────────────────
+// A failing slot keeps its autopilot. Each new failed run doubles the wait
+// before the next attempt (capped), and the first good run resets it. A
+// person is never required to resume anything.
 
-export function incubatorFailureFuseDecision(slot) {
-  let cfg = {}
-  try { cfg = readStatusAt(slot.statusPath) } catch { return null }
-  const gate = String(cfg.lastQualityGate || '').toUpperCase()
-  const status = String(cfg.lastRunStatus || '').toLowerCase()
-  const failing = gate === 'FAIL' || status === 'failed' || status === 'quality-failed'
-  if (!failing) {
-    if (slot.consecutiveFailGates) slot.consecutiveFailGates = 0
-    return null
+export function isFailingRunStatus(status = {}) {
+  const runStatus = String(status.lastRunStatus || '').toLowerCase()
+  return runStatus === 'failed' || runStatus === 'quality-failed' || String(status.lastQualityGate || '').toUpperCase() === 'FAIL'
+}
+
+// Pure: what the scheduler should do with a due slot given its last result.
+//   { action: 'run' }                     healthy, or a backoff that has elapsed
+//   { action: 'wait', until, streak, ...} a new failure: wait before retrying
+// A failure is counted once per run (keyed by runCount), so re-reading the
+// same result on later ticks never grows the streak.
+export function backoffPlan({ slot = {}, status = {}, now = Date.now() }) {
+  if (!isFailingRunStatus(status)) {
+    return { action: 'run', reset: Boolean(slot.failStreak || slot.backoffForRun != null || slot.backoffReason) }
   }
-  const count = Number(slot.consecutiveFailGates || 0) + 1
-  slot.consecutiveFailGates = count
-  if (count < MAX_CONSECUTIVE_AUTONOMOUS_FAILS) return null
+  const runCount = Number(status.runCount || 0)
+  if (slot.backoffForRun === runCount) return { action: 'run', retry: true }
+  const streak = Number(slot.failStreak || 0) + 1
+  const intervalHours = Number(slot.intervalHours) || 0.5
+  const waitHours = Math.min(MAX_BACKOFF_HOURS, intervalHours * (2 ** Math.min(streak, 8) - 1))
+  const until = now + Math.round(waitHours * 3600 * 1000)
   return {
-    count,
-    reason: `schedule paused: ${count} consecutive failed quality gates; needs deliberate steering or manual run`,
-    code: 'AUTO_FAIL_FUSE',
+    action: 'wait',
+    streak,
+    runCount,
+    until,
+    reason: `${streak} failed run${streak === 1 ? '' : 's'} in a row; retrying on its own`,
   }
 }
 
-export function applyIncubatorFailureFuse(slot, decision) {
-  const ts = new Date().toISOString()
-  slot.enabled = false
-  slot.nextRunAt = null
-  slot.schedulePausedAt = ts
-  slot.schedulePauseReason = decision.reason
-  slot.lastScheduleBlockedAt = ts
-  slot.lastScheduleBlockedReason = decision.reason
-  slot.lastScheduleBlockedCode = decision.code
-}
-
-export function incubatorAutoStrategyDecision(slot) {
-  let cfg = {}
-  try { cfg = readStatusAt(slot.statusPath) } catch { return null }
-  const autoRuns = Number(slot.autoRunsSinceHuman || 0)
-  const qualityGate = String(cfg.lastQualityGate || '').toUpperCase()
-  const qualityRating = Number(cfg.lastQualityRating)
-  const evidenceConfidence = Number(cfg.lastEvidenceConfidence)
-  const role = cfg.incubatorRole || cfg.role || inferIncubatorRole({ ...cfg, id: slot.id })
-  const text = [
-    cfg.next_run_goal,
-    cfg.lastQualitySummary,
-    cfg.lastRecoveryMode,
-    cfg.current_focus,
-  ].filter(Boolean).join(' ').toLowerCase()
-
-  // Manual/human validation requests are not a scheduler stop condition.
-  // Future runs should create stronger automated proxy evidence unless the
-  // user explicitly pauses or provides new steering.
-  const verdict = String(cfg.lastPlateauRegressionVerdict || '').toUpperCase()
-  const plateau = verdict.startsWith('PLATEAU') || /(plateau|no measurable application improvement|score_delta:\s*0|score delta 0|algorithm-score plateau|unchanged hard metrics)/.test(text)
-  if (autoRuns >= 3 && plateau && qualityGate === 'PASS') {
-    return {
-      runType: 'research',
-      reason: 'strategy shift: plateau detected; choose a stronger north star or a different measurable tactic',
-      code: 'AUTO_PLATEAU_RESEARCH',
-    }
+function applyBackoffPlan(slot, plan) {
+  if (plan.action === 'wait') {
+    slot.failStreak = plan.streak
+    slot.backoffForRun = plan.runCount
+    slot.backoffUntil = plan.until
+    slot.backoffReason = plan.reason
+    slot.nextRunAt = plan.until
+    return true
   }
-
-  const highQuality = qualityGate === 'PASS'
-    && Number.isFinite(qualityRating)
-    && qualityRating >= 4.5
-    && (!Number.isFinite(evidenceConfidence) || evidenceConfidence >= 4)
-  const maxAutoRuns = role === 'signal-feeder' ? 12 : 8
-  if (autoRuns >= maxAutoRuns && highQuality) {
-    return {
-      runType: 'research',
-      reason: `strategy shift: ${autoRuns} autonomous high-quality runs; select the strongest north star and next measurable bet`,
-      code: 'AUTO_NORTH_STAR_RESEARCH',
-    }
+  if (plan.reset) {
+    slot.failStreak = 0
+    slot.backoffForRun = null
+    slot.backoffUntil = null
+    slot.backoffReason = null
+    return true
   }
-
-  return null
-}
-
-export function applyIncubatorAutoStrategy(slot, decision) {
-  const ts = new Date().toISOString()
-  slot.lastAutonomyInterventionAt = ts
-  slot.lastAutonomyInterventionReason = decision.reason
-  slot.lastAutonomyInterventionCode = decision.code
+  return false
 }
 
 // ─── Scheduler ────────────────────────────────────────────────────────────────
@@ -237,20 +206,15 @@ export function incubatorSchedulerTick() {
     // Another run holds the lock: stay due and start on the first free tick. Judging
     // the slot now would count its last failure again on every blocked minute.
     if (globalRunBusy()) continue
-    const failureFuse = incubatorFailureFuseDecision(slot)
-    if (failureFuse) {
-      applyIncubatorFailureFuse(slot, failureFuse)
-      console.warn(`[pi-pulse] incubator: ${slot.id} ${failureFuse.reason}`)
-      changed = true
+    let status = {}
+    try { status = readStatusAt(slot.statusPath) } catch {}
+    const plan = backoffPlan({ slot, status })
+    if (applyBackoffPlan(slot, plan)) changed = true
+    if (plan.action === 'wait') {
+      console.warn(`[pi-pulse] incubator: ${slot.id} ${plan.reason}`)
       continue
     }
-    const autoStrategy = incubatorAutoStrategyDecision(slot)
-    if (autoStrategy) {
-      applyIncubatorAutoStrategy(slot, autoStrategy)
-      console.warn(`[pi-pulse] incubator: ${slot.id} ${autoStrategy.reason}`)
-      changed = true
-    }
-    const result = startIncubatorRun(slot, autoStrategy?.runType || null, { scheduled: true })
+    const result = startIncubatorRun(slot, null, { scheduled: true })
     if (!result) continue
     if (result.ok === false) {
       if (result.code === 'GLOBAL_RUN_LOCK_ACTIVE') {

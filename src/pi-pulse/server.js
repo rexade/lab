@@ -4,7 +4,7 @@ import express from 'express'
 import fs from 'fs'
 import { spawn } from 'child_process'
 import { basename, dirname, join, resolve } from 'path'
-import { firstRunnableClaudeModel, preflightFailureDetail, runsWithPinnedLatestFailure } from './server-core.js'
+import { firstRunnableClaudeModel, preflightFailureDetail, rotationFor, runsWithPinnedLatestFailure } from './server-core.js'
 import {
   CORE_FEEDBACK_JSON,
   CORE_FEEDBACK_MD,
@@ -17,6 +17,7 @@ import {
   PROJECT_STATUS_PATH,
   PROJECTS_DIR,
   RUN_LOG_PATH,
+  AUTO_RESTART_ON_NEW_SOURCE,
   SCHEDULES_ENABLED,
   USER_FEEDBACK_PATH,
 } from './server/config.js'
@@ -55,13 +56,12 @@ import {
   updateProjectRunner,
   writeIncubators,
 } from './server/incubator-store.js'
-import { inferIncubatorRole } from './server/incubator-templates.js'
 import { aiTargetForIncubator, analyzeAiTarget, localLlmStatus, readCachedAiFeedback } from './server/local-ai.js'
 import { globalRunBusy } from './server/run-lock.js'
 import { appendSteeringNote, parsedRunsForLog, readLogContent } from './server/run-logs.js'
 import { appendManualPreflightFailure, nextCoreRunNum } from './server/run-receipts.js'
 import { createGeneratedAppWriteGuard, generatedAppSecurityHeaders, requireTrustedWrite } from './server/security.js'
-import { requireFreshSource, serviceHealth } from './server/service-health.js'
+import { requireFreshSource, serviceHealth, staleSourceRestartPlan, validateSourceForRestart } from './server/service-health.js'
 import { buildStatsPayload, dayBufferEntries, startDayBuffer, startStatsSampler } from './server/system-stats.js'
 import { broadcastSse, clampScheduleInterval, hoursFromNow, openSseStream, routeSlugForProject, writeJsonAtomic } from './server/util.js'
 
@@ -159,7 +159,6 @@ function hydrateIncubator(slot) {
     project: cfg.project,
     name: cfg.displayName ?? cfg.incubatorTitle ?? repoStatus.displayName ?? repoStatus.incubatorTitle ?? cfg.project,
     displayName: cfg.displayName ?? cfg.incubatorTitle ?? repoStatus.displayName ?? repoStatus.incubatorTitle ?? cfg.project,
-    incubatorRole: cfg.incubatorRole ?? cfg.role ?? repoStatus.incubatorRole ?? repoStatus.role ?? inferIncubatorRole({ ...repoStatus, ...cfg, id: slot.id }),
     phase: cfg.phase ?? repoStatus.phase ?? null,
     runner: cfg.runner ?? 'script',
     repo: cfg.repo,
@@ -171,8 +170,11 @@ function hydrateIncubator(slot) {
     playUrl: playRoute ? `${playRoute}/` : null,
     runCount: cfg.runCount ?? repoStatus.runCount ?? 0,
     runTypes,
-    // The runner picks runTypes[runCount % length] unless the scheduler shifts strategy.
-    nextRunType: String(runTypes[Number(cfg.runCount || 0) % runTypes.length] || 'mutate').toUpperCase(),
+    // The runner picks rotation[runCount % length]; `create` only ever runs first.
+    nextRunType: (() => {
+      const rotation = rotationFor({ ...cfg, runTypes })
+      return String(rotation[Number(cfg.runCount || 0) % rotation.length] || 'mutate').toUpperCase()
+    })(),
     lastRun: cfg.lastRun ?? repoStatus.lastRun ?? null,
     lastRunType: cfg.lastRunType ?? repoStatus.lastRunType ?? null,
     lastRunStatus: cfg.lastRunStatus ?? repoStatus.lastRunStatus ?? null,
@@ -189,7 +191,6 @@ function hydrateIncubator(slot) {
     lastPlateauRegressionVerdict: cfg.lastPlateauRegressionVerdict ?? repoStatus.lastPlateauRegressionVerdict ?? null,
     lastRecoveryRequired: cfg.lastRecoveryRequired ?? repoStatus.lastRecoveryRequired ?? null,
     lastRecoveryMode: cfg.lastRecoveryMode ?? repoStatus.lastRecoveryMode ?? null,
-    lastNeedsHuman: cfg.lastNeedsHuman ?? repoStatus.lastNeedsHuman ?? null,
     lastAppEvidencePath: cfg.lastAppEvidencePath ?? repoStatus.lastAppEvidencePath ?? null,
     lastAppEvidenceGate: cfg.lastAppEvidenceGate ?? repoStatus.lastAppEvidenceGate ?? null,
     lastAppEvidenceTopTier: cfg.lastAppEvidenceTopTier ?? repoStatus.lastAppEvidenceTopTier ?? null,
@@ -206,14 +207,10 @@ function hydrateIncubator(slot) {
     claudeModel: firstRunnableClaudeModel(cfg.claudeModel) ?? null,
     codexModel: cfg.codexModel ?? null,
     current_focus: cfg.current_focus ?? repoStatus.current_focus ?? null,
-    next_run_goal: cfg.next_run_goal ?? repoStatus.next_run_goal ?? null,
     notes: cfg.notes ?? repoStatus.notes ?? null,
     feedbackPath: projectFeedbackPath(cfg),
     latestUserFeedback: cfg.latestUserFeedback ?? readLatestProjectFeedback(projectFeedbackPath(cfg)),
     feedbackUpdatedAt: cfg.feedbackUpdatedAt ?? null,
-    lastAutonomyInterventionAt: slot.lastAutonomyInterventionAt ?? null,
-    lastAutonomyInterventionReason: slot.lastAutonomyInterventionReason ?? null,
-    lastAutonomyInterventionCode: slot.lastAutonomyInterventionCode ?? null,
     running,
   }
 }
@@ -562,7 +559,6 @@ app.post('/api/incubators/:id/feedback', requireFreshSource, (req, res) => {
     cfg.feedbackPath = filePath
     cfg.latestUserFeedback = feedback.slice(0, 2000)
     cfg.feedbackUpdatedAt = stamp
-    cfg.next_run_goal = `Use latest user feedback: ${feedback.slice(0, 180)}`
     slot.autoRunsSinceHuman = 0
     clearSlotBlockState(slot)
     if (slot.enabled && (!slot.nextRunAt || slot.nextRunAt < Date.now())) {
@@ -708,6 +704,29 @@ if (SCHEDULES_ENABLED) {
   setInterval(labSchedulerTick, 60 * 1000)
   setInterval(incubatorSchedulerTick, 60 * 1000)
 }
+
+// New code on disk restarts an idle service by itself (systemd brings it back).
+let pendingSourceFingerprint = null
+let rejectedSourceFingerprint = null
+function restartForNewSourceTick() {
+  const plan = staleSourceRestartPlan({
+    health: serviceHealth(),
+    busy: Boolean(globalRunBusy()),
+    pendingFingerprint: pendingSourceFingerprint,
+    rejectedFingerprint: rejectedSourceFingerprint,
+  })
+  if (plan.action === 'settle') pendingSourceFingerprint = plan.fingerprint
+  if (plan.action !== 'restart') return
+  const validation = validateSourceForRestart()
+  if (!validation.ok) {
+    rejectedSourceFingerprint = plan.fingerprint
+    console.warn(`[pi-pulse] new source not loaded: ${validation.file}: ${validation.error}`)
+    return
+  }
+  console.log(`[pi-pulse] new source ${plan.fingerprint} checks clean; restarting to load it`)
+  setTimeout(() => process.exit(0), 250)
+}
+if (SCHEDULES_ENABLED && AUTO_RESTART_ON_NEW_SOURCE) setInterval(restartForNewSourceTick, 60 * 1000)
 
 // Push 'update' to /api/runs/stream clients whenever the core RUN_LOG.md changes.
 // Directory watch instead of file watch — survives rename-replace (new inode)

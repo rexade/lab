@@ -18,7 +18,12 @@ export const REQUIRE_WRITE_AUTH = process.env.PI_PULSE_REQUIRE_WRITE_AUTH === '1
 
 export const MIN_SCHEDULE_INTERVAL_HOURS = Number(process.env.PI_PULSE_MIN_SCHEDULE_INTERVAL_HOURS || 0.25)
 export const MAX_SCHEDULE_INTERVAL_HOURS = Number(process.env.PI_PULSE_MAX_SCHEDULE_INTERVAL_HOURS || 24)
-export const MAX_CONSECUTIVE_AUTONOMOUS_FAILS = Number(process.env.PI_PULSE_MAX_CONSECUTIVE_AUTONOMOUS_FAILS || 5)
+// Failing slots wait longer between retries, never longer than this.
+export const MAX_BACKOFF_HOURS = Number(process.env.PI_PULSE_MAX_BACKOFF_HOURS || 12)
+// New server code on disk is loaded without a person: under systemd (or when
+// opted in), an idle service restarts itself once the new source checks clean.
+export const AUTO_RESTART_ON_NEW_SOURCE = process.env.PI_PULSE_AUTO_RESTART === '1'
+  || (process.env.PI_PULSE_AUTO_RESTART !== '0' && Boolean(process.env.INVOCATION_ID))
 export const GENERATED_APP_CSP = "default-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; object-src 'none'"
 
 export const LAB_ROOT = process.env.PI_PULSE_LAB_ROOT || '/home/admin/lab'

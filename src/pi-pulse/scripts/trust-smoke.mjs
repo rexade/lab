@@ -121,7 +121,6 @@ echo fake codex launcher
     runCount: 0,
     claudeModel: 'fable',
     claudeRunScript: staleExistingClaudeRunner,
-    lastNeedsHuman: 'Rotate the expired deploy key.',
   }, null, 2) + '\n')
   fs.writeFileSync(staleStatusPath, JSON.stringify({
     project: 'stale-claude-slot',
@@ -344,7 +343,6 @@ async function main() {
     const freshSlot = incubators.data.slots.find(slot => slot.id === 'fresh-slot')
     assert.equal(freshSlot?.runnerSetups?.claude?.ok, true, 'fresh slot should have a ready generic Claude setup with fake claude')
     assert.equal(freshSlot?.launchScript, fixture.freshLauncher, 'fresh slot payload should expose its project launcher')
-    assert.equal(freshSlot?.lastNeedsHuman, 'Rotate the expired deploy key.', 'a run\'s request for a person should reach the dashboard')
     assert.match(freshSlot?.claudeRelayScript || '', /run-claude-incubator\.sh/, 'fresh slot payload should expose the Claude relay script')
     const staleSlot = incubators.data.slots.find(slot => slot.id === 'stale-claude-slot')
     assert.equal(staleSlot?.runner, 'claude', 'half-switched Claude slots should stay on the selected relay')

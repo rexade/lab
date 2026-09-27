@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { clip, fmtClock, fmtDuration, fmtInterval, fmtRelativeDay, shortPath, timeValue } from '../lib/format.js'
 import { nextRunType, preflightProblems, qualityState, runnerLabel, slotHue, slotName, slotState, upcomingRun } from '../lib/incubator.js'
-import { failureHeadline, RUN_TYPE_COLOR, runHistorySummary } from '../lib/runHistory.js'
+import { failureHeadline, nextMoveFromRuns, RUN_TYPE_COLOR, runHistorySummary } from '../lib/runHistory.js'
 import { Critic } from './Critic.jsx'
 import { RunTimeline } from './RunTimeline.jsx'
 import { Button, Chip, Eyebrow, Glyph, Segmented, Switch, toneColor } from './ui.jsx'
@@ -79,6 +79,7 @@ function LastNextBand({ slot, runs, now }) {
   const gateKey = lastGate.startsWith('PASS') ? 'PASS' : lastGate.startsWith('FAIL') ? 'FAIL' : lastGate.includes('EVIDENCE') ? 'NEEDS-EVIDENCE' : null
   const nextAt = timeValue(slot.nextRunAt)
   const upcoming = upcomingRun(slot)
+  const nextMove = nextMoveFromRuns(runs)
   const when = slot.running?.running
     ? 'after the current run'
     : slot.enabled
@@ -105,7 +106,7 @@ function LastNextBand({ slot, runs, now }) {
           <span className="text-[13px] font-semibold uppercase tracking-[0.1em]" style={{ color: RUN_TYPE_COLOR[upcoming.type] || 'var(--text-3)' }}>{upcoming.type}</span>
           <span className="num text-[13px] text-fg4">#{upcoming.num} · {when}</span>
         </div>
-        <p className="mt-2 text-[14px] leading-relaxed text-fg2">{slot.next_run_goal ? clip(slot.next_run_goal, 180) : 'The agent picks the most valuable next step from the run log and your steering.'}</p>
+        <p className="mt-2 text-[14px] leading-relaxed text-fg2" data-next-move={nextMove ? 'agent' : 'default'}>{nextMove ? clip(nextMove, 180) : 'The agent picks the most valuable next step from the run log and your notes.'}</p>
       </div>
       <div className="md:pl-6">
         <Critic slotId={slot.id} autoTrigger={slot.criticTrigger || 0} />
@@ -284,9 +285,7 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
             <div className="min-w-0">
               <h2 className="truncate text-[26px] font-semibold leading-tight tracking-[-0.03em] text-fg sm:text-[30px]">{name}</h2>
               <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-fg4">
-                <span>{slot.incubatorRole === 'signal-feeder' ? 'Signal incubator' : 'Product incubator'}</span>
-                {slot.phase && <><span>·</span><span>{slot.phase}</span></>}
-                <span>·</span>
+                {slot.phase && <><span>{slot.phase}</span><span>·</span></>}
                 <span className="num">{slot.runCount || 0} runs</span>
               </div>
             </div>
@@ -376,6 +375,11 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
                 action={slot.lastRunFailure && slot.lastRunFailure.length > 120 ? <Button size="sm" variant="quiet" onClick={() => setFailureOpen(open => !open)}>{failureOpen ? 'Less' : 'Full error'}</Button> : null}
               >
                 <span className="font-mono text-[13px] text-[rgba(254,202,202,0.92)]">{failureOpen ? slot.lastRunFailure : clip(failureHeadline(slot.lastRunFailure || ''), 200)}</span>
+                {slot.enabled && (
+                  <p className="mt-2 text-[13px] text-fg3" data-retry={slot.failStreak || 0}>
+                    Nothing to do: it retries on its own{timeValue(slot.nextRunAt) > now ? ` in ${fmtDuration(timeValue(slot.nextRunAt) - now)}` : ' shortly'}{slot.failStreak > 1 ? `, waiting longer after each failure (${slot.failStreak} in a row)` : ''}.
+                  </p>
+                )}
               </Banner>
             )}
             {state.kind === 'paused' && (
@@ -389,19 +393,10 @@ export function IncubatorDetail({ slot, runs = [], preflight, historyError, now,
                 {state.detail}
               </Banner>
             )}
-            {slot.lastNeedsHuman && (
-              <Banner key="needs-human" tone="warn" title="The agent needs you" testId="needs-human">
-                <span className="text-fg2">{clip(slot.lastNeedsHuman, 400)}</span>
-                <p className="mt-2 text-[13px] text-fg4">Meanwhile the loop keeps working on what it can finish. This clears when a run reports nothing left for you.</p>
-              </Banner>
-            )}
             {quality.label === 'Recovery mode' && (
               <Banner key="recovery" tone="warn" title="Recovery mode" testId="recovery">
                 Your latest note was critical, so the next run fixes that complaint before adding anything.
               </Banner>
-            )}
-            {slot.lastAutonomyInterventionReason && (
-              <Banner key="strategy" tone="run" title="Strategy shift" testId="strategy">{clip(slot.lastAutonomyInterventionReason.replace(/^strategy shift:\s*/i, ''), 220)}</Banner>
             )}
             {notice && (
               <Banner key={`notice-${notice.text}`} tone={notice.tone} title={notice.tone === 'fail' ? 'That did not work' : 'Done'} testId="notice">{notice.text}</Banner>

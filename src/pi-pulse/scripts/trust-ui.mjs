@@ -147,26 +147,28 @@ const tests = {
     includes(html, 'aria-pressed="true" data-incubator-row="failed"', 'the selected row is exposed to assistive tech')
   },
 
-  'a request only a person can handle is surfaced, and clears when answered'() {
-    const ask = 'Install ghost-trio.service and restart pi-pulse so the diary data goes live.'
-    const waiting = slot({ id: 'ghost', displayName: 'Ghost Trio', enabled: true, nextRunAt: NOW + 9 * 60000, lastNeedsHuman: ask })
-    const state = ui.incubator.slotState(waiting, { now: NOW })
-    assert.equal(state.kind, 'needs-human')
-    assert.equal(state.nextRunAt, NOW + 9 * 60000, 'the loop keeps its schedule while it waits on a person')
-    assert.equal(ui.incubator.slotState({ ...waiting, lastRunStatus: 'failed' }, { now: NOW }).kind, 'failed', 'a failure outranks a pending request')
-    assert.deepEqual(ui.incubator.loopHeadline([waiting], { now: NOW }).attention.map(item => item.id), ['ghost'], 'the hero counts it as needing you')
+  'a failing slot says it retries on its own; nothing waits for you'() {
+    const failing = slot({ enabled: true, lastRunStatus: 'failed', lastRunFailure: '[run failed - codex exited 1] API Error: 529 overloaded_error', failStreak: 2, nextRunAt: NOW + 90 * 60000 })
+    const html = render(ui.IncubatorDetail, { slot: failing, runs: failedRuns, preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
+    includes(html, 'data-retry="2"', 'the failure banner carries the retry state')
+    includes(html, 'retries on its own in 1h 30m', 'the person is told there is nothing to do')
+    includes(html, '2 in a row', 'the growing wait is explained')
+    assert.ok(!html.includes('data-banner="needs-human"'), 'there is no to-do for a person')
+    const judged = ui.incubator.slotState(slot({ enabled: true, lastRunStatus: 'quality-failed', failStreak: 2, backoffUntil: NOW + 3600000, nextRunAt: NOW + 3600000 }), { now: NOW })
+    assert.equal(judged.detail, 'retrying after 2 failed runs', 'a slot backing off says why its next run is later')
+    const off = render(ui.IncubatorDetail, { slot: { ...failing, enabled: false }, runs: failedRuns, preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
+    assert.ok(!off.includes('data-retry='), 'a slot you switched off does not promise a retry')
+  },
 
-    const row = render(ui.Roster, { slots: [waiting], selectedId: null, onSelect() {}, runsBySlot: {}, preflightBySlot: {}, now: NOW, onCreate() {} })
-    includes(row, 'data-incubator-state="needs-human"', 'the roster marks the row')
-    includes(row, 'Needs you', 'the row says a person is needed')
-
-    const detail = render(ui.IncubatorDetail, { slot: waiting, runs: [], preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
-    includes(detail, 'data-banner="needs-human"', 'the detail view leads with the request')
-    includes(detail, ask, 'the banner shows the one action, verbatim')
-
-    const answered = render(ui.IncubatorDetail, { slot: { ...waiting, lastNeedsHuman: null }, runs: [], preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
-    assert.ok(!answered.includes('data-banner="needs-human"'), 'a run that reports none clears the banner')
-    assert.equal(ui.incubator.slotState({ ...waiting, lastNeedsHuman: null }, { now: NOW }).kind, 'scheduled')
+  'the next step comes from the newest run, never a stale goal field'() {
+    const runs = [
+      { num: 7, date: '2026-09-25', type: 'MUTATE', 'What I changed': 'bigger deck', 'Next move': 'Give the Anchor Guard a readable wind-up telegraph.' },
+      { num: 8, date: '2026-09-26', type: 'FAILED', Failure: 'API Error: 529', 'Next move': 'retry' },
+    ]
+    const html = render(ui.IncubatorDetail, { slot: slot({ next_run_goal: 'Run CREATE to turn this idea into the first usable local prototype.' }), runs, preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
+    includes(html, 'data-next-move="agent"', 'the next step is the agent\'s own')
+    includes(html, 'readable wind-up telegraph', 'it comes from the newest completed run')
+    assert.ok(!html.includes('Run CREATE to turn this idea'), 'a goal written once at creation is never shown as the next step')
   },
 
   'a blocked launch lists every failed check and still lets you try'() {
@@ -232,7 +234,7 @@ const tests = {
     assert.equal(resting.title, 'The lab is resting', 'no autopilot means nothing will happen on its own; say so')
 
     const attention = ui.incubator.loopHeadline([slot({ id: 'b' }), slot({ id: 'f', lastRunStatus: 'failed' })], { now: NOW, preflightBySlot: { b: blockedPreflight } })
-    assert.deepEqual(attention.attention.map(item => item.id), ['b', 'f'], 'blocked and failed slots are listed as needing you')
+    assert.deepEqual(attention.attention.map(item => item.id), ['b'], 'only a blocked launch needs you; a failed slot retries on its own')
 
     const html = render(ui.LoopHero, { slots: [slot()], headline: attention, today: { total: 3, failed: 1 }, now: NOW })
     includes(html, 'data-attention-list="true"', 'slots that need you are one click away')
