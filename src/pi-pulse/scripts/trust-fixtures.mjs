@@ -1208,7 +1208,7 @@ function testSessionsBuildKeepAndReviewWithEitherAgent() {
   // A failing agent: FAILED receipt, and its half-done edits are discarded.
   const head = fx.git('rev-parse', 'HEAD')
   runRunner(codexShim, [fx.statusPath], { ...base, FAKE_MODE: 'fail' })
-  assertIncludes(fs.readFileSync(fx.runLog, 'utf8'), '**Failure:** [run failed - codex exited 3]', 'agent failures write a FAILED receipt')
+  assertIncludes(fs.readFileSync(fx.runLog, 'utf8'), '**Failure:** [run failed - codex exited 3] fixture api error', 'agent failures write a FAILED receipt with the marker once and the real error')
   status = fx.status()
   assert.equal(status.lastRunStatus, 'failed')
   assert.equal(status.lastRunnerStatus, 'failed')
