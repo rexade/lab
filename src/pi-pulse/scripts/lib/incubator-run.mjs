@@ -24,7 +24,8 @@ import {
   keepSession,
   newNotes,
   nextStage,
-  POLISH_SESSIONS,
+  lifecycleOf,
+  milestoneSnapshot,
   prepareRatchet,
   productChanged,
   parseReview,
@@ -167,6 +168,29 @@ function finishSession(status, extra = {}) {
   delete status.session
 }
 
+function advanceSession(status, session, review = null) {
+  const milestone = milestoneSnapshot(status.repo)
+  const newMilestone = Boolean(milestone && milestone.key !== status.lastMilestone?.key && !(status.milestoneHistory || []).some(m => m.key === milestone.key))
+  const checks = status.lastSessionChecks
+  const canComplete = checks && !breakage(null, checks).length
+  const next = nextStage({
+    stage: session.stage, outcome: session.outcome, briefExists: Boolean(milestone), newMilestone,
+    review: review?.ok && canComplete ? review : null,
+  })
+  status.stage = next.stage
+  status.polishSessions = 0
+  status.milestone = milestone
+  if (next.stage === 'done' && newMilestone) {
+    const completed = { ...milestone, completedAt: new Date().toISOString(), run: session.run, commit: status.lastGoodCommit, reviewer: review.reviewer }
+    status.lastMilestone = completed
+    status.milestoneCount = Number(status.milestoneCount || 0) + 1
+    status.milestoneHistory = [...(status.milestoneHistory || []), completed].slice(-30)
+    try {
+      writeTextAtomic(status.runLog, insertIntoRunSection(readText(status.runLog), session.run, [`**Milestone:** ${oneLine(milestone.goal)}`]))
+    } catch (err) { console.error(`[incubator] could not log milestone: ${err.message}`) }
+  }
+}
+
 const commands = {
   config([statusPath]) {
     let status
@@ -220,7 +244,10 @@ const commands = {
   'session-begin'([statusPath, runNumber]) {
     const status = readJson(statusPath)
     const repo = status.repo
-    const wasDone = status.stage === 'done'
+    if (status.stage === 'done' && !status.lastMilestone) {
+      const previous = milestoneSnapshot(repo)
+      if (previous) status.lastMilestone = { ...previous, legacy: true }
+    }
     const stage = sessionStage(status, briefExists(repo))
     const ratchet = prepareRatchet({ repo, lastGoodCommit: status.lastGoodCommit || null, runNumber })
     let baselineChecks = null
@@ -229,8 +256,7 @@ const commands = {
       baselineChecks = known ? status.lastChecks : runChecks({ repo, label: `${runNumber}-baseline`, appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
     }
     status.stage = stage
-    // A run on a finished project is one more polish pass, then it rests again.
-    if (wasDone) status.polishSessions = Math.max(Number(status.polishSessions) || 0, POLISH_SESSIONS - 1)
+    status.polishSessions = 0
     status.ratchet = ratchet.ratchet
     status.ratchetReason = ratchet.reason || null
     status.session = {
@@ -241,6 +267,7 @@ const commands = {
       ratchet: ratchet.ratchet,
       baseline: ratchet.baseline,
       baselineChecks,
+      milestoneBefore: milestoneSnapshot(repo),
       leftovers: ratchet.leftovers,
     }
     writeJsonAtomic(statusPath, status)
@@ -276,6 +303,10 @@ const commands = {
       notes: newNotes(steeringNotes(feedbackText), status.notesSeenAt || null),
       recent: recentSessions(status.runLog),
       playPath: `/${routeSlugForProject(status.project)}/`,
+      lifecycle: lifecycleOf(status),
+      lastMilestone: status.lastMilestone,
+      milestones: status.milestoneHistory,
+      runtimeMinutes: Math.round(Number(process.env[resolveAgent(status) === 'claude' ? 'CLAUDE_TIMEOUT' : 'CODEX_TIMEOUT'] || 2400) / 60),
     }))
   },
 
@@ -311,6 +342,8 @@ const commands = {
       }
     } else if (ratchetOn && !productChanged(repo, session.baseline)) {
       outcome = 'no-changes'
+      // Fresh checks: unchanged files alone do not prove a milestone is complete.
+      checks = runChecks({ repo, label: String(run), appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
     } else {
       checks = runChecks({ repo, label: String(run), appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
       const problems = breakage(session.baselineChecks, checks)
@@ -378,13 +411,11 @@ const commands = {
       else delete status.claudeModel
     }
 
-    const review = outcome === 'kept' && reviewEnabled(status)
+    const review = ['kept', 'no-changes'].includes(outcome) && reviewEnabled(status)
     session.outcome = outcome
     status.session = session
     if (!review) {
-      const next = nextStage({ stage: session.stage, outcome, review: null, briefExists: briefExists(repo), polishSessions: status.polishSessions })
-      status.stage = next.stage
-      status.polishSessions = next.polishSessions
+      advanceSession(status, session)
       finishSession(status)
     }
     writeJsonAtomic(statusPath, status)
@@ -407,6 +438,8 @@ const commands = {
       diffStat: diffStat(repo, session.baseline),
       checksLine: checksLine(checks),
       shots,
+      milestoneBefore: session.milestoneBefore,
+      milestone: milestoneSnapshot(repo),
     }))
   },
 
@@ -417,7 +450,7 @@ const commands = {
     const run = Number(runNumber)
     let text = ''
     try { text = fs.readFileSync(0, 'utf8') } catch {}
-    const review = parseReview(text)
+    const review = reviewExit === '0' ? parseReview(text) : { ok: false }
     const at = new Date().toISOString()
     const verdictAt = text.lastIndexOf('**Verdict:**')
     const body = review.ok && verdictAt >= 0
@@ -438,9 +471,7 @@ const commands = {
       status.lastReviewError = reviewExit === '0' ? 'the reviewer returned no verdict' : `the reviewer exited ${reviewExit}`
     }
     const session = status.session?.run === run ? status.session : { stage: status.stage, outcome: 'kept' }
-    const next = nextStage({ stage: session.stage, outcome: session.outcome || 'kept', review: review.ok ? review : null, briefExists: briefExists(repo), polishSessions: status.polishSessions })
-    status.stage = next.stage
-    status.polishSessions = next.polishSessions
+    advanceSession(status, session, review.ok ? { ...review, reviewer } : null)
     finishSession(status, { review: review.ok ? review.verdict : 'unavailable' })
     writeJsonAtomic(statusPath, status)
     console.log(`review=${review.ok ? reviewLine(review) : status.lastReviewError}`)

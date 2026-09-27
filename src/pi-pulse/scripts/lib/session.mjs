@@ -3,18 +3,20 @@
 // One session = one agent owning one goal end to end. The lab (not the agent)
 // decides what is kept: every session ends in a git commit, or is reverted when
 // the product got measurably worse. A fresh-context reviewer then judges the
-// product against its brief, and its verdict moves the project through
-// shaping -> building -> polishing -> done.
+// product against its mission and milestone. Reviewed milestone completion
+// leads to the next milestone, except for explicitly finite projects.
 //
 // Pure functions are exported for the trust fixtures; the git and check
 // helpers shell out and never throw (a broken repo turns the ratchet off).
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 
-export const STAGES = ['shaping', 'building', 'polishing', 'done']
-export const STAGE_TYPE = { shaping: 'SHAPE', building: 'BUILD', polishing: 'POLISH', done: 'POLISH' }
-export const POLISH_SESSIONS = Math.max(1, Number(process.env.PI_PULSE_POLISH_SESSIONS || 2))
+export const STAGES = ['shaping', 'advancing', 'building', 'polishing', 'done']
+export const STAGE_TYPE = { shaping: 'SHAPE', advancing: 'DEVELOP', building: 'BUILD', polishing: 'POLISH', done: 'DEVELOP' }
+export const lifecycleOf = (status = {}) => ['finite', 'explore'].includes(status.lifecycle) ? status.lifecycle : 'product'
+export const projectRests = (status = {}) => status.stage === 'done' && lifecycleOf(status) === 'finite'
 
 // Lab commits are marked as the lab's, never signed or hooked: the lab runs
 // its own checks, and a missing GPG agent or a husky hook must not strand work.
@@ -37,38 +39,34 @@ export function currentStage(status = {}, briefExists = false) {
   return briefExists ? 'building' : 'shaping'
 }
 
-// A session on a finished project (a manual Run) is one more polish pass.
+// Completing a milestone does not end an ongoing product's development.
 export function sessionStage(status = {}, briefExists = false) {
   const stage = currentStage(status, briefExists)
-  return stage === 'done' ? 'polishing' : stage
+  return stage === 'done' ? lifecycleOf(status) === 'finite' ? 'polishing' : 'advancing' : stage
 }
 
 // Where a project goes after a session. `review` is the parsed independent
-// review, or null when none ran (no changes, a revert, or a reviewer failure).
-export function nextStage({ stage, outcome, review = null, briefExists = false, polishSessions = 0 }) {
-  let next = stage === 'done' ? 'polishing' : stage
-  let polish = Number(polishSessions) || 0
+// review, or null when none ran (a revert or a reviewer failure).
+export function nextStage({ stage, outcome, review = null, briefExists = false, newMilestone = true }) {
+  let next = stage === 'done' ? 'advancing' : stage
   const productive = outcome === 'kept' || outcome === 'no-changes'
-  if (next === 'shaping' && briefExists && productive) next = 'building'
-  if (review?.done === true && briefExists && (next === 'shaping' || next === 'building')) {
-    return { stage: 'polishing', polishSessions: 0 }
+  if (!productive) return { stage: next, polishSessions: 0 }
+  if (next === 'advancing' && !newMilestone) return { stage: 'advancing', polishSessions: 0 }
+  if (['shaping', 'advancing'].includes(next) && briefExists) next = 'building'
+  if (review?.ok && briefExists) {
+    if (!review.done || review.verdict === 'worse') next = 'building'
+    else next = review.problems?.length ? 'polishing' : 'done'
   }
-  if (next === 'polishing') {
-    if (review && review.done === false) return { stage: 'building', polishSessions: 0 }
-    if (productive) {
-      polish += 1
-      if (polish >= POLISH_SESSIONS) return { stage: 'done', polishSessions: polish }
-    }
-  }
-  return { stage: next, polishSessions: polish }
+  // A failed/missing review, or a counter of previous polish runs, cannot finish work.
+  return { stage: next, polishSessions: 0 }
 }
 
 // Failed and reverted sessions back off; so does a building session that
-// changed nothing. In polishing, "nothing left to change" is progress.
+// changed nothing without a reviewed milestone completion.
 export function isUnproductive(status = {}) {
   const runStatus = String(status.lastRunStatus || '').toLowerCase()
   if (runStatus === 'failed' || runStatus === 'reverted' || runStatus === 'quality-failed') return true
-  return runStatus === 'no-changes' && status.stage !== 'polishing' && status.stage !== 'done'
+  return runStatus === 'no-changes' && status.stage !== 'done'
 }
 
 // ─── Idea and notes ───────────────────────────────────────────────────────────
@@ -112,7 +110,7 @@ export function ideaFor(status = {}, feedbackText = '', readmeText = '') {
 
 // Loose reading of the builder's brief for the dashboard: the "what" line and
 // the "Done means" checklist. Anything else stays in the file.
-export function parseBrief(text = '') {
+export function parseBrief(text = '', { compact = true } = {}) {
   const source = String(text || '')
   if (!source.trim()) return { exists: false, what: '', done: [], constraints: [] }
   const section = name => {
@@ -122,22 +120,39 @@ export function parseBrief(text = '') {
   const bullets = body => body.split('\n')
     .map(line => line.match(/^\s*[-*]\s+(?:\[( |x|X)\]\s*)?(.+)$/))
     .filter(Boolean)
-    .map(match => ({ text: clip(match[2], 200), checked: match[1] ? match[1].toLowerCase() === 'x' : null }))
-  const what = section('What it is') || source.replace(/^#.*$/m, '').trim().split(/\n\s*\n/)[0] || ''
+    .map(match => ({ text: clip(match[2], compact ? 200 : Infinity), checked: match[1] ? match[1].toLowerCase() === 'x' : null }))
+  const what = section('Goal') || section('What it is') || source.replace(/^#.*$/m, '').trim().split(/\n\s*\n/)[0] || ''
   return {
     exists: true,
-    what: clip(what.replace(/^[-*]\s+/gm, ''), 400),
-    done: bullets(section('Done means')).slice(0, 12),
+    what: clip(what.replace(/^[-*]\s+/gm, ''), compact ? 400 : Infinity),
+    done: bullets(section('Done means')).slice(0, compact ? 12 : Infinity),
     constraints: bullets(section('Constraints')).map(item => item.text).slice(0, 8),
   }
+}
+
+// Checkbox edits do not create a new milestone. Legacy briefs provide the
+// first milestone until the builder separates mission from current work.
+export function milestoneSnapshot(repo) {
+  for (const source of ['MILESTONE.md', 'BRIEF.md']) {
+    let text
+    try { text = fs.readFileSync(path.join(repo, source), 'utf8') } catch { continue }
+    const brief = parseBrief(text, { compact: false })
+    if (!brief.what || !brief.done.length) return null
+    const goal = brief.what
+    const outcomes = brief.done.map(item => item.text)
+    const key = createHash('sha256').update(JSON.stringify({ goal, outcomes })).digest('hex').slice(0, 20)
+    return { key, goal, outcomes, source }
+  }
+  return null
 }
 
 // ─── Prompts ──────────────────────────────────────────────────────────────────
 
 const STAGE_GUIDANCE = {
-  shaping: `Shaping. Turn the idea into a product. First write BRIEF.md (template below): what it is and the form it takes (web app, game, tool, text, design...), who it is for, what "done" means as 3-6 concrete outcomes a person could check, and the constraints you know of. Choose the simplest approach that runs on a Raspberry Pi. Then, in this same session, build a first version that already does the core thing. If the folder already holds work, describe what exists in BRIEF.md and continue from it: do not start over.`,
-  building: `Building. Move the product toward the "Done means" list in BRIEF.md.`,
-  polishing: `Polishing. The reviewer found the "Done means" list met. Add no new features. Make what exists clearer, sturdier, faster and more beautiful, fix the review's problems, and delete whatever does not earn its place. If nothing is worth changing, change nothing and say so.`,
+  shaping: `Shaping. Turn the idea into a product. Write a concise BRIEF.md for its lasting purpose, audience, constraints and important decisions. Choose a meaningful first milestone in MILESTONE.md and start building it in this session. If work already exists, understand and develop it; do not start over. The size of the product is not limited by a session.`,
+  advancing: `Developing the next milestone. The previous milestone is complete; the product mission continues. Inspect the actual experience, unresolved problems and opportunities in BRIEF.md. Choose the next substantial improvement and replace MILESTONE.md with its goal and checkable outcomes, then start implementing in this same session. Preserve existing capabilities and useful architectural decisions. Do not repeat a completed checklist or invent cosmetic changes to appear busy. If no change is justified, explain the opportunities considered; the lab will revisit later automatically.`,
+  building: `Building. Continue the current milestone in MILESTONE.md (or the legacy "Done means" list in BRIEF.md). A milestone may take many sessions. Work toward its outcomes while keeping the whole product sound.`,
+  polishing: `Polishing the current milestone. Resolve the review's concrete problems, make the result coherent, and simplify weak parts. Do not expand the milestone just to keep working. Completion requires a fresh review; there is no fixed number of polishing passes.`,
 }
 
 const BRIEF_TEMPLATE = `# <Name>
@@ -145,10 +160,12 @@ const BRIEF_TEMPLATE = `# <Name>
 <one or two sentences: what it is and the form it takes>
 ## For whom
 <who uses it, and what they want from it>
-## Done means
-- [ ] <an outcome a person could check>
 ## Constraints
-- <limits you are designing within>`
+- <limits you are designing within>
+## Decisions and lessons
+- <only important decisions, their reasons, and useful failed approaches>
+## Opportunities
+- <worthwhile future outcomes, revisable as the product develops>`
 
 export function sessionPrompt({
   name = 'this project',
@@ -163,6 +180,10 @@ export function sessionPrompt({
   notes = [],
   recent = [],
   playPath = null,
+  lifecycle = 'product',
+  lastMilestone = null,
+  milestones = [],
+  runtimeMinutes = 40,
 }) {
   const standing = [
     `- Stage: ${STAGE_GUIDANCE[stage] || STAGE_GUIDANCE.building}`,
@@ -170,7 +191,7 @@ export function sessionPrompt({
     briefExists ? '- Your brief is BRIEF.md: read it first.' : '- There is no BRIEF.md yet: write it before anything else.',
   ]
   if (review) {
-    standing.push(`- Latest independent review (full text in reports/REVIEW.md): ${review.verdict || 'unrated'}${review.rating != null ? `, ${review.rating}/5` : ''}${review.done === true ? ', meets the brief' : review.done === false ? ', does not meet the brief yet' : ''}.`)
+    standing.push(`- Latest independent review (full text in reports/REVIEW.md; it describes the previous session, not necessarily the new milestone): ${review.verdict || 'unrated'}${review.rating != null ? `, ${review.rating}/5` : ''}${review.done === true ? ', milestone outcomes met' : review.done === false ? ', milestone outcomes not met yet' : ''}.`)
     for (const [index, problem] of (review.problems || []).slice(0, 3).entries()) standing.push(`  ${index + 1}. ${clip(problem, 240)}`)
     if (review.cut && !/^(nothing|none|-)\.?$/i.test(review.cut)) standing.push(`  Cut: ${clip(review.cut, 240)}`)
   } else {
@@ -186,6 +207,8 @@ export function sessionPrompt({
     standing.push('- Recent sessions (newest last):')
     for (const run of recent.slice(-3)) standing.push(`  #${run.num} ${run.type}${run.outcome ? ` (${run.outcome})` : ''}: ${clip(run.summary, 180)}`)
   }
+  if (lastMilestone) standing.push(`- Last completed milestone (historical context, not a new task): ${clip(lastMilestone.goal, 400)}.`)
+  if (milestones.length) standing.push(`- Earlier completed milestones: ${milestones.slice(-5).map(m => clip(m.goal, 160)).join('; ')}.`)
 
   return `You are the builder of "${name}", one project in an autonomous software lab on a Raspberry Pi. Nobody is watching this session and nobody can be asked anything: you decide, you build, and you check your own work.
 
@@ -195,11 +218,16 @@ ${idea ? idea : '(not recorded; read README.md, BRIEF.md and the code to underst
 WHERE THINGS STAND
 ${standing.join('\n')}
 
+DEVELOPMENT HORIZON
+${lifecycle === 'finite' ? 'This is a bounded deliverable; finish its agreed scope.' : lifecycle === 'explore' ? 'This creative lab develops a collection of experiments. A promising idea may deserve several milestones. Choose between deepening it and exploring a distinct idea, preserving earlier playable work.' : 'Own this product over time. Its mission persists across milestones and sessions; completing one does not finish the product. Improve the core experience and architecture when justified, including substantial redesign, while preserving what already works. Feature count and code size are not measures of progress.'}
+BRIEF.md is the compact product memory. MILESTONE.md contains the current goal and a short "## Done means" checklist. Keep architectural decisions and lessons that help later sessions; avoid an accumulating diary. The owner\'s idea and new notes take precedence over these files. Do not weaken acceptance outcomes just to claim completion; explain any justified scope change for review.
+This builder session has up to ${runtimeMinutes} minutes. Finish a checked, usable increment before the limit; an unfinished milestone continues in the next session. Do not stop after planning alone.
+
 THIS SESSION
 1. Choose the one goal that would most improve the product for a person using it: the person's new notes first, then the review's top problem, then your brief. State it as an outcome ("a new player knows what to press on the first screen"), not a task list.
 2. Build it end to end. Run the product and use it the way a person would; look at what you made (open it, screenshot it, read the output). Fix what you see, and keep going until the goal is met or the session runs out.
 3. Leave the product better and simpler than you found it. Deleting weak or unused parts is progress; piling on features is not.
-4. Keep BRIEF.md true: update it when the direction, the "Done means" list or a constraint changes.
+4. Keep BRIEF.md and MILESTONE.md current when the work changes their relevant decisions, lessons or outcomes.
 5. Keep a way to check the product: ./check.sh (or npm test / npm run build) should pass when it works and fail when it is broken. Never weaken a check to make it pass.
 6. Older run instructions may exist in prompts/; they are background. This message and BRIEF.md win.
 
@@ -227,7 +255,7 @@ ${BRIEF_TEMPLATE}
 `
 }
 
-export function reviewPrompt({ name = 'this project', idea = '', runNumber = 1, whatChanged = '', diffStat = '', checksLine = '', shots = [] }) {
+export function reviewPrompt({ name = 'this project', idea = '', runNumber = 1, whatChanged = '', diffStat = '', checksLine = '', shots = [], milestoneBefore = null, milestone = null }) {
   const shotLines = shots.length
     ? shots.map(shot => `  - ${shot}`).join('\n')
     : '  (none: this is not a web app, or the browser was unavailable)'
@@ -237,7 +265,11 @@ THE IDEA
 ${idea || '(not recorded; see README.md and BRIEF.md)'}
 
 WHAT TO LOOK AT
-- BRIEF.md: what the product should be, and its "Done means" list.
+- reports/USER_FEEDBACK.md: the owner's latest direction takes precedence over earlier scope.
+- BRIEF.md: the lasting product purpose, constraints and decisions. MILESTONE.md: the current goal and "Done means" outcomes (legacy projects may still keep these in BRIEF.md).
+- Milestone at session start: ${milestoneBefore ? JSON.stringify(milestoneBefore) : '(not yet defined)'}.
+- Milestone now: ${milestone ? JSON.stringify(milestone) : '(not yet defined)'}.
+- Judge the milestone against the owner's idea and the whole existing product. Reject weakened criteria, scope drift or regressions hidden by a small passing checklist. A milestone can span many sessions; partial progress is not completion.
 - The product itself. Screenshots of the running app after this session (open and look at them):
 ${shotLines}
 - The lab's checks: ${checksLine || 'none ran'}.
@@ -249,18 +281,18 @@ Do not modify any file. Reply with exactly this block and nothing after it:
 
 **Verdict:** better | same | worse — <one sentence, compared with before this session>
 **Rating:** <0-5>/5 — <how good the product is for a person right now>
-**Done:** yes | no — <does it meet every "Done means" item in BRIEF.md>
+**Done:** yes | no — <does the current milestone meet its outcomes without weakening the product>
 **Top problems:**
-1. <the problem a person would feel most>
-2. <next>
-3. <next>
+<numbered list of actionable problems that prevent this milestone being ready; write "none" if there are none. Future milestones are not blockers.>
 **Cut:** <what to delete or simplify, or "nothing">
 `
 }
 
 // Last occurrence of each field wins: an agent's final answer comes last.
 export function parseReview(text = '') {
-  const source = String(text || '')
+  const raw = String(text || '')
+  const verdictAt = raw.lastIndexOf('**Verdict:**')
+  const source = verdictAt >= 0 ? raw.slice(verdictAt) : raw
   const last = re => {
     let match = null
     let found
@@ -268,20 +300,28 @@ export function parseReview(text = '') {
     while ((found = global.exec(source))) match = found
     return match
   }
-  const verdict = last(/^\s*\*\*Verdict:\*\*\s*(better|same|worse)\b\s*[—–:-]*\s*(.*)$/)
-  const rating = last(/^\s*\*\*Rating:\*\*\s*(\d(?:\.\d+)?)\s*\/\s*5\b\s*[—–:-]*\s*(.*)$/)
-  const done = last(/^\s*\*\*Done:\*\*\s*(yes|no)\b\s*[—–:-]*\s*(.*)$/)
-  const cut = last(/^\s*\*\*Cut:\*\*\s*(.*)$/)
+  const verdict = last(/^[ \t]*\*\*Verdict:\*\*[ \t]*(better|same|worse)\b[ \t]*[—–:-]*[ \t]*(.*)$/)
+  const rating = last(/^[ \t]*\*\*Rating:\*\*[ \t]*(\d(?:\.\d+)?)[ \t]*\/[ \t]*5\b[ \t]*[—–:-]*[ \t]*(.*)$/)
+  const done = last(/^[ \t]*\*\*Done:\*\*[ \t]*(yes|no)\b[ \t]*[—–:-]*[ \t]*(.*)$/)
+  const cut = last(/^[ \t]*\*\*Cut:\*\*[ \t]*(.*)$/)
   const problems = []
-  const problemsAt = source.search(/^\s*\*\*Top problems:\*\*/im)
+  let explicitNone = false
+  const problemsHeader = last(/^[ \t]*\*\*Top problems:\*\*[ \t]*(.*)$/)
+  const problemsAt = problemsHeader?.index ?? -1
+  const addProblem = line => {
+    const item = line.match(/^\s*(?:\d+[.)]|[-*])\s+(.+)$/)
+    const content = (item?.[1] || line).trim()
+    if (/^(none|nothing|n\/a)[.!]?$/i.test(content)) explicitNone = true
+    else if (content) problems.push(clip(content, 400))
+  }
   if (problemsAt >= 0) {
-    for (const line of source.slice(problemsAt).split('\n').slice(1)) {
+    addProblem(problemsHeader[1])
+    for (const line of source.slice(problemsAt + problemsHeader[0].length).split('\n')) {
       if (/^\s*\*\*[^*]+:\*\*/.test(line)) break
-      const item = line.match(/^\s*(?:\d+[.)]|[-*])\s+(.+)$/)
-      if (item) problems.push(clip(item[1], 400))
+      addProblem(line)
     }
   }
-  const value = verdict && rating && done ? {
+  const value = verdict && rating && done && cut && problemsAt >= 0 && (explicitNone || problems.length) ? {
     ok: true,
     verdict: verdict[1].toLowerCase(),
     verdictNote: clip(verdict[2], 300),
@@ -297,7 +337,7 @@ export function parseReview(text = '') {
 
 export function reviewLine(review) {
   if (!review?.ok) return 'unavailable'
-  const parts = [review.verdict, `${review.rating}/5`, review.done ? 'meets the brief' : 'not done yet']
+  const parts = [review.verdict, `${review.rating}/5`, review.done ? 'meets the milestone' : 'not done yet']
   return `${parts.join(' · ')}${review.problems[0] ? ` — ${clip(review.problems[0], 200)}` : ''}`
 }
 

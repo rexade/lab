@@ -537,6 +537,7 @@ ${cleanIdea}
     idea: cleanIdea.slice(0, 2000),
     // The first session shapes the idea into BRIEF.md and a first version.
     stage: 'shaping',
+    lifecycle: 'product',
     runner: 'codex',
     repo,
     runLog,

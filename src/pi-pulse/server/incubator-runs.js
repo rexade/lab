@@ -7,7 +7,7 @@ import { notifyIncubatorClients } from './events.js'
 import { readIncubators, readStatusAt, repairClaudeRunnerStatusIfNeeded, writeIncubators } from './incubator-store.js'
 import { acquireRunLock, currentRunLock, globalRunBusy, spawnTrackedRun } from './run-lock.js'
 import { appendIncubatorPreflightFailure, markIncubatorProcessFailure, nextIncubatorRunNum } from './run-receipts.js'
-import { isUnproductive } from '../scripts/lib/session.mjs'
+import { isUnproductive, projectRests } from '../scripts/lib/session.mjs'
 import { hoursFromNow, shellQuote } from './util.js'
 
 const activeIncubatorRuns = new Map()
@@ -195,7 +195,8 @@ function applyBackoffPlan(slot, plan) {
 export function incubatorSchedulerTick() {
   const data = readIncubators()
   let changed = false
-  for (const slot of data.slots) {
+  // Oldest due first: registry order must not starve newer products.
+  for (const slot of [...data.slots].sort((a, b) => Number(a.nextRunAt || 0) - Number(b.nextRunAt || 0))) {
     if (!slot.enabled || !slot.nextRunAt || Date.now() < slot.nextRunAt) continue
     if (getIncubatorRun(slot.id).running) continue
     // Another run holds the lock: stay due and start on the first free tick. Judging
@@ -203,8 +204,8 @@ export function incubatorSchedulerTick() {
     if (globalRunBusy()) continue
     let status = {}
     try { status = readStatusAt(slot.statusPath) } catch {}
-    // A finished project rests: no sessions until a note (or a manual Run) wakes it.
-    if (status.stage === 'done') {
+    // Only explicitly bounded projects retire after completion.
+    if (projectRests(status)) {
       if (!slot.restingSince) { slot.restingSince = new Date().toISOString(); changed = true }
       continue
     }

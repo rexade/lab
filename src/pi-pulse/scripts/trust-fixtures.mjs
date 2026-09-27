@@ -29,7 +29,7 @@ import {
 } from '../src/lib/runSignals.js'
 import { incubatorLauncherScript } from '../server/incubator-templates.js'
 import { staleSourceRestartPlan, validateSourceForRestart } from '../server/service-health.js'
-import { breakage, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview } from './lib/session.mjs'
+import { breakage, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview, milestoneSnapshot } from './lib/session.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
@@ -1073,8 +1073,10 @@ for a in "$@"; do case "$a" in *"You are "*) PROMPT="$a" ;; esac; done
 if printf '%s' "$PROMPT" | grep -q '^You are an independent reviewer'; then
   printf '%s\\n' "$@" > "$FAKE_ARGS_OUT.review"
   if [ "\${FAKE_REVIEW:-no}" = garbage ]; then echo "I looked around."; exit 0; fi
-  printf 'Checked it.\\n\\n**Verdict:** better — clearer\\n**Rating:** 3.5/5 — solid start\\n**Done:** %s — see brief\\n**Top problems:**\\n1. No sound on hits\\n2. Buttons too small\\n**Cut:** nothing\\n' "\${FAKE_REVIEW:-no}"
-  exit 0
+  printf 'Checked it.\\n\\n**Verdict:** better — clearer\\n**Rating:** 3.5/5 — solid start\\n**Done:** %s — see milestone\\n**Top problems:**\\n' "\${FAKE_REVIEW:-no}"
+  if [ "\${FAKE_PROBLEMS:-some}" = none ]; then printf 'none\\n'; else printf '1. No sound on hits\\n2. Buttons too small\\n'; fi
+  printf '**Cut:** nothing\\n'
+  exit "\${FAKE_REVIEW_EXIT:-0}"
 fi
 printf '%s\\n' "$@" > "$FAKE_ARGS_OUT"
 HEADER=$(printf '%s\\n' "$PROMPT" | grep -m1 -E '^## Run [0-9]+ — ')
@@ -1083,6 +1085,8 @@ case "\${FAKE_MODE:-good}" in
         printf '<!doctype html><title>harbor</title><h1>Harbor v1</h1>\\n' > index.html
         printf '#!/usr/bin/env bash\\ngrep -q Harbor index.html\\n' > check.sh ;;
   improve) printf '<!doctype html><title>harbor</title><h1>Harbor v%s</h1>\\n' "$RANDOM" > index.html ;;
+  milestone) printf '# Next milestone\\n## Goal\\nA harbor worth returning to.\\n## Done means\\n- [ ] Progress survives a reload\\n' > MILESTONE.md
+        printf '<!doctype html><title>harbor</title><h1>Harbor returns</h1>\\n' > index.html ;;
   break) printf '<!doctype html><title>oops</title>\\n' > index.html; echo junk > stray.txt ;;
   fail) echo half-done > index.html; echo "fixture api error"; exit 3 ;;
 esac
@@ -1176,7 +1180,7 @@ function testSessionsBuildKeepAndReviewWithEitherAgent() {
   assert.ok(claudeArgs.includes('--dangerously-skip-permissions'), 'manual Claude runs honor CLAUDE_BYPASS')
   assert.ok(!claudeArgs.includes('--permission-mode'), 'bypass and an explicit permission mode are mutually exclusive')
   const claudePrompt = claudeArgs.join('\n')
-  assertIncludes(claudePrompt, 'Stage: Building. Move the product toward', 'the next session builds toward the brief')
+  assertIncludes(claudePrompt, 'Stage: Building. Continue the current milestone', 'the next session builds toward the current milestone')
   assertIncludes(claudePrompt, 'Your brief is BRIEF.md: read it first.', 'the builder is pointed at its own brief')
   assertIncludes(claudePrompt, '1. No sound on hits', "the last review's top problem steers the next session")
   assert.ok(!claudePrompt.includes('BRIEF.md TEMPLATE'), 'the template is only for a project without a brief')
@@ -1284,31 +1288,60 @@ function testNotesComeFirstAndAreNewUntilASessionKeepsThem() {
   assertIncludes(fx.prompt(), 'the music is too loud', 'a note written later is new again')
 }
 
-// A project is done when the reviewer says the brief is met and polishing
-// finds nothing more worth doing; then it rests.
+// A product keeps developing after each independently reviewed milestone.
 function testProjectsMoveFromShapingToDone() {
   const fx = runnerFixture('stages')
   session(fx, { FAKE_REVIEW: 'yes' })
   assert.equal(fx.status().stage, 'polishing', 'a reviewer who finds the brief met moves the project to polishing')
-  session(fx, { FAKE_MODE: 'idle' })
-  assertIncludes(fx.prompt(), 'Stage: Polishing. The reviewer found the "Done means" list met. Add no new features.', 'polishing forbids new features')
+  session(fx, { FAKE_MODE: 'idle', FAKE_REVIEW: 'yes' })
+  assertIncludes(fx.prompt(), 'Polishing the current milestone.', 'polishing is milestone-scoped')
   assert.equal(fx.status().stage, 'polishing')
-  assert.equal(fx.status().polishSessions, 1)
+  assert.equal(fx.status().polishSessions, 0)
   session(fx, { FAKE_MODE: 'improve', FAKE_REVIEW: 'yes' })
-  assert.equal(fx.status().stage, 'done', 'after its polish passes the project is done')
-  session(fx, { FAKE_MODE: 'improve', FAKE_REVIEW: 'no' })
-  assert.equal(fx.status().stage, 'building', 'a manual run whose review finds the brief unmet sends it back to building')
+  assert.equal(fx.status().stage, 'polishing', 'run count alone never finishes a milestone')
+  session(fx, { FAKE_MODE: 'idle', FAKE_REVIEW: 'yes', FAKE_PROBLEMS: 'none', FAKE_REVIEW_EXIT: '3' })
+  assert.equal(fx.status().stage, 'polishing', 'a failed reviewer cannot finish work even with a valid-looking verdict')
+  assert.equal(fx.status().milestoneCount, undefined)
+  session(fx, { FAKE_MODE: 'idle', FAKE_REVIEW: 'yes', FAKE_PROBLEMS: 'none' })
+  assert.equal(fx.status().stage, 'done', 'a fresh independent review can finish unchanged but verified work')
+  assert.equal(fx.status().milestoneCount, 1)
+  const first = fx.status().lastMilestone
+  session(fx, { FAKE_MODE: 'idle', FAKE_REVIEW: 'yes', FAKE_PROBLEMS: 'none' })
+  assert.equal(fx.status().stage, 'advancing', 'the next session chooses a new milestone without asking the owner')
+  assert.equal(fx.status().milestoneCount, 1, 'the same goal is never repeatedly counted')
+  assertIncludes(fx.prompt(), first.goal, 'completed work survives fresh processes and is supplied as history')
+  session(fx, { FAKE_MODE: 'milestone', FAKE_REVIEW: 'no' })
+  assert.equal(fx.status().stage, 'building', 'the second milestone may need many sessions')
+  assert.equal(fx.status().milestoneCount, 1)
+  session(fx, { FAKE_MODE: 'improve', FAKE_REVIEW: 'yes', FAKE_PROBLEMS: 'none' })
+  assert.equal(fx.status().stage, 'done')
+  assert.equal(fx.status().milestoneCount, 2)
+  assert.deepEqual(fx.status().milestoneHistory.map(m => m.goal), [first.goal, 'A harbor worth returning to.'])
   session(fx, { FAKE_MODE: 'improve', FAKE_REVIEW: 'garbage' })
-  assert.equal(fx.status().stage, 'building', 'a reply without a verdict changes nothing')
+  assert.equal(fx.status().stage, 'advancing', 'a reply without a verdict cannot complete another milestone')
   assertIncludes(fx.status().lastReviewError, 'no verdict', 'and says why')
   assert.equal(fx.status().lastReview.verdict, 'better', 'the last real review stays')
 }
 
 function testSessionPureRules() {
+  const repo = tempDir('milestone-identity')
+  const milestone = '# Goal\n## Goal\nLasting value.\n## Done means\n- [ ] ' + 'x'.repeat(220) + ' A\n'
+  fs.writeFileSync(join(repo, 'MILESTONE.md'), milestone)
+  const key = milestoneSnapshot(repo).key
+  fs.writeFileSync(join(repo, 'MILESTONE.md'), milestone.replace('[ ]', '[x]'))
+  assert.equal(milestoneSnapshot(repo).key, key, 'checking an outcome is not a new milestone')
+  fs.writeFileSync(join(repo, 'MILESTONE.md'), milestone.replace(' A\n', ' B\n'))
+  assert.notEqual(milestoneSnapshot(repo).key, key, 'identity uses full outcomes, not UI-truncated text')
+  const complete = '**Verdict:** same — sound\n**Rating:** 4/5\n**Done:** yes\n**Top problems:**\nnone\n**Cut:** nothing'
+  assert.equal(parseReview(complete).ok, true)
+  assert.equal(parseReview(complete.replaceAll('\n', '\n\n')).ok, true, 'blank lines in a complete review are harmless')
+  assert.equal(parseReview(complete.replace('**Top problems:**\nnone', '**Top problems:** none')).ok, true, 'inline none is explicit too')
+  assert.equal(parseReview(complete + '\n**Verdict:** same — interrupted').ok, false, 'a truncated final review cannot borrow older fields')
+  assert.equal(parseReview(complete.replace('none\n', 'Storage loses data\n')).problems.length, 1, 'unnumbered problems are not silently treated as approval')
   assert.deepEqual(nextStage({ stage: 'shaping', outcome: 'kept', briefExists: false }), { stage: 'shaping', polishSessions: 0 }, 'no brief, no building')
   assert.deepEqual(nextStage({ stage: 'building', outcome: 'reverted', briefExists: true, review: null }), { stage: 'building', polishSessions: 0 })
   assert.equal(isUnproductive({ lastRunStatus: 'no-changes', stage: 'building' }), true, 'a building session that changed nothing backs off')
-  assert.equal(isUnproductive({ lastRunStatus: 'no-changes', stage: 'polishing' }), false, 'in polishing, nothing left to change is progress')
+  assert.equal(isUnproductive({ lastRunStatus: 'no-changes', stage: 'polishing' }), true, 'unresolved polishing with no change backs off')
   assert.equal(isUnproductive({ lastRunStatus: 'ok' }), false)
   assert.equal(parseReview('**Verdict:** better | same | worse — <one sentence>\n**Rating:** <0-5>/5\n**Done:** yes | no').ok, false, 'an echoed template is not a verdict')
   assert.deepEqual(breakage({ app: { ran: true, consoleErrors: 0 } }, { check: { state: 'none' }, app: { ran: true, state: 'FAIL', consoleErrors: 0, pageErrors: 0, blank: false } }), [], "the harness's soft FAIL heuristics never revert a session")
@@ -1416,6 +1449,26 @@ function testDueScheduledSlotsActuallyFire() {
   assert.notEqual(out.slot.lastScheduleBlockedCode, 'STALE_SCHEDULE_RECONCILED', 'ordinary reads must not reschedule due slots')
 }
 
+function testSchedulerChoosesOldestDueSlot() {
+  const lab = schedulerLab('scheduler-fair')
+  const registryPath = join(lab.projectsDir, 'incubators.json')
+  const data = JSON.parse(fs.readFileSync(registryPath, 'utf8'))
+  const first = data.slots[0]
+  // Shared fixture repo is intentional: only one launch is permitted. The lock
+  // owner and schedule receipt identify which slot actually won the tick.
+  data.slots.push({ ...first, id: 'older-due', nextRunAt: first.nextRunAt - 60000 })
+  fs.writeFileSync(registryPath, JSON.stringify(data))
+  const out = runInLab(lab.dir, `
+    const runs = await import(${JSON.stringify(join(root, 'server', 'incubator-runs.js'))})
+    const lock = await import(${JSON.stringify(join(root, 'server', 'run-lock.js'))})
+    runs.incubatorSchedulerTick()
+    const owner = lock.currentRunLock()
+    for (let i = 0; i < 150 && lock.globalRunBusy(); i += 1) await new Promise(r => setTimeout(r, 100))
+    console.log(JSON.stringify(owner))
+  `, lab.env)
+  assert.equal(out.id, 'older-due', 'registry position does not outrank time spent waiting')
+}
+
 function testOverdueSlotsAreSpacedOutOnlyAtBoot() {
   const lab = schedulerLab('scheduler-boot')
   const out = runInLab(lab.dir, `
@@ -1502,7 +1555,7 @@ function testFailingSlotsBackOffAndRetryInsteadOfPausing() {
 // A finished project rests: autopilot stays on, but no sessions run until a
 // note (or a manual Run) gives it something new to do.
 function testFinishedProjectsRestUntilWoken() {
-  const lab = schedulerLab('scheduler-rest', { slotStatus: { runCount: 9, stage: 'done', lastRunStatus: 'ok' } })
+  const lab = schedulerLab('scheduler-rest', { slotStatus: { runCount: 9, stage: 'done', lifecycle: 'finite', lastRunStatus: 'ok' } })
   const tick = () => runInLab(lab.dir, `
     const runs = await import(${JSON.stringify(join(root, 'server', 'incubator-runs.js'))})
     const store = await import(${JSON.stringify(join(root, 'server', 'incubator-store.js'))})
@@ -1517,9 +1570,9 @@ function testFinishedProjectsRestUntilWoken() {
   assert.ok(!fs.existsSync(lab.agentRan), 'a finished project does not launch sessions')
   assert.equal(slot.enabled, true, 'resting is not switching autopilot off')
   assert.equal(typeof slot.restingSince, 'string', 'the rest is recorded')
-  fs.writeFileSync(lab.statusPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(lab.statusPath, 'utf8')), stage: 'building' }, null, 2))
+  fs.writeFileSync(lab.statusPath, JSON.stringify({ ...JSON.parse(fs.readFileSync(lab.statusPath, 'utf8')), lifecycle: 'product' }, null, 2))
   slot = tick()
-  assert.ok(fs.existsSync(lab.agentRan), 'once woken (a note moved it to building) it runs again')
+  assert.ok(fs.existsSync(lab.agentRan), 'ongoing products launch after a completed milestone without owner input')
   assert.equal(slot.restingSince, null)
 }
 
@@ -1723,6 +1776,7 @@ const tests = [
   testUnifiedRunnerFailsVisiblyOnBadInput,
   testCorruptIncubatorsFileIsNeverOverwritten,
   testDueScheduledSlotsActuallyFire,
+  testSchedulerChoosesOldestDueSlot,
   testOverdueSlotsAreSpacedOutOnlyAtBoot,
   testSchedulerDefersBusySlotsWithoutRecountingFailures,
   testFailingSlotsBackOffAndRetryInsteadOfPausing,

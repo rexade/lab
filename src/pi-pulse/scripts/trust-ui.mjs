@@ -270,7 +270,7 @@ const tests = {
     includes(html, 'src="/api/incubators/proj/evidence/run-9/desktop.png"', 'the newest kept screenshot is shown')
     includes(html, 'Before · #7', 'the previous session is one click away')
     includes(html, 'data-brief-done="2"', "the builder's done-list is shown")
-    includes(html, '1/2 done', 'progress against the brief is counted')
+    includes(html, '1/2 outcomes checked', 'builder checkmarks are not confused with independently reviewed completion')
     includes(html, 'A harbor raid game for phones.', 'the brief says what the product is')
 
     const bare = render(ui.IncubatorDetail, { slot: slot(), runs: [], preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
@@ -293,7 +293,7 @@ const tests = {
     includes(html, 'data-review="better"', 'the review verdict is shown')
     includes(html, 'Better than before', 'in words')
     includes(html, 'data-review-problems="2"', "the reviewer's problems are listed")
-    includes(html, 'not done yet', 'whether the brief is met is explicit')
+    includes(html, 'milestone in progress', 'whether the milestone is met is explicit')
     includes(html, 'data-outcome="reverted"', 'a reverted session is marked as such')
     includes(html, 'Reverted by the lab: ./check.sh failed: combo test', 'with the reason the lab reverted it')
     includes(html, 'Make the combo test pass first', 'the next goal is the agent\'s own')
@@ -312,7 +312,7 @@ const tests = {
   },
 
   'a finished project rests, and the hero says the lab is caught up'() {
-    const done = slot({ id: 'moss', displayName: 'Moss', stage: 'done', enabled: true, nextRunAt: NOW - 60000, lastOutcomeAt: '2026-09-26T11:00:00Z' })
+    const done = slot({ id: 'moss', displayName: 'Moss', stage: 'done', lifecycle: 'finite', enabled: true, nextRunAt: NOW - 60000, lastOutcomeAt: '2026-09-26T11:00:00Z' })
     assert.equal(ui.incubator.slotState(done, { now: NOW }).kind, 'resting')
     assert.equal(ui.incubator.upcomingSchedule([done], NOW).length, 0, 'a resting project has no upcoming sessions')
     const headline = ui.incubator.loopHeadline([done], { now: NOW })
@@ -321,10 +321,17 @@ const tests = {
     const html = render(ui.IncubatorDetail, { slot: done, runs: [], preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
     includes(html, 'data-banner="resting"', 'the detail view says it is done and resting')
     includes(html, 'wakes this finished project up', 'and how to wake it')
+    const ongoing = { ...done, lifecycle: 'product' }
+    assert.equal(ui.incubator.slotState(ongoing, { now: NOW }).kind, 'scheduled')
+    assert.equal(ui.incubator.nextRunType(ongoing), 'DEVELOP')
+    assert.ok(ui.incubator.upcomingSchedule([ongoing], NOW).length > 0)
+    const productHtml = render(ui.IncubatorDetail, { slot: ongoing, runs: [], preflight: { ok: true, checks: [] }, now: NOW, actions: noopActions })
+    includes(productHtml, 'Milestone complete', 'completion is explicitly a milestone, not the whole product')
+    assert.ok(!productHtml.includes('data-banner="resting"'))
   },
 
   'while you were away: what the lab did since your last visit'() {
-    const slots = [slot({ id: 'harbor', displayName: 'Harbor' }), slot({ id: 'moss', displayName: 'Moss', stage: 'done', lastOutcomeAt: '2026-09-26T09:00:00Z' })]
+    const slots = [slot({ id: 'harbor', displayName: 'Harbor' }), slot({ id: 'moss', displayName: 'Moss', stage: 'done', lifecycle: 'finite', lastOutcomeAt: '2026-09-26T09:00:00Z' })]
     const runsBySlot = {
       harbor: [
         { num: 8, type: 'BUILD', 'What changed': 'old news', Outcome: 'kept · 1', Ended: '2026-09-24T09:00:00Z' },

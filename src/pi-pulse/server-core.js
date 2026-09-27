@@ -691,7 +691,7 @@ export function parseRunsFromLog(content, options = {}) {
 function isRecoveredAfterFailure(run) {
   if (!run || run.type === 'FAILED') return false
   const gate = String(run['Quality gate'] || '').toUpperCase()
-  return gate === 'PASS' || ['CREATE', 'MUTATE', 'RESEARCH', 'HARVEST', 'SHAPE', 'BUILD', 'POLISH'].includes(run.type)
+  return gate === 'PASS' || ['CREATE', 'MUTATE', 'RESEARCH', 'HARVEST', 'SHAPE', 'DEVELOP', 'BUILD', 'POLISH'].includes(run.type)
 }
 
 function shouldPinFailure(runs = [], failure, recent) {

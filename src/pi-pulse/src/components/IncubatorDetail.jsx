@@ -72,7 +72,7 @@ function StageTrack({ slot }) {
               aria-current={active ? 'step' : undefined}
             >
               <span className="h-1.5 w-1.5 rounded-full" style={{ background: reached ? 'var(--accent)' : 'rgba(148,163,184,0.35)', boxShadow: active ? '0 0 8px var(--accent-glow)' : 'none' }} />
-              {step.label}
+              {step.key === 'shaping' && slot.stage === 'advancing' ? 'Next milestone' : step.key === 'done' && slot.lifecycle === 'finite' ? 'Done' : step.label}
             </span>
             {index < STAGE_STEPS.length - 1 && <span aria-hidden="true" className={`h-px w-3 ${index < current.index ? 'bg-[var(--accent)] opacity-60' : 'bg-white/[0.12]'}`} />}
           </li>
@@ -157,22 +157,26 @@ function BriefCard({ slot }) {
       <div data-brief="none">
         <Eyebrow>Brief</Eyebrow>
         <p className="mt-3 text-[14px] leading-relaxed text-fg3">
-          The first session turns the idea into <span className="font-mono text-[13px] text-fg2">BRIEF.md</span>: what this is, who it is for, and what done means. It appears here once written.
+          The first session records the product direction in <span className="font-mono text-[13px] text-fg2">BRIEF.md</span> and chooses its first milestone. Each milestone can take multiple sessions.
         </p>
       </div>
     )
   }
-  const doneCount = brief.done.filter(item => item.checked).length
+  const milestone = slot.milestone || brief
+  const outcomes = milestone.done || []
+  const doneCount = outcomes.filter(item => item.checked).length
   return (
     <div data-brief="present">
       <div className="flex items-baseline justify-between gap-3">
-        <Eyebrow>Brief</Eyebrow>
-        {brief.done.length > 0 && <span className="num text-[12px] text-fg4">{doneCount}/{brief.done.length} done</span>}
+        <Eyebrow>Product direction</Eyebrow>
+        {outcomes.length > 0 && <span className="num text-[12px] text-fg4">{doneCount}/{outcomes.length} outcomes checked</span>}
       </div>
       {brief.what && <p className="mt-3 text-[16px] leading-snug tracking-[-0.01em] text-fg">{brief.what}</p>}
-      {brief.done.length > 0 && (
-        <ul className="mt-4 grid gap-2" data-brief-done={brief.done.length}>
-          {brief.done.map(item => (
+      <p className="mt-3 text-[12px] text-fg4">{slot.lifecycle === 'finite' ? 'Bounded deliverable' : 'Ongoing product · milestones continue automatically while autopilot is on'} · {slot.milestoneCount || 0} milestones completed</p>
+      {slot.milestone && <p className="mt-4 text-[14px] text-fg2">Current milestone: {milestone.goal}</p>}
+      {outcomes.length > 0 && (
+        <ul className="mt-4 grid gap-2" data-brief-done={outcomes.length}>
+          {outcomes.map(item => (
             <li key={item.text} className="flex items-start gap-2.5 text-[14px] leading-relaxed">
               <span
                 aria-hidden="true"
@@ -191,6 +195,7 @@ function BriefCard({ slot }) {
       {brief.constraints.length > 0 && (
         <p className="mt-4 text-[12px] leading-relaxed text-fg4">Designed within: {brief.constraints.join(' · ')}</p>
       )}
+      {slot.milestoneHistory?.length > 0 && <details className="mt-4 text-[12px] text-fg3"><summary>Recent completed milestones</summary><ul className="mt-2 grid gap-2">{slot.milestoneHistory.map(item => <li key={`${item.key}-${item.run}`}>#{item.run} · {item.goal}</li>)}</ul></details>}
     </div>
   )
 }
@@ -219,7 +224,7 @@ function ReviewColumn({ slot }) {
         <>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <Chip tone={review.tone}>{review.label}</Chip>
-            <Chip tone={review.done ? 'ok' : 'idle'}>{review.done ? 'meets the brief' : 'not done yet'}</Chip>
+            <Chip tone={review.done ? 'ok' : 'idle'}>{review.done ? 'milestone met' : 'milestone in progress'}</Chip>
           </div>
           <div className="mt-3 flex items-center gap-3">
             <RatingMeter rating={review.rating} />
@@ -248,7 +253,7 @@ function LastNextBand({ slot, runs, now }) {
   const meta = outcome?.key ? OUTCOME[outcome.key] : null
   const nextAt = timeValue(slot.nextRunAt)
   const upcoming = upcomingRun(slot)
-  const resting = slot.stage === 'done'
+  const resting = slot.stage === 'done' && slot.lifecycle === 'finite'
   const when = slot.running?.running
     ? 'after the current session'
     : resting ? 'when a note wakes it'
@@ -315,7 +320,7 @@ function Steering({ slot, onSend }) {
   return (
     <form onSubmit={send}>
       <Eyebrow>Leave a note</Eyebrow>
-      <p className="mt-2 text-[14px] text-fg3">Optional. The next session reads it before anything else{slot.stage === 'done' ? ', and it wakes this finished project up' : ''}.</p>
+      <p className="mt-2 text-[14px] text-fg3">Optional. The next session reads it before anything else{slot.stage === 'done' && slot.lifecycle === 'finite' ? ', and it wakes this finished project up' : ''}.</p>
       <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end">
         <textarea
           className="field min-h-[52px] flex-1 resize-y"
