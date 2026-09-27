@@ -1760,6 +1760,8 @@ function testSessionPromptNamesOnlyEnabledServices() {
   assert.ok(withOllama.includes("_services/ollama/"), 'the builder learns the relative path')
   assert.ok(withOllama.includes('GET api/tags answered'), 'the builder sees the live probe')
   assert.ok(withOllama.includes('no network'), 'the builder is told it cannot call the service itself')
+  assert.ok(withOllama.includes('except the local services listed below'), 'the folder limit names its exception')
+  assert.ok(!none.includes('except the local services'), 'and only when there is one')
 }
 
 // New steering outranks time spent waiting: the person is waiting on this slot,

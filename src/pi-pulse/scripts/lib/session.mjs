@@ -240,7 +240,7 @@ WHAT THE LAB DOES FOR YOU
 - Has an independent reviewer judge the product after your session; its critique steers the next one.
 
 LIMITS
-- No sudo, no system services, nothing outside this project folder, no replies from anyone. When something is out of reach, design around it (for example, read a local file instead of calling a service) and note it under Constraints in BRIEF.md.
+- No sudo, no system services, nothing outside this project folder${services.length ? ' except the local services listed below' : ''}, no replies from anyone. When something is out of reach, design around it (for example, read a local file instead of calling a service) and note it under Constraints in BRIEF.md.
 - The lab serves this folder as static files${playPath ? ` at ${playPath}` : ''}. A web app needs an index.html at the folder root that works when served that way: no dev server, relative paths only.
 ${services.length ? `- This project may call these local Pi services from the page, same-origin, at the relative path _services/<name>/ (for example fetch('_services/${services[0].name}/...') from index.html). Nothing else outside the folder is reachable. You cannot reach them from this session (it has no network): write the calls against the description below, keep a clear state for when a service is slow or down, and the lab's browser check will exercise the real thing.
 ${services.map(service => `  - ${service.name}: ${service.about}${service.probe ? ` Just before this session, ${service.probe}` : ''}`).join('\n')}
