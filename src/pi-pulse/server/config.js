@@ -80,6 +80,7 @@ export const SOURCE_HEALTH_FILES = [
   join(PI_PULSE_ROOT, 'scripts', 'run-incubator.sh'),
   join(PI_PULSE_ROOT, 'scripts', 'run-claude-incubator.sh'),
   ...sourceFilesIn(join(PI_PULSE_ROOT, 'scripts', 'lib'), ['.mjs', '.sh']),
+  ...sourceFilesIn(join(PI_PULSE_ROOT, 'scripts', 'lib', 'shadow'), ['.mjs']),
   join(PI_PULSE_ROOT, 'scripts', 'app-evidence.mjs'),
   ...String(process.env.PI_PULSE_SOURCE_HEALTH_FILES || '').split(':').filter(Boolean),
 ]

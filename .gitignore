@@ -11,6 +11,7 @@ src/pi-pulse/dist.bak/
 src/pi-pulse/day-buffer.json
 projects/.run-capture/
 projects/.run-locks/
+projects/*/shadow/
 *.log
 
 # Auto-generated per run (noisy diffs, easily regenerated)

@@ -259,7 +259,7 @@ ${BRIEF_TEMPLATE}
 `
 }
 
-export function reviewPrompt({ name = 'this project', idea = '', runNumber = 1, whatChanged = '', diffStat = '', checksLine = '', shots = [], milestoneBefore = null, milestone = null }) {
+export function reviewPrompt({ name = 'this project', idea = '', runNumber = 1, whatChanged = '', diffStat = '', checksLine = '', shots = [], beforeShots = [], visualComparison = false, milestoneBefore = null, milestone = null }) {
   const shotLines = shots.length
     ? shots.map(shot => `  - ${shot}`).join('\n')
     : '  (none: this is not a web app, or the browser was unavailable)'
@@ -276,6 +276,7 @@ WHAT TO LOOK AT
 - Judge the milestone against the owner's idea and the whole existing product. Reject weakened criteria, scope drift or regressions hidden by a small passing checklist. A milestone can span many sessions; partial progress is not completion. A milestone made of hardening, recovery paths or verification tooling is itself drift unless the owner asked for it.
 - The product itself. Screenshots of the running app after this session (open and look at them):
 ${shotLines}
+${visualComparison ? `- Before-session screenshots for comparison (open both versions; do not infer appearance from filenames):\n${beforeShots.map(shot => `  - ${shot}`).join('\n') || '  (unavailable)'}` : ''}
 - The lab's checks: ${checksLine || 'none ran'}.
 - What the builder says changed in session ${runNumber} (verify it, do not trust it): ${whatChanged ? clip(whatChanged, 500) : '(not reported)'}
 - Files changed this session: ${diffStat ? clip(diffStat, 600) : '(unknown)'}
@@ -290,6 +291,7 @@ Do not modify any file. Reply with exactly this block and nothing after it:
 **Top problems:**
 <at most 3, most important first: what most stands between this and something the owner would come back to. A missing capability or a broken main flow comes before anything else. Leave out edge cases, error recovery, storage limits and test coverage unless it breaks the main thing a person comes to do. Write "none" if there are none. Future milestones are not blockers.>
 **Cut:** <what to delete or simplify so the core is clearer, or "nothing">
+${visualComparison ? '**Visual comparison:** <specific observed before/after differences with screenshot filenames; write "unavailable" if either version could not be inspected>' : ''}
 `
 }
 
