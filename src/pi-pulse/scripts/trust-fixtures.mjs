@@ -31,7 +31,7 @@ import {
 } from '../src/lib/runSignals.js'
 import { incubatorLauncherScript } from '../server/incubator-templates.js'
 import { staleSourceRestartPlan, validateSourceForRestart } from '../server/service-health.js'
-import { breakage, checksAllowCompletion, checksLine, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview, milestoneSnapshot, runChecks, runFields, saveRejectedVersion, sessionPrompt } from './lib/session.mjs'
+import { breakage, checksAllowCompletion, checksLine, insertIntoRunSection, isUnproductive, nextStage, parseBrief, parseReview, milestoneSnapshot, runChecks, reviewPrompt, runFields, saveRejectedVersion, sessionPrompt } from './lib/session.mjs'
 import { generatedAppCsp } from '../server/security.js'
 import { compareRecordedRun, recordedVersions } from '../server/version-history.js'
 import { commitHeadline } from './lib/incubator-run.mjs'
@@ -1764,6 +1764,24 @@ function testSessionPromptNamesOnlyEnabledServices() {
   assert.ok(!none.includes('except the local services'), 'and only when there is one')
 }
 
+// The reviewer stands in for the owner: it judges whether the product became
+// more worth using, not how many defects remain, and never asks for proof the
+// lab cannot produce. The builder treats its critique as input, not orders.
+function testReviewJudgesOwnerValueNotDefectCount() {
+  const review = reviewPrompt({ name: 'Stone', idea: 'a calm game', runNumber: 4 })
+  assertIncludes(review, 'would the owner', 'the reviewer asks the owner question')
+  assertIncludes(review, 'polish nobody would notice is "same"', 'invisible polish is not progress')
+  assertIncludes(review, '4 = they would come back to it', 'ratings are anchored to use, not code quality')
+  assertIncludes(review, 'at most 3', 'problems are capped so they cannot become a backlog')
+  assertIncludes(review, 'unless it breaks the main thing a person comes to do', 'edge cases are not blockers by default')
+  assertIncludes(review, 'Never ask for evidence the lab cannot produce', 'no impossible verification demands')
+  for (const field of ['**Verdict:**', '**Rating:**', '**Done:**', '**Top problems:**', '**Cut:**']) assertIncludes(review, field, `the ${field} field stays parseable`)
+  const session = sessionPrompt({ runNumber: 5, briefExists: true })
+  assertIncludes(session, 'input, not an order', 'the builder weighs the review instead of obeying it')
+  assertIncludes(session, 'in the first minute of use', 'the builder favours changes a person notices')
+  assertIncludes(session, 'Do not build test harnesses, diagnostics pages or recovery tooling', 'no verification infrastructure as product work')
+}
+
 // New steering outranks time spent waiting: the person is waiting on this slot,
 // so it goes next even before its interval is up. One priority launch per note.
 function testSchedulerRunsUnreadSteeringFirst() {
@@ -2114,6 +2132,7 @@ const tests = [
   testSchedulerRunsUnreadSteeringFirst,
   testLocalServiceProxyStaysInsideItsAllowlist,
   testSessionPromptNamesOnlyEnabledServices,
+  testReviewJudgesOwnerValueNotDefectCount,
   testOverdueSlotsAreSpacedOutOnlyAtBoot,
   testSchedulerDefersBusySlotsWithoutRecountingFailures,
   testFailingSlotsBackOffAndRetryInsteadOfPausing,

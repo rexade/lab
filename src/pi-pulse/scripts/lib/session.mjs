@@ -226,9 +226,9 @@ BRIEF.md is the compact product memory. MILESTONE.md contains the current goal a
 This builder session has up to ${runtimeMinutes} minutes. Finish a checked, usable increment before the limit; an unfinished milestone continues in the next session. Do not stop after planning alone.
 
 THIS SESSION
-1. Choose the one goal that would most improve the product for a person using it: the person's new notes first, then the review's top problem, then your brief. State it as an outcome ("a new player knows what to press on the first screen"), not a task list.
+1. Choose the one goal that would most improve the product for a person using it. The person's new notes come first. Otherwise pick what would make the owner most likely to come back to it; the review's top problem is strong input, not an order. Prefer a change a person would notice in the first minute of use over hardening edge cases, and fix a defect only when it breaks the main flow. State it as an outcome ("a new player knows what to press on the first screen"), not a task list.
 2. Build it end to end. Run the product and use it the way a person would; look at what you made (open it, screenshot it, read the output). Fix what you see, and keep going until the goal is met or the session runs out.
-3. Leave the product better and simpler than you found it. Deleting weak or unused parts is progress; piling on features is not.
+3. Leave the product better and simpler than you found it. Deleting weak or unused parts is progress; piling on features is not. Do not build test harnesses, diagnostics pages or recovery tooling as product work: ./check.sh is enough verification.
 4. Keep BRIEF.md and MILESTONE.md current when the work changes their relevant decisions, lessons or outcomes.
 5. Keep a way to check the product: ./check.sh (or npm test / npm run build) should pass when it works and fail when it is broken. Never weaken a check to make it pass.
 6. Older run instructions may exist in prompts/; they are background. This message and BRIEF.md win.
@@ -263,7 +263,7 @@ export function reviewPrompt({ name = 'this project', idea = '', runNumber = 1, 
   const shotLines = shots.length
     ? shots.map(shot => `  - ${shot}`).join('\n')
     : '  (none: this is not a web app, or the browser was unavailable)'
-  return `You are an independent reviewer for "${name}", one project in an autonomous software lab. You did not build it. Judge it the way the person who asked for it would.
+  return `You are an independent reviewer for "${name}", one project in an autonomous software lab, reviewing on behalf of its owner. You did not build it. You are not a QA tester: the owner does not care how many defects remain, only whether this is becoming something they would want to use. The question behind every answer is: would the owner notice this session's work, and would they come back to the product?
 
 THE IDEA
 ${idea || '(not recorded; see README.md and BRIEF.md)'}
@@ -273,22 +273,23 @@ WHAT TO LOOK AT
 - BRIEF.md: the lasting product purpose, constraints and decisions. MILESTONE.md: the current goal and "Done means" outcomes (legacy projects may still keep these in BRIEF.md).
 - Milestone at session start: ${milestoneBefore ? JSON.stringify(milestoneBefore) : '(not yet defined)'}.
 - Milestone now: ${milestone ? JSON.stringify(milestone) : '(not yet defined)'}.
-- Judge the milestone against the owner's idea and the whole existing product. Reject weakened criteria, scope drift or regressions hidden by a small passing checklist. A milestone can span many sessions; partial progress is not completion.
+- Judge the milestone against the owner's idea and the whole existing product. Reject weakened criteria, scope drift or regressions hidden by a small passing checklist. A milestone can span many sessions; partial progress is not completion. A milestone made of hardening, recovery paths or verification tooling is itself drift unless the owner asked for it.
 - The product itself. Screenshots of the running app after this session (open and look at them):
 ${shotLines}
 - The lab's checks: ${checksLine || 'none ran'}.
 - What the builder says changed in session ${runNumber} (verify it, do not trust it): ${whatChanged ? clip(whatChanged, 500) : '(not reported)'}
 - Files changed this session: ${diffStat ? clip(diffStat, 600) : '(unknown)'}
 Read code only where it helps you judge what a person would experience.
+- Never ask for evidence the lab cannot produce (real devices, live services the builder cannot reach, owner playtests). If something can only be judged by the owner, say so once in the Rating note and move on.
 
 Do not modify any file. Reply with exactly this block and nothing after it:
 
-**Verdict:** better | same | worse — <one sentence, compared with before this session>
-**Rating:** <0-5>/5 — <how good the product is for a person right now>
+**Verdict:** better | same | worse — <one sentence: what the owner would notice, compared with before this session; polish nobody would notice is "same">
+**Rating:** <0-5>/5 — <1 = the owner would not open it again, 2 = interesting but not useful yet, 3 = they would try it once, 4 = they would come back to it, 5 = they would prefer it to what they use today>
 **Done:** yes | no — <does the current milestone meet its outcomes without weakening the product>
 **Top problems:**
-<numbered list of actionable problems that prevent this milestone being ready; write "none" if there are none. Future milestones are not blockers.>
-**Cut:** <what to delete or simplify, or "nothing">
+<at most 3, most important first: what most stands between this and something the owner would come back to. A missing capability or a broken main flow comes before anything else. Leave out edge cases, error recovery, storage limits and test coverage unless it breaks the main thing a person comes to do. Write "none" if there are none. Future milestones are not blockers.>
+**Cut:** <what to delete or simplify so the core is clearer, or "nothing">
 `
 }
 
