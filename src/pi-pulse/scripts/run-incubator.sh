@@ -255,6 +255,8 @@ if [ "${END[review]:-0}" = "1" ]; then
   printf '%s' "$REVIEW_OUTPUT" | node "$RUN_HELPER" review-apply "$STATUS_PATH" "$RUN_NUMBER" "$REVIEW_EXIT" "$REVIEWER" || true
 fi
 
+node "$RUN_HELPER" shadow-end "$STATUS_PATH" "$RUN_NUMBER" || true
+
 node "$RUN_HELPER" recent-runs "$LOG_FILE" "$RECENT_FILE"
 
 echo "$TAG done"
