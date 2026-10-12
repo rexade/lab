@@ -87,8 +87,21 @@ retrying, blocked, done and resting), for design work off the Pi.
   outright (never inside another repo) and never pushes.
 - **Agents never grade themselves.** A fresh, read-only agent reviews each kept
   session against the builder's `BRIEF.md`; its verdict (not a self-reported
-  gate) moves the stage and shows as the rating. The core lab loop still uses
-  the self-reported quality contract (`INCUBATOR_QUALITY.md`).
+  gate) moves the stage and shows as the rating. Core Claude and Codex runs
+  both enter through `run-lab.sh` and use the same controller. Their prompts
+  remain the freeform create/mutate/research rotation (harvest is manual).
+  Core reviews judge the seed, not milestones; core runs never graduate to done.
+- **Kept is not verified completion or release approval.** Missing automated
+  checks and absent browser evidence cannot certify a milestone. A failed or
+  incomplete browser probe blocks completion even when it is insufficient
+  evidence for a rollback. Completion requires a passing check or browser
+  inspection, no failed checks, and a successful independent milestone review.
+  A non-web project may use a passing check script without browser evidence.
+- **Core verification runs in `src/pi-pulse`.** Its build includes the trust
+  fixtures, UI rendering checks and API smoke tests. The static-app browser
+  harness cannot inspect the server-backed dashboard and is explicitly
+  unavailable for core sessions; this is not visual proof. Root run history,
+  steering, memory, project status and evidence survive core rollback.
 - **Unattended Claude runs name a permission mode.** `-p` cannot answer
   prompts, so the runner passes `--permission-mode` (`claudePermissionMode`,
   default `auto`) unless a manual run is bypassed.
@@ -101,7 +114,8 @@ retrying, blocked, done and resting), for design work off the Pi.
 - `npm run build` runs `test:trust` first: `trust-fixtures.mjs` (units and
   runner behavior with fake agents), `trust-ui.mjs` (the real JSX rendered to
   markup and checked for what a person must see), and `trust-smoke.mjs` (the
-  live server against a temp lab).
+  live server against a temp lab), plus `test:verification` (completion evidence
+  and core controller checks/rollback for both agents).
 
 ## Cleanup log
 

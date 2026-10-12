@@ -97286,3 +97286,21 @@ A good next version is one where opening Pi Pulse instantly answers:
 **Key finding:** The source trust suite is green and the live service is now fresh (`/api/health.source.changedSinceStart === false`) with JSON 404s for unknown `/api/*`, but real state still has runner drift: `projects/incubators.json` says `tidebound-harbor` has `"runner": "claude"` while `/api/incubators/tidebound-harbor` and `projects/tidebound-harbor/status.json` report `"runner": "codex"`, and the currently running Tidebound run is Codex. The launcher reads `status.json`, so `status.json` is the authority.
 **Implication:** The next build run should not rewrite the relay from scratch. It should reconcile or remove slot-level runner state, make any incubators.json-vs-status.json runner mismatch visible, and ensure a runner switch updates the only launch authority before the UI claims Claude is selected.
 **Suggested next move:** MUTATE: normalize runner state so `GET /api/incubators` either repairs stale `slot.runner` from `status.runner` or exposes a `runnerDrift` warning, then test switching `tidebound-harbor` or the newest real incubator to Claude and confirm `status.json`, preflight command, selected receipt, active run status, and history row all agree.
+
+## Run 192 — 2026-10-12 — MUTATE
+
+**What I changed:** Removed the optional Jev shadow evaluator, its evidence capture and policy reports, runner hooks, CLI, tests, documentation, and repository-local TypeSafe skill. Updated AGENTS.md to retain controller-owned acceptance and credential handling guidance.
+**Why:** The user requested removal because Jev was not adding value.
+**What improved:** Runs no longer capture shadow bundles or call the external evaluator. Existing deterministic checks, keep/revert behavior, and independent review remain in place; affected runtime files match the pre-Jev revision.
+**What broke:** No known new breakage. Full npm build could not pass the Windows trust harness: 29 of 63 fixtures failed, including shell execution, Windows ESM paths, and line-ending assertions. Standalone Vite build, modified JavaScript syntax checks, and git diff --check passed. Pi deployment was not performed.
+**Next move:** Verify the trust suite on Linux before deploying the removal to the Pi.
+
+## Run 193 — 2026-10-12 — MUTATE
+
+**What I changed:** Completion now requires positive automated evidence and rejects failed/incomplete browser checks. Both core agents enter the shared session controller, retaining freeform rotation and memory hooks. Core checks run in src/pi-pulse; rollback preserves root run records, steering and controller state. Added portable controller regression tests and updated lifecycle fixtures to supply explicit browser evidence.
+**Why:** Apply the approved review findings: software quality should not depend on the selected builder or its self-reported confidence.
+**What improved:** Both agents receive controller checks, keep/revert handling and fresh review. Missing browser tooling cannot certify completion. The workshop stays freeform and does not graduate through milestones.
+**What broke:** No new failure established. Four focused regressions and all 18 UI checks pass. The Windows trust suite still reports 29 of 63 fixture failures; server smoke stops at a launcher-path assertion. Core browser inspection is explicitly unavailable because the static-app harness cannot inspect the server-backed dashboard. No deployment performed.
+**Next move:** Run full Linux verification before deployment; add server-aware dashboard browser evidence separately.
+
+**Pre-push verification:** Full npm run build passed in an isolated Linux copy on testpi: all 63 trust fixtures, 18 UI checks, live API smoke, four verification regressions, and Vite production build. Corrected the legacy-baseline fixture's expected checker version from 2 to 3. The live Pi checkout has substantial separate uncommitted work and was not updated or restarted. Publishing to GitHub main is separate from deployment of that checkout.

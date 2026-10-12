@@ -9,9 +9,8 @@
     "preview": "vite preview",
     "preview:lab": "node scripts/preview-lab.mjs",
     "start": "node server.js",
-    "test:trust": "node scripts/trust-fixtures.mjs && node scripts/trust-ui.mjs && node scripts/trust-smoke.mjs && npm run test:shadow",
-    "test:shadow": "node --test scripts/trust-shadow.mjs",
-    "shadow": "node scripts/shadow-gate.mjs"
+    "test:trust": "node scripts/trust-fixtures.mjs && node scripts/trust-ui.mjs && node scripts/trust-smoke.mjs && npm run test:verification",
+    "test:verification": "node --test scripts/trust-verification.mjs"
   },
   "dependencies": {
     "express": "^4.18.2",

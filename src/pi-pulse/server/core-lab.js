@@ -1,11 +1,9 @@
 // Core "host" lab loop: the Pi Pulse project improving itself against the lab
-// root RUN_LOG.md. Claude runs go through the original run-lab.sh pipeline;
-// Codex runs go through the shared incubator runner with the core status file.
+// root RUN_LOG.md. Both agents share controller-owned checks and review.
 import fs from 'fs'
 import { join } from 'path'
 import { appendFailedPreflightEntry, preflightRunConfig, qualityStateFromRun, resolveClaudeModel } from '../server-core.js'
 import {
-  CODEX_INCUBATOR_SCRIPT,
   CORE_SEED_PATH,
   DAILY_SEED_PATH,
   DEFAULT_LAB_RUNNER,
@@ -25,8 +23,8 @@ export const LAB_RUNNERS = {
     args: [],
   },
   codex: {
-    script: CODEX_INCUBATOR_SCRIPT,
-    args: [PROJECT_STATUS_PATH],
+    script: join(LAB_ROOT, 'run-lab.sh'),
+    args: [],
   },
 }
 
@@ -104,7 +102,8 @@ export function startLabRun(runner = labScheduleState.runner, options = {}) {
   const lock = acquireRunLock({ kind: 'core', id: 'pi-pulse', runner: selected })
   if (!lock.ok) return null
   const cfg = LAB_RUNNERS[selected]
-  const runEnv = options.scheduled ? { PI_PULSE_SCHEDULED_RUN: '1' } : {}
+  const runEnv = { PI_PULSE_AGENT: selected, PI_PULSE_CORE_RUN: '1', PI_PULSE_CORE_STATUS_PATH: PROJECT_STATUS_PATH,
+    ...(options.scheduled ? { PI_PULSE_SCHEDULED_RUN: '1' } : {}) }
   if (selected === 'claude') {
     const status = readCoreStatus()
     const model = resolveClaudeModel(status.claudeModel)
@@ -133,7 +132,8 @@ export function syncProjectStatus() {
 
     const current = readCoreStatus()
 
-    const qualityState = latest ? qualityStateFromRun(latest, latest.type !== 'FAILED') : {}
+    const controlled = current.session?.run === latest?.num || current.lastSession?.run === latest?.num
+    const qualityState = latest && !controlled ? qualityStateFromRun(latest, latest.type !== 'FAILED') : {}
     const updated = {
       ...current,
       runCount: latest?.num ?? current.runCount ?? 0,

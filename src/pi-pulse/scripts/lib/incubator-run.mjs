@@ -15,8 +15,6 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { capturedFailureDetail, parseRunsFromLog, resolveClaudeModel, resolveClaudePermissionMode, resolveCodexReasoningEffort, summarizeRun } from '../../server-core.js'
 import { routeSlugForProject } from '../../server/util.js'
-import { beginEvidence, captureCandidate, captureReview, finalizeEvidence } from './shadow/evidence.mjs'
-import { evaluateBundle, shadowEnabled } from './shadow/gate.mjs'
 import {
   breakage,
   checksAllowCompletion,
@@ -48,6 +46,22 @@ const [command, ...args] = process.argv.slice(2)
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const APP_EVIDENCE_SCRIPT = process.env.APP_EVIDENCE_SCRIPT || path.join(HERE, '..', 'app-evidence.mjs')
 const CHECK_TIMEOUT_MS = Number(process.env.CHECK_TIMEOUT || 600) * 1000
+
+function isCore(status) {
+  return process.env.PI_PULSE_CORE_RUN === '1' || (status.project === 'pi-pulse' &&
+    path.resolve(status.repo) === path.resolve(process.env.LAB_DIR || path.join(HERE, '../../../..')))
+}
+
+function sessionChecks(status, label) {
+  return runChecks({ repo: isCore(status) ? path.join(status.repo, 'src/pi-pulse') : status.repo,
+    label, appEvidenceScript: isCore(status) ? null : APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
+}
+
+function coreRunType(runNumber) {
+  const requested = process.env.PI_PULSE_RUN_TYPE
+  return ['create', 'mutate', 'research', 'harvest'].includes(requested)
+    ? requested : ['create', 'mutate', 'research', 'mutate'][(Number(runNumber) - 1) % 4]
+}
 
 // Fields of the retired self-graded quality contract. Sessions are judged by
 // the lab's checks and an independent review instead, so a stale self-grade
@@ -183,13 +197,16 @@ function finishSession(status, extra = {}) {
     startedAt: session.startedAt ?? null,
     endedAt: new Date().toISOString(),
     outcome: session.outcome ?? status.lastOutcome ?? null,
-    ...(session.shadowBundle ? { shadowBundle: session.shadowBundle, shadowError: session.shadowError || null } : {}),
     ...extra,
   }
   delete status.session
 }
 
 function advanceSession(status, session, review = null) {
+  if (isCore(status)) {
+    status.stage = 'building'
+    return
+  }
   const milestone = milestoneSnapshot(status.repo)
   const newMilestone = Boolean(milestone && milestone.key !== status.lastMilestone?.key && !(status.milestoneHistory || []).some(m => m.key === milestone.key))
   const checks = status.lastSessionChecks
@@ -230,6 +247,7 @@ const commands = {
     const godot = status.godotAi || {}
     printValues({
       agent,
+      core: isCore(status) ? '1' : '',
       reviewer: reviewerFor(status, agent),
       project: status.project,
       repo: status.repo,
@@ -270,12 +288,12 @@ const commands = {
       const previous = milestoneSnapshot(repo)
       if (previous) status.lastMilestone = { ...previous, legacy: true }
     }
-    const stage = sessionStage(status, briefExists(repo))
+    const stage = isCore(status) ? 'building' : sessionStage(status, briefExists(repo))
     const ratchet = prepareRatchet({ repo, lastGoodCommit: status.lastGoodCommit || null, runNumber })
     let baselineChecks = null
     if (ratchet.ratchet === 'on') {
       const known = status.lastChecks?.version === CHECKS_VERSION && status.lastGoodCommit === ratchet.baseline && !ratchet.adopted
-      baselineChecks = known ? status.lastChecks : runChecks({ repo, label: `${runNumber}-baseline`, appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
+      baselineChecks = known ? status.lastChecks : sessionChecks(status, `${runNumber}-baseline`)
     }
     status.stage = stage
     status.polishSessions = 0
@@ -285,20 +303,12 @@ const commands = {
       run: Number(runNumber),
       startedAt: new Date().toISOString(),
       stage,
-      type: STAGE_TYPE[stage],
+      type: isCore(status) ? coreRunType(runNumber).toUpperCase() : STAGE_TYPE[stage],
       ratchet: ratchet.ratchet,
       baseline: ratchet.baseline,
       baselineChecks,
       milestoneBefore: milestoneSnapshot(repo),
       leftovers: ratchet.leftovers,
-    }
-    if (shadowEnabled(status)) {
-      try {
-        const feedback = readText(feedbackPathFor(status))
-        status.session.shadowBundle = beginEvidence({ statusPath, status, session: status.session, feedback, idea: ideaFor(status, feedback, readText(path.join(repo, 'README.md'))) })
-      } catch {
-        status.lastShadow = { run: Number(runNumber), mode: 'shadow', error: 'Baseline evidence could not be captured.' }
-      }
     }
     writeJsonAtomic(statusPath, status)
     const note = ratchet.ratchet === 'off'
@@ -306,7 +316,7 @@ const commands = {
       : ratchet.adopted ? 'existing work committed as the baseline'
         : ratchet.leftovers === 'stashed' ? "an interrupted session's changes were set aside (git stash)"
           : ratchet.leftovers === 'committed' ? "an interrupted session's changes were committed as a checkpoint" : ''
-    printValues({ stage, type: STAGE_TYPE[stage], ratchet: ratchet.ratchet, baseline: ratchet.baseline || '', note })
+    printValues({ stage, type: status.session.type, ratchet: ratchet.ratchet, baseline: ratchet.baseline || '', note })
   },
 
   'session-prompt'([statusPath, runNumber, today]) {
@@ -314,6 +324,12 @@ const commands = {
     const repo = status.repo
     const feedbackText = readText(feedbackPathFor(status))
     const session = status.session || {}
+    if (isCore(status)) {
+      const type = coreRunType(runNumber)
+      const prompt = fs.readFileSync(path.join(repo, 'prompts', `${type}.md`), 'utf8')
+      process.stdout.write(`Workshop session ${runNumber}, ${today}, ${type.toUpperCase()}.\nFollow README.md, DAILY_SEED.md and TASTE_PROFILE.md. Keep the workshop freeform; do not create milestones.\nThe controller runs checks, commits or reverts product changes, and obtains an independent review. Do not commit or rewrite git history. Self-reported ratings are commentary, not verification.\nLatest owner steering:\n${feedbackText}\n${status.latestUserFeedback || ''}\n\n${prompt}`)
+      return
+    }
     const stage = session.stage || sessionStage(status, briefExists(repo))
     const lastOutcome = [
       lastOutcomeSentence(status),
@@ -363,14 +379,6 @@ const commands = {
     let checks = null
     let commit = null
 
-    const changed = ratchetOn ? productChanged(repo, session.baseline) : true
-    if (agentOk) checks = runChecks({ repo, label: String(run), appEvidenceScript: APP_EVIDENCE_SCRIPT, timeoutMs: CHECK_TIMEOUT_MS })
-    if (session.shadowBundle) {
-      try {
-        captureCandidate({ dir: session.shadowBundle, repo, session, checks, fields: runFields(readText(status.runLog), run), agentExit })
-      } catch { session.shadowError = 'Candidate evidence could not be captured.' }
-    }
-
     if (!agentOk) {
       outcome = 'failed'
       reason = agentExit === '124' || agentExit === '137' ? `${agent} ran out of time` : `${agent} exited ${agentExit}`
@@ -378,9 +386,12 @@ const commands = {
         const reverted = revertSession(repo, session.baseline)
         reason += reverted.ok ? '; its changes were discarded' : `; its changes could not be discarded (${reverted.error})`
       }
-    } else if (ratchetOn && !changed) {
+    } else if (ratchetOn && !productChanged(repo, session.baseline)) {
       outcome = 'no-changes'
+      // Fresh checks: unchanged files alone do not prove a milestone is complete.
+      checks = sessionChecks(status, String(run))
     } else {
+      checks = sessionChecks(status, String(run))
       const problems = breakage(session.baselineChecks, checks)
       if (problems.length && ratchetOn) {
         const reverted = revertSession(repo, session.baseline)
@@ -433,6 +444,10 @@ const commands = {
       status.lastChecks = checks
       status.lastGoodCommit = ratchetOn ? (commit || session.baseline) : null
       if (session.startedAt) status.notesSeenAt = session.startedAt
+      if (isCore(status) && status.feedbackUpdatedAt && status.feedbackUpdatedAt <= session.startedAt) {
+        status.feedbackConsumedAt = status.feedbackUpdatedAt
+        status.feedbackConsumedRun = run
+      }
       if (checks?.app?.shots?.length) {
         status.keptEvidence = [...(status.keptEvidence || []), { run, evidence: checks.app.evidence, shots: checks.app.shots, at: new Date().toISOString() }].slice(-3)
       }
@@ -467,8 +482,10 @@ const commands = {
     const checks = status.lastSessionChecks
     const fields = runFields(readText(status.runLog), run)
     const shots = (checks?.app?.shots || []).map(file => path.join('reports', 'evidence', checks.app.evidence, file))
-    const shadow = session.shadowBundle && !session.shadowError
-    const beforeShots = shadow ? (session.baselineChecks?.app?.shots || []).map(file => path.join(session.shadowBundle, 'before', 'screenshots', file)).filter(file => fs.existsSync(file)) : []
+    if (isCore(status)) {
+      process.stdout.write(`You are a fresh, read-only reviewer of workshop session ${run}. Read DAILY_SEED.md, TASTE_PROFILE.md, the owner's USER_FEEDBACK.md, the changed code and tests. Judge the actual change against the seed; do not invent milestones. Builder claims are not evidence.\nChanges: ${diffStat(repo, session.baseline)}\nChecks: ${checksLine(checks)}\nScreenshots to inspect: ${shots.map(file => path.join('src/pi-pulse', file)).join(', ') || 'unavailable'}\nReply with:\n**Verdict:** better | same | worse - reason\n**Rating:** <0-5>/5\n**Done:** no\n**Top problems:**\n<numbered actionable problems, or none>\n**Cut:** <what to simplify, or nothing>\n`)
+      return
+    }
     process.stdout.write(reviewPrompt({
       name: status.displayName || status.incubatorTitle || status.project,
       idea: ideaFor(status, readText(feedbackPathFor(status)), readText(path.join(repo, 'README.md'))),
@@ -476,9 +493,7 @@ const commands = {
       whatChanged: fields['What changed'] || fields.Goal || '',
       diffStat: diffStat(repo, session.baseline),
       checksLine: checksLine(checks),
-      shots: shadow ? shots.map(file => path.join(session.shadowBundle, 'after', 'screenshots', path.basename(file))).filter(file => fs.existsSync(file)) : shots,
-      beforeShots,
-      visualComparison: Boolean(shadow),
+      shots,
       milestoneBefore: session.milestoneBefore,
       milestone: milestoneSnapshot(repo),
     }))
@@ -512,44 +527,11 @@ const commands = {
       status.lastReviewError = reviewExit === '0' ? 'the reviewer returned no verdict' : `the reviewer exited ${reviewExit}`
     }
     const session = status.session?.run === run ? status.session : { stage: status.stage, outcome: 'kept' }
-    if (session.shadowBundle && !session.shadowError) {
-      try {
-        const visual = review.ok ? body.match(/^\*\*Visual comparison:\*\*\s*(.*)$/m)?.[1]?.trim() : null
-        captureReview(session.shadowBundle, {
-          available: review.ok, reviewer, exit: Number(reviewExit), at, assessment: review, text: body,
-          visualComparison: visual && !/^(unavailable|unknown|not applicable|none)\b/i.test(visual) ? visual : null,
-        })
-      } catch { session.shadowError = 'Reviewer evidence could not be captured.' }
-    }
     advanceSession(status, session, review.ok ? { ...review, reviewer } : null)
     finishSession(status, { review: review.ok ? review.verdict : 'unavailable' })
     writeJsonAtomic(statusPath, status)
     console.log(`review=${review.ok ? reviewLine(review) : status.lastReviewError}`)
     console.log(`stage=${status.stage}`)
-  },
-
-  async 'shadow-end'([statusPath, runNumber]) {
-    const status = readJson(statusPath)
-    const run = Number(runNumber)
-    const session = status.session?.run === run ? status.session : status.lastSession?.run === run ? status.lastSession : null
-    if (!session?.shadowBundle) return
-    let record
-    try {
-      if (session.shadowError) throw new Error('Incomplete evidence')
-      if (!fs.existsSync(path.join(session.shadowBundle, 'manifest.json'))) {
-        finalizeEvidence(session.shadowBundle, { run, outcome: status.lastOutcome, reason: status.lastOutcomeReason, commit: status.lastGoodCommit, at: status.lastOutcomeAt })
-      }
-      const result = await evaluateBundle(session.shadowBundle)
-      record = { run, mode: 'shadow', bundle: session.shadowBundle, ...result, at: new Date().toISOString() }
-      console.log(`shadow=${result.policy.action} (observational only)`)
-    } catch {
-      record = { run, mode: 'shadow', bundle: session.shadowBundle, error: session.shadowError || 'Shadow evaluation unavailable; actual outcome unchanged.' }
-      console.log('shadow=unavailable (actual outcome unchanged)')
-    }
-    // Owner controls may have changed while the evaluator request was in flight.
-    const current = readJson(statusPath)
-    if (!(current.lastShadow?.run > run)) current.lastShadow = record
-    writeJsonAtomic(statusPath, current)
   },
 }
 
@@ -564,5 +546,5 @@ if (invokedDirectly()) {
     console.error(`usage: incubator-run.mjs <${Object.keys(commands).join('|')}> ...`)
     process.exit(64)
   }
-  await commands[command](args)
+  commands[command](args)
 }

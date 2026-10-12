@@ -25,6 +25,19 @@ The workshop is not itself a product. But its whole reason to exist is to produc
 
 ## The Loop
 
+Both core agents now use `run-lab.sh` and the shared session controller. The
+workshop keeps its freeform rotation and `prompts/`; it does not acquire product
+milestones. The controller runs Pi Pulse checks in `src/pi-pulse`, commits or
+reverts product changes, and requests a fresh read-only review against the seed.
+Memory generation and saving remain part of the loop. Root run records, steering
+and controller state survive rollback. Self-reported quality fields are commentary
+for these sessions, not controller verification.
+
+Keeping a session, verifying a product milestone, and approving a release are
+different decisions. Missing checks or failed/incomplete browser evidence cannot
+certify milestone completion. Core build/API checks are automated; visual dashboard
+verification still needs a server-aware browser harness.
+
 ```
 DAILY_SEED.md  (human, edited rarely)
        │

@@ -25,7 +25,9 @@ const LAB_GIT = ['-c', 'user.name=Pi Pulse lab', '-c', 'user.email=lab@pi-pulse.
 // the project's own .gitignore is never edited).
 const LAB_EXCLUDES = ['reports/stdout/', 'reports/evidence/', 'node_modules/', '__pycache__/', '*.pyc', '.venv/', 'venv/', '.pytest_cache/', '.mypy_cache/', '.cache/', '.DS_Store']
 // reports/ holds the lab's own history (run log, notes, reviews): it survives reverts.
-const OUTSIDE_REPORTS = ['--', '.', ':(exclude)reports']
+const OUTSIDE_REPORTS = ['--', '.', ':(exclude)reports', ...(process.env.PI_PULSE_CORE_RUN === '1'
+  ? ['RUN_LOG.md', 'RECENT_RUNS.md', 'MEMORY_BRIEF.md', 'ACTIVE_THREADS.md', 'USER_FEEDBACK.md', 'DRIFT_FEEDBACK.md', 'DRIFT_FEEDBACK.json', 'projects', 'memory', 'stdout', 'src/pi-pulse/reports'].map(file => `:(exclude)${file}`)
+  : [])]
 
 const clip = (text, max) => {
   const value = String(text ?? '').replace(/\s+/g, ' ').trim()
@@ -255,7 +257,7 @@ ${BRIEF_TEMPLATE}
 `
 }
 
-export function reviewPrompt({ name = 'this project', idea = '', runNumber = 1, whatChanged = '', diffStat = '', checksLine = '', shots = [], beforeShots = [], visualComparison = false, milestoneBefore = null, milestone = null }) {
+export function reviewPrompt({ name = 'this project', idea = '', runNumber = 1, whatChanged = '', diffStat = '', checksLine = '', shots = [], milestoneBefore = null, milestone = null }) {
   const shotLines = shots.length
     ? shots.map(shot => `  - ${shot}`).join('\n')
     : '  (none: this is not a web app, or the browser was unavailable)'
@@ -272,7 +274,6 @@ WHAT TO LOOK AT
 - Judge the milestone against the owner's idea and the whole existing product. Reject weakened criteria, scope drift or regressions hidden by a small passing checklist. A milestone can span many sessions; partial progress is not completion.
 - The product itself. Screenshots of the running app after this session (open and look at them):
 ${shotLines}
-${visualComparison ? `- Before-session screenshots for comparison (open both versions; do not infer appearance from filenames):\n${beforeShots.map(shot => `  - ${shot}`).join('\n') || '  (unavailable)'}` : ''}
 - The lab's checks: ${checksLine || 'none ran'}.
 - What the builder says changed in session ${runNumber} (verify it, do not trust it): ${whatChanged ? clip(whatChanged, 500) : '(not reported)'}
 - Files changed this session: ${diffStat ? clip(diffStat, 600) : '(unknown)'}
@@ -286,7 +287,6 @@ Do not modify any file. Reply with exactly this block and nothing after it:
 **Top problems:**
 <numbered list of actionable problems that prevent this milestone being ready; write "none" if there are none. Future milestones are not blockers.>
 **Cut:** <what to delete or simplify, or "nothing">
-${visualComparison ? '**Visual comparison:** <specific observed before/after differences with screenshot filenames; write "unavailable" if either version could not be inspected>' : ''}
 `
 }
 
@@ -379,6 +379,7 @@ export function checksLine(checks = null) {
     const how = errors ? ` with ${errors} error${errors === 1 ? '' : 's'}` : app.blank === false ? ' cleanly' : app.blank === true ? '' : '; render check incomplete'
     parts.push(`app opened${app.blank === true ? ' blank' : ''}${how}`)
     if (app.inspectionComplete === false) parts.push('browser inspection incomplete')
+    if (app.state === 'FAIL') parts.push('browser behavior check failed')
   } else if (app?.state === 'unavailable') {
     parts.push('browser unavailable')
   }
@@ -390,7 +391,9 @@ export function checksLine(checks = null) {
 export function checksAllowCompletion(checks) {
   if (!checks || breakage(null, checks).length) return false
   const app = checks.app
-  return app?.state !== 'unavailable' && app?.state !== 'NEEDS-EVIDENCE' && app?.inspectionComplete !== false && (!app?.ran || app.blank === false)
+  if (!app || !['n/a', 'PASS'].includes(app.state)) return false
+  if (app.state === 'PASS' && (!app.ran || app.inspectionComplete !== true || app.blank !== false)) return false
+  return checks.check?.state === 'pass' || (checks.check?.state === 'none' && app.state === 'PASS')
 }
 
 // ─── Git ──────────────────────────────────────────────────────────────────────
@@ -525,7 +528,7 @@ function checkCommands(repo) {
 
 // Cached baselines from the old checker may contain the false blank-page
 // observation, or error counts from a different viewport collection strategy.
-export const CHECKS_VERSION = 2
+export const CHECKS_VERSION = 3
 
 export function runChecks({ repo, label, appEvidenceScript = null, timeoutMs = 600000 }) {
   const result = { version: CHECKS_VERSION, at: new Date().toISOString(), check: { state: 'none', command: null, detail: '' }, app: { state: 'n/a', ran: false } }
@@ -534,7 +537,8 @@ export function runChecks({ repo, label, appEvidenceScript = null, timeoutMs = 6
     result.check.command = plan.label
     result.check.state = 'pass'
     for (const [command, args] of plan.commands) {
-      const run = spawnSync(command, args, { cwd: repo, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, CI: '1', FORCE_COLOR: '0' } })
+      const run = spawnSync(command, args, { cwd: repo, encoding: 'utf8', timeout: timeoutMs,
+        env: { ...process.env, PI_PULSE_CORE_RUN: '', PI_PULSE_AGENT: '', PI_PULSE_RUN_TYPE: '', CI: '1', FORCE_COLOR: '0' } })
       if (run.status !== 0) {
         result.check.state = 'fail'
         result.check.detail = run.error?.code === 'ETIMEDOUT' || run.signal
@@ -545,6 +549,7 @@ export function runChecks({ repo, label, appEvidenceScript = null, timeoutMs = 6
     }
   }
   const isWeb = fs.existsSync(path.join(repo, 'index.html'))
+  if (isWeb) result.app = { state: 'unavailable', ran: false }
   if (isWeb && appEvidenceScript && fs.existsSync(appEvidenceScript)) {
     spawnSync(process.execPath, [appEvidenceScript, '--repo', repo, '--run', label, '--type', 'session'], { cwd: repo, encoding: 'utf8', timeout: 240000 })
     const dir = path.join(repo, 'reports', 'evidence', `run-${label}`)

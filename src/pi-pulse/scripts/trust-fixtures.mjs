@@ -1184,7 +1184,8 @@ function runRunner(script, args, env) {
 
 function session(fx, env = {}) {
   return runRunner(join(root, 'scripts', 'run-incubator.sh'), [fx.statusPath], {
-    LAB_DIR: fx.dir, PI_PULSE_AGENT: 'codex', CODEX_BIN: join(fx.bin, 'codex'), CLAUDE_BIN: join(fx.bin, 'claude'), FAKE_ARGS_OUT: fx.argsPath, ...env,
+    LAB_DIR: fx.dir, PI_PULSE_AGENT: 'codex', CODEX_BIN: join(fx.bin, 'codex'), CLAUDE_BIN: join(fx.bin, 'claude'), FAKE_ARGS_OUT: fx.argsPath,
+    ...(fx.evidenceScript ? { APP_EVIDENCE_SCRIPT: fx.evidenceScript } : {}), ...env,
   })
 }
 
@@ -1361,6 +1362,14 @@ function testNotesComeFirstAndAreNewUntilASessionKeepsThem() {
 // A product keeps developing after each independently reviewed milestone.
 function testProjectsMoveFromShapingToDone() {
   const fx = runnerFixture('stages')
+  fx.evidenceScript = join(fx.bin, 'evidence.mjs')
+  fs.writeFileSync(fx.evidenceScript, `import fs from 'node:fs'; import path from 'node:path';
+const args = process.argv.slice(2);
+const value = key => args[args.indexOf(key) + 1];
+const dir = path.join(value('--repo'), 'reports/evidence', 'run-' + value('--run'));
+fs.mkdirSync(dir, {recursive:true});
+fs.writeFileSync(path.join(dir, 'summary.json'), JSON.stringify({evidenceMode:'semantic',gate:'PASS',blank:false,inspectionComplete:true,pageErrorCount:0,consoleErrorCount:0}));
+`)
   session(fx, { FAKE_REVIEW: 'yes' })
   assert.equal(fx.status().stage, 'polishing', 'a reviewer who finds the brief met moves the project to polishing')
   session(fx, { FAKE_MODE: 'idle', FAKE_REVIEW: 'yes' })
@@ -1418,7 +1427,7 @@ function testLegacyBrowserBaselinesAreRechecked() {
   })
   assert.equal(result.status, 0, result.stderr)
   const baseline = fx.status().session.baselineChecks
-  assert.equal(baseline.version, 2)
+  assert.equal(baseline.version, 3)
   assert.equal(baseline.check.state, 'pass')
   assert.notEqual(baseline.app.blank, true, 'an old false-blank receipt must not mask a future real regression')
 }

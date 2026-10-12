@@ -49,6 +49,9 @@ read_values() {
 
 declare -A CFG=()
 read_values CFG node "$RUN_HELPER" config "$STATUS_PATH"
+if [ -n "${CFG[core]}" ]; then
+  export PI_PULSE_CORE_RUN=1
+fi
 
 AGENT=${CFG[agent]}
 REVIEWER=${CFG[reviewer]:-$AGENT}
@@ -114,6 +117,9 @@ RUN_NUMBER=$((RUN_COUNT + 1))
 declare -A SES=()
 read_values SES node "$RUN_HELPER" session-begin "$STATUS_PATH" "$RUN_NUMBER"
 RUN_TYPE=${SES[type]:-BUILD}
+if [ "${PI_PULSE_CORE_RUN:-0}" = "1" ]; then
+  bash "$LAB_DIR/generate-brief.sh" "${RUN_TYPE,,}" || echo "$TAG memory brief unavailable"
+fi
 
 if [ "$AGENT" = "codex" ] && [ -n "${CFG[godotAiEnabled]}" ]; then
   GODOT_AI_ENABLED=${CFG[godotAiEnabled]}
@@ -190,6 +196,9 @@ $OUTPUT"
 fi
 
 STDOUT_DIR="$(dirname "$LOG_FILE")/stdout"
+if [ "${PI_PULSE_CORE_RUN:-0}" = "1" ]; then
+  STDOUT_DIR="$PROJECT_DIR/reports/stdout"
+fi
 STDOUT_FILE="$STDOUT_DIR/$AGENT-run-$RUN_NUMBER.log"
 mkdir -p "$STDOUT_DIR"
 printf '%s\n' "$OUTPUT" > "$STDOUT_FILE"
@@ -224,7 +233,7 @@ fi
 
 # --- Session end: lab checks, then keep (commit) or revert ---------------------
 declare -A END=()
-read_values END node "$RUN_HELPER" session-end "$STATUS_PATH" "$RUN_NUMBER" "$TODAY" "$AGENT_EXIT" "$AGENT" "$CLAUDE_MODEL" "$STDOUT_FILE" || true
+read_values END node "$RUN_HELPER" session-end "$STATUS_PATH" "$RUN_NUMBER" "$TODAY" "$AGENT_EXIT" "$AGENT" "$CLAUDE_MODEL" "$STDOUT_FILE"
 echo "$TAG session #$RUN_NUMBER ${END[outcome]:-unrecorded}${END[reason]:+ - ${END[reason]}}"
 
 # --- Independent review: a fresh, read-only agent judges the product ----------
@@ -255,8 +264,9 @@ if [ "${END[review]:-0}" = "1" ]; then
   printf '%s' "$REVIEW_OUTPUT" | node "$RUN_HELPER" review-apply "$STATUS_PATH" "$RUN_NUMBER" "$REVIEW_EXIT" "$REVIEWER" || true
 fi
 
-node "$RUN_HELPER" shadow-end "$STATUS_PATH" "$RUN_NUMBER" || true
-
 node "$RUN_HELPER" recent-runs "$LOG_FILE" "$RECENT_FILE"
 
 echo "$TAG done"
+if [ "${PI_PULSE_CORE_RUN:-0}" = "1" ]; then
+  bash "$LAB_DIR/save-run.sh" "$RUN_NUMBER" || echo "$TAG memory save failed"
+fi
